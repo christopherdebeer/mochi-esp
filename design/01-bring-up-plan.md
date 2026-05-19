@@ -329,6 +329,21 @@ peripherals in parallel rather than serially:
   - **M9.f.2.1** ✅ half-duplex mic-mute during SPEAKING phase
     (defence-in-depth against feedback loops without AEC);
     user + assistant transcripts captured into the diag log.
+  - **M9.f.3** 🔄 software-reference AEC engaged (on-hardware
+    validation pending). `voice/voice_aec.{c,h}` owns the ref ring
+    buffer (64 KB PSRAM, lock-free SPSC), 24↔16 kHz linear
+    resamplers, and the esp-sr `aec_create`/`aec_process` binding.
+    `espressif/esp-sr ^2.4.4` is declared in `idf_component.yml`;
+    `VOICE_AEC_USE_ESP_SR=1`; `voice_peer.c::open_audio_playback`
+    calls `voice_aec_set_enabled(true)` immediately after init.
+    Reference tap in `pc_on_audio_data` between decode and I²S
+    write; process call in `mic_task` between I²S read and the
+    half-duplex mute gate. The mute is retired from the hot path:
+    `voice_peer_mic_should_mute()` short-circuits to false whenever
+    AEC is enabled, so a healthy session runs full-duplex. The
+    gate only fires if `aec_create` fails — a graceful degradation
+    back to M9.f.2.1's behaviour. Validation steps in
+    `07-voice-architecture.md` § "Software-reference AEC".
   - **M9.g** ✅ persona fetch from
     `GET /api/voice/realtime-instructions` (re-introduced
     server-side route in mochi-val for the device path; the
@@ -341,9 +356,12 @@ peripherals in parallel rather than serially:
     All 12 tools route the same way.
 
   **Remaining for full M9 acceptance.**
-  - Software-reference AEC (the half-duplex mute is a stop-gap;
-    full-duplex barge-in needs AFE_VC fed our I²S output as the
-    reference channel).
+  - Software-reference AEC on-hardware bring-up: AEC is engaged
+    by default (mute retired from the hot path) but has never run
+    on the device. Validate diag counters
+    (`pushed/pulled/under/over/proc`), confirm `muted` counter
+    stays at 0, check for audible bleed, exercise barge-in, and
+    tune `AEC_FILTER_LENGTH_MS` / mode if needed.
   - 5-min stability soak across the acceptance criteria below.
   - End-to-end on-hardware tool-call validation (M9.h is wired
     + builds + the dispatcher worker started OK in test logs;

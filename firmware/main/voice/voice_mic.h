@@ -21,11 +21,12 @@
  * with the session.
  *
  * Caveats:
- *   - No AEC. Mochi's own audio leaks back through the speaker into
- *     the mic. Server-side semantic_vad with eagerness="low" + the
- *     mint's transcription config provides defence-in-depth, but
- *     ping-pong loops are still possible in noisy environments.
- *     Software-reference AEC is M9.h+ work.
+ *   - Echo defence: voice_aec (software-reference AEC against
+ *     decoded speaker PCM) is the live path. The half-duplex mute
+ *     in voice_peer_mic_should_mute() runs only when AEC failed
+ *     to init — voice_peer_mic_should_mute() short-circuits to
+ *     false whenever voice_aec_is_enabled() is true. Server-side
+ *     semantic_vad with eagerness="low" remains the outer guard.
  *   - Mic gain comes from codec_board's default (30 dB ES8311 PGA).
  *     If voice is too quiet or clipping, tune via
  *     esp_codec_dev_set_in_gain.

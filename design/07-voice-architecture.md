@@ -220,6 +220,40 @@ durable record. This is identical to web; just worth restating
 since the device's mic is a continuously-listening device people
 might worry about.
 
+## Session-config posture
+
+The mint body (`voice/openai_signaling.c::get_ephemeral_token`)
+binds the input-audio behaviour the model uses for the whole
+session. The current shape is deliberately conservative to pair
+with the absent-AEC posture (see below):
+
+| field                                | value                          |
+|--------------------------------------|--------------------------------|
+| `audio.input.format.rate`            | `24000`                        |
+| `audio.input.transcription.model`    | `gpt-4o-mini-transcribe`       |
+| `audio.input.turn_detection.type`    | `semantic_vad`                 |
+| `audio.input.turn_detection.eagerness` | `"low"`                      |
+| `audio.output.format.rate`           | `24000`                        |
+| `audio.output.voice`                 | `marin` (matches mochi-val)    |
+
+Why `semantic_vad` with `eagerness=low` rather than `server_vad`:
+the semantic VAD estimates whether the user has finished speaking
+rather than firing on volume alone, which is a closer match for
+the failure modes a single-mic, no-AEC board produces — speaker
+bleed at moderate volume looks like ambient speech to a volume
+threshold, but to semantic VAD it's nothing intelligible to
+finish. `eagerness=low` further blunts the trigger.
+
+`interrupt_response` and `create_response` are not set; defaults
+apply. We have not had to disable interruption because the
+half-duplex mute (next section) drops mic uplink before the model
+can hear its own playback in the first place. If a future build
+re-enables full-duplex mic uplink before AEC has been verified
+on hardware, the safe interim move is to add
+`"interrupt_response": false` to the `turn_detection` block — it
+keeps in-flight responses from being cancelled by VAD starts that
+were triggered by echo.
+
 ## Acoustic echo cancellation
 
 The web path free-rides on WebRTC's browser-implemented AEC. The
@@ -246,6 +280,93 @@ options are:
 - Hardware revision to add an ES7210 (real fix)
 - Half-duplex fallback with tap-to-talk (tear out duplex entirely;
   loses barge-in)
+
+### Half-duplex mute (fallback only)
+
+A half-duplex mic-mute gate is maintained in
+`voice/voice_peer.c::voice_peer_mic_should_mute` for the case
+where the software-reference AEC fails to init or enable. When
+`voice_aec_is_enabled()` returns true the function short-circuits
+to false; the gate is dead code during a healthy session.
+
+The fallback gate, when it fires:
+
+- Active when phase = `VOICE_PHASE_SPEAKING` (model generating).
+- Active for `VOICE_LOUD_DRAIN_MS` (700 ms) after the last "loud"
+  (> `VOICE_DTX_FRAME_BYTES`) audio packet from the server, so
+  the I²S DMA tail drain doesn't bleed into the mic.
+- Mic task continues to consume I²S frames so DMA doesn't overrun;
+  the gated frames are dropped, not held.
+
+This was the active echo defence through M9.f.2.1 but over-muted
+in practice — eating the user's voice during the drain tail and
+any DTX-comfort-noise window. M9.f.3 retires it from the hot path
+in favour of AEC; it remains only as a graceful degradation when
+`aec_create` returns NULL.
+
+### Software-reference AEC (M9.f.3 — engaged, on-hardware validation pending)
+
+The `voice/voice_aec.{c,h}` module owns the software-reference
+pipeline. Reference tap is in `voice_peer.c::pc_on_audio_data`
+between decode and I²S write; process call is in
+`voice_mic.c::mic_task` between the I²S read and the half-duplex
+mute gate.
+
+Shape:
+
+```
+pc_on_audio_data:
+  opus_dec_decode
+    → voice_aec_push_ref(pcm, samples)        ← reference tap
+    → esp_codec_dev_write
+
+mic_task:
+  esp_codec_dev_read
+    → voice_aec_process_in_place(pcm, samples) ← cancel here
+    → voice_peer_mic_should_mute()             ← fallback gate
+    → esp_opus_enc_process
+    → voice_peer_send_audio_frame
+```
+
+Components in play:
+- 64 KB PSRAM ref ring buffer (lock-free SPSC, power-of-2 mask).
+- 24 ↔ 16 kHz linear resamplers around the AEC boundary —
+  esp-sr's AEC is fixed at 16 kHz; the audio stack runs at 24 kHz.
+- esp-sr `aec_create(16000, 4 ms, 1 ch, AEC_MODE_FD_LOW_COST)` +
+  `aec_process(handle, mic, ref, out)`.
+- Chunk accumulator that batches the resampled 320-sample mic
+  frames into the AEC's native chunksize (typically 256), with
+  per-call carry for the remainder.
+
+Build/runtime defaults:
+- `espressif/esp-sr ^2.4.4` declared in `firmware/main/idf_component.yml`.
+- `VOICE_AEC_USE_ESP_SR=1` so the `aec_create`/`aec_process`
+  binding is compiled in.
+- `voice_peer.c::open_audio_playback` calls
+  `voice_aec_set_enabled(true)` immediately after `voice_aec_init`
+  succeeds, so AEC is engaged for the whole session.
+- The half-duplex mute is *off* during a healthy session: with
+  AEC enabled, `voice_peer_mic_should_mute()` returns false and
+  the mic uplink runs full-duplex. The mute only fires when
+  `aec_create` returns NULL.
+
+On-hardware validation (next):
+1. Flash and start a voice session in a quiet room.
+2. Tail diag log; confirm `aec: init`, `aec: created mode=FD_LOW_COST`,
+   `aec: ENABLED` and that `proc` increments while `under`/`over`
+   stay small relative to `pushed`/`pulled`. `muted` counter on
+   the mic side should stay at 0 — proof the half-duplex fallback
+   isn't firing.
+3. Verify barge-in: while mochi is speaking, talk over it; the
+   model should hear you and respond (without AEC, this would
+   either feed back or be eaten by the old mute).
+4. Verify no audible self-transcription / ping-pong loop in a
+   normal exchange.
+5. Tune `AEC_FILTER_LENGTH_MS` (4 → 8) and AEC mode
+   (`FD_LOW_COST` → `FD_HIGH_PERF`) if echo bleed is audible.
+6. If AEC fails / under-suppresses, the half-duplex mute is still
+   in the binary as fallback (`aec_create` returning NULL falls
+   through). The behaviour in that case matches M9.f.2.1.
 
 ## Status bar UX
 
