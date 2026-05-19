@@ -238,9 +238,9 @@ static void open_audio_playback(uint32_t sample_rate, uint8_t channel) {
         LOGE_DIAG("esp_codec_dev_open rc=%d", rc);
         return;
     }
-    /* Default volume; turning down to 60 to be polite during bring-up.
-     * The user can yell "louder" once the loop works. */
-    esp_codec_dev_set_out_vol(s_peer.play_dev, 60);
+    /* 85 is loud-but-not-shouty for the Waveshare's small speaker.
+     * Above ~90 the ES8311 starts to clip noticeably. */
+    esp_codec_dev_set_out_vol(s_peer.play_dev, 85);
     s_peer.play_open = true;
     LOGI_DIAG("playback open: %lu Hz, %d ch",
         (unsigned long)sample_rate, channel);
