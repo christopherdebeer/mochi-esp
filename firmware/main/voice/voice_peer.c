@@ -107,6 +107,15 @@ static const char *phase_name(voice_phase_t p) {
 #define VOICE_IDLE_CAP_MS     (60   * 1000)
 #define VOICE_HARD_CAP_MS     (5    * 60 * 1000)
 
+/* How long to keep mic muted after the LAST received audio frame. The
+ * codec's I²S DMA buffers + speaker drain time mean output continues
+ * for several hundred ms past the last decoded frame; if we unmute too
+ * soon, the mic picks up that tail and the server's VAD interprets it
+ * as new user speech, interrupting the response we just played. 800 ms
+ * is conservative but speaker→mic crosstalk is the dominant failure
+ * mode without proper AEC. */
+#define VOICE_TAIL_MUTE_MS    800
+
 /* Caps the first-event log so we don't dump megabytes if OpenAI
  * sends something unexpected. */
 #define FIRST_EVENT_LOG_BYTES  256
@@ -149,6 +158,15 @@ typedef struct {
      * needed to send response.create back to OpenAI. */
     uint16_t                    dc_stream_id;
     bool                        dc_stream_known;
+
+    /* Tail-mute deadline: timestamp (us) until which voice_mic should
+     * keep muting even after phase has dropped from SPEAKING. The
+     * speaker DMA continues draining ~600 ms after we stop feeding
+     * decoder output, so the ES8311's single mic still picks up that
+     * bleed and triggers server-side VAD → self-interrupt. Setting a
+     * future deadline on every audio frame received pins this to "X
+     * ms after the LAST audio frame", regardless of how phase moves. */
+    atomic_llong                tail_mute_until_us;
 } voice_peer_t;
 
 static voice_peer_t s_peer;  /* zero-initialised at .bss */
@@ -669,7 +687,13 @@ static int pc_on_audio_data(esp_peer_audio_frame_t *info, void *ctx) {
     }
 
     s_aud_recv_n++;
-    atomic_store(&s_peer.last_audio_us, (long long)esp_timer_get_time());
+    int64_t now_us = esp_timer_get_time();
+    atomic_store(&s_peer.last_audio_us, (long long)now_us);
+    /* Extend the tail-mute deadline. voice_mic checks this on every
+     * frame; while the deadline is in the future, mic frames are
+     * dropped (same as during phase=SPEAKING). */
+    atomic_store(&s_peer.tail_mute_until_us,
+        (long long)(now_us + (int64_t)VOICE_TAIL_MUTE_MS * 1000));
 
     /* Log the TOC byte of the first few frames — Opus's first byte
      * encodes config (bandwidth + frame size) + channel + frame count.
@@ -976,6 +1000,14 @@ bool voice_peer_first_event_seen(void) {
 
 voice_phase_t voice_peer_phase(void) {
     return (voice_phase_t)atomic_load(&s_peer.phase);
+}
+
+bool voice_peer_mic_should_mute(void) {
+    if ((voice_phase_t)atomic_load(&s_peer.phase) == VOICE_PHASE_SPEAKING) {
+        return true;
+    }
+    int64_t deadline = (int64_t)atomic_load(&s_peer.tail_mute_until_us);
+    return deadline > esp_timer_get_time();
 }
 
 bool voice_peer_stop_requested(void) {

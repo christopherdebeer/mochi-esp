@@ -57,6 +57,19 @@ int  voice_peer_start(const char *openai_key, const char *instructions);
 voice_phase_t voice_peer_phase(void);
 
 /*
+ * True if the mic should drop frames right now. This is a superset of
+ * `voice_peer_phase() == VOICE_PHASE_SPEAKING` — it also stays true for
+ * a tail window after the last audio frame received from the peer, to
+ * cover the codec's DMA drain time. Without that tail, the speaker
+ * continues playing mochi's last few hundred ms of audio after our
+ * phase has dropped to READY, the mic picks it up, and the server's
+ * VAD self-interrupts on the bleed.
+ *
+ * Safe to call from any task; reads atomic state only.
+ */
+bool voice_peer_mic_should_mute(void);
+
+/*
  * True when the session should be torn down by the next polling
  * caller (typically main.cpp's touch loop). Set by:
  *   - the worker task hitting the idle / hard caps

@@ -216,19 +216,18 @@ static void mic_task(void *arg) {
         }
         s_pcm_frames++;
 
-        /* Half-duplex AEC stop-gap: while mochi is speaking, the
-         * speaker plays mochi's voice and the ES8311's single mic
-         * picks it up just like the user's voice. Without AEC, the
-         * server would see "mochi said X" → "user said X" → trigger
-         * an interruption / new turn, looping. Defence-in-depth on
-         * top of OpenAI's semantic_vad eagerness=low: just drop our
-         * mic frames while phase=SPEAKING. We still drain the I²S
-         * read above so the DMA buffers don't overrun.
+        /* Half-duplex AEC stop-gap: while mochi is speaking — and for
+         * a tail window after the last audio frame, while the speaker
+         * DMA drains — the ES8311's single mic picks up speaker bleed.
+         * Without AEC, the server's VAD interprets that as new user
+         * speech and self-interrupts mid-response. voice_peer maintains
+         * a deadline that voice_peer_mic_should_mute() exposes; we
+         * drop frames while it's true, but still drain the I²S read
+         * above so DMA doesn't overrun.
          *
-         * Cost: mochi can't be interrupted mid-utterance. That's a
-         * UX trade-off worth taking until we have proper software-
-         * reference AEC. */
-        if (voice_peer_phase() == VOICE_PHASE_SPEAKING) {
+         * Cost: mochi can't be interrupted mid-utterance. Worth it
+         * until we have proper software-reference AEC. */
+        if (voice_peer_mic_should_mute()) {
             s_muted_frames++;
             goto loop_tail;
         }

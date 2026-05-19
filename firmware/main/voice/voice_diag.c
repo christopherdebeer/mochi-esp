@@ -16,7 +16,11 @@
 
 static const char *TAG = "voice_diag";
 
-#define DIAG_BUF_BYTES   (4 * 1024)
+/* 32 KB in PSRAM. Big enough to capture 4–5 minutes of multi-turn
+ * voice traffic at the cadence we log (one entry per dc event +
+ * periodic mic/audio counter snapshots). PSRAM has 7+ MB free; cost
+ * of going from 4 → 32 KB is negligible. */
+#define DIAG_BUF_BYTES   (32 * 1024)
 #define DIAG_LOG_PATH    "/lfs/voice_last.log"
 
 /* PSRAM-backed buffer; only allocated on first reset. The mutex
