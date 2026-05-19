@@ -45,18 +45,27 @@
     voice_diag_log("ERR: " fmt, ##__VA_ARGS__); \
 } while (0)
 
-/* Stack budget. The original 8 KB + 16 KB both panic'd on first
- * encode — but the actual cause was probably the redundant
- * esp_codec_dev_open in open_record() (now removed) re-initialising
- * the I²S underneath the playback handle and corrupting state
- * adjacent to voice_mic's stack. With that fix in place 16 KB is
- * almost certainly enough; keeping it at 16 to leave headroom for
- * Opus first-encode init + worst-case ISR pile.
+/* Stack budget — 20 KB.
  *
- * 32 KB ran into "xTaskCreate failed" (no contiguous internal-RAM
- * block of that size after wifi + peer worker + tools worker took
- * their slices). 16 KB allocates cleanly. */
-#define MIC_TASK_STACK_BYTES   (16 * 1024)
+ * Boundaries we've measured on hardware:
+ *   8 KB  → overflowed on first encode (real cause turned out to
+ *           be the codec-open bug; with that fixed 8 KB might
+ *           have worked, but we never re-tested).
+ *   16 KB → overflowed on the FIRST diag-log line. Backtrace
+ *           shows voice_diag_logv → vsnprintf at the bottom.
+ *           Newlib vsnprintf uses ~2 KB of stack lazy-loading on
+ *           first call; LOGI_DIAG fires that twice (once in
+ *           ESP_LOGI's path, once in voice_diag_log), plus the
+ *           mutex take/give path. With ISRs piling on, 16 KB
+ *           runs out of room.
+ *   32 KB → allocates fail "xTaskCreate failed" (no contiguous
+ *           block of internal RAM after wifi + peer + tools
+ *           tasks have taken their slices).
+ *
+ * 20 KB lands in the gap. Also: drop LOGI_DIAG → ESP_LOGI for the
+ * very first task-start log so we only pay one vsnprintf on entry.
+ * Periodic logs continue to use the full diag macros. */
+#define MIC_TASK_STACK_BYTES   (20 * 1024)
 #define MIC_TASK_PRIO          5
 /* Pin to APP core (1) so wifi (which runs on core 0) doesn't pile its
  * ISR frames onto our blocked-on-I²S stack. The peer's worker is
@@ -175,7 +184,9 @@ static void close_all(void) {
 
 static void mic_task(void *arg) {
     (void)arg;
-    LOGI_DIAG("mic_task started");
+    /* Plain ESP_LOGI on entry (not LOGI_DIAG) — see stack-budget
+     * comment above MIC_TASK_STACK_BYTES. */
+    ESP_LOGI(TAG, "mic_task started");
     s_pcm_frames = s_enc_ok = s_enc_err = 0;
     s_send_ok = s_send_err = s_send_block = s_read_err = 0;
     s_muted_frames = 0;
