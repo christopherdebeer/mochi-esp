@@ -45,18 +45,18 @@
     voice_diag_log("ERR: " fmt, ##__VA_ARGS__); \
 } while (0)
 
-/* Stack budget. Voice mic task gets hit by:
- *   - Opus encoder's own state machines (libopus inits FFT tables,
- *     SILK + CELT state on first encode).
- *   - esp_codec_dev_read blocking on I²S DMA — while blocked, ISRs
- *     (wifi, audio DMA, the codec's own I²C transactions) pile
- *     frames on voice_mic's stack.
- *   - Diag log vsnprintf paths.
+/* Stack budget. The original 8 KB + 16 KB both panic'd on first
+ * encode — but the actual cause was probably the redundant
+ * esp_codec_dev_open in open_record() (now removed) re-initialising
+ * the I²S underneath the playback handle and corrupting state
+ * adjacent to voice_mic's stack. With that fix in place 16 KB is
+ * almost certainly enough; keeping it at 16 to leave headroom for
+ * Opus first-encode init + worst-case ISR pile.
  *
- * 8 KB and 16 KB both panic'd on first run with stack-overflow caught
- * at the very next context switch. 32 KB has enough headroom for
- * worst-case ISR-pile scenarios. */
-#define MIC_TASK_STACK_BYTES   (32 * 1024)
+ * 32 KB ran into "xTaskCreate failed" (no contiguous internal-RAM
+ * block of that size after wifi + peer worker + tools worker took
+ * their slices). 16 KB allocates cleanly. */
+#define MIC_TASK_STACK_BYTES   (16 * 1024)
 #define MIC_TASK_PRIO          5
 /* Pin to APP core (1) so wifi (which runs on core 0) doesn't pile its
  * ISR frames onto our blocked-on-I²S stack. The peer's worker is
@@ -104,21 +104,22 @@ static bool open_record(void) {
         LOGE_DIAG("no record handle from codec_board");
         return false;
     }
-    esp_codec_dev_sample_info_t fs = {
-        .bits_per_sample = MIC_BITS_PER_SAMPLE,
-        .channel = MIC_CHANNEL,
-        .channel_mask = 0,
-        .sample_rate = MIC_SAMPLE_RATE,
-    };
-    int rc = esp_codec_dev_open(s_record_dev, &fs);
-    if (rc != 0) {
-        LOGE_DIAG("esp_codec_dev_open record rc=%d", rc);
-        return false;
-    }
-    /* codec_board defaults the ES8311 PGA to 30 dB. Bump up a notch
-     * for handheld-distance speech; user can shout if needed. */
+    /* On the Waveshare V2, codec_board configures ES8311 with
+     * `reuse_dev=true` — record and playback share the SAME
+     * esp_codec_dev_handle_t (IN_OUT type). Calling
+     * esp_codec_dev_open on the record handle is calling it on the
+     * SAME handle voice_peer already opened for playback, which
+     * (a) earns "Adev_Codec: Input already open" log noise and
+     * (b) BREAKS playback — every subsequent esp_codec_dev_write
+     * returns ESP_ERR_CODEC_DEV_NOT_OPEN (259). Caught on hardware
+     * 2026-05-19; took us a full debug cycle to find.
+     *
+     * Right shape: don't open again. Playback already opened the
+     * codec at 24 kHz mono PCM16 — same format we want for read.
+     * Just bump the input gain (idempotent) and start reading. */
     esp_codec_dev_set_in_gain(s_record_dev, 30.0f);
-    s_record_open = true;
+    /* s_record_open stays false — close_all() will skip the close
+     * that would also break playback. */
     return true;
 }
 
