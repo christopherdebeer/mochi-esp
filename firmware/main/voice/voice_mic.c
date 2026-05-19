@@ -23,6 +23,7 @@
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"   /* xTaskCreatePinnedToCoreWithCaps */
 
 #include "codec_init.h"
 #include "esp_codec_dev.h"
@@ -45,27 +46,28 @@
     voice_diag_log("ERR: " fmt, ##__VA_ARGS__); \
 } while (0)
 
-/* Stack budget — 20 KB.
+/* Stack budget — 32 KB in PSRAM.
  *
- * Boundaries we've measured on hardware:
+ * Boundaries we've measured on hardware (internal RAM):
  *   8 KB  → overflowed on first encode (real cause turned out to
  *           be the codec-open bug; with that fixed 8 KB might
  *           have worked, but we never re-tested).
- *   16 KB → overflowed on the FIRST diag-log line. Backtrace
- *           shows voice_diag_logv → vsnprintf at the bottom.
- *           Newlib vsnprintf uses ~2 KB of stack lazy-loading on
- *           first call; LOGI_DIAG fires that twice (once in
- *           ESP_LOGI's path, once in voice_diag_log), plus the
- *           mutex take/give path. With ISRs piling on, 16 KB
- *           runs out of room.
- *   32 KB → allocates fail "xTaskCreate failed" (no contiguous
- *           block of internal RAM after wifi + peer + tools
- *           tasks have taken their slices).
+ *   16 KB → overflowed on the FIRST diag-log line. Backtrace shows
+ *           voice_diag_logv → vsnprintf at the bottom.
+ *   20 KB → still overflowed on entry, _frxt_dispatch caught it on
+ *           the first context switch after task start.
+ *   32 KB → xTaskCreatePinnedToCore fails: not enough contiguous
+ *           internal RAM after wifi + peer + tools take their slices.
  *
- * 20 KB lands in the gap. Also: drop LOGI_DIAG → ESP_LOGI for the
- * very first task-start log so we only pay one vsnprintf on entry.
- * Periodic logs continue to use the full diag macros. */
-#define MIC_TASK_STACK_BYTES   (20 * 1024)
+ * Way out: allocate the stack from PSRAM via
+ * xTaskCreatePinnedToCoreWithCaps(MALLOC_CAP_SPIRAM). PSRAM has 7+ MB
+ * free at this point so we can afford a generous 32 KB. ISRs still
+ * use internal RAM, so the only cost is ~3× slower stack access on
+ * function entry/exit — negligible at our 20 ms cadence.
+ *
+ * sdkconfig requirement: CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
+ * (already set). */
+#define MIC_TASK_STACK_BYTES   (32 * 1024)
 #define MIC_TASK_PRIO          5
 /* Pin to APP core (1) so wifi (which runs on core 0) doesn't pile its
  * ISR frames onto our blocked-on-I²S stack. The peer's worker is
@@ -288,7 +290,9 @@ static void mic_task(void *arg) {
         (unsigned long)s_send_ok,
         (unsigned long)s_send_block);
     s_task = NULL;
-    vTaskDelete(NULL);
+    /* Created via xTaskCreatePinnedToCoreWithCaps → must use the
+     * matching delete so the PSRAM stack actually gets freed. */
+    vTaskDeleteWithCaps(NULL);
 }
 
 bool voice_mic_start(void) {
@@ -300,11 +304,14 @@ bool voice_mic_start(void) {
     }
 
     atomic_store(&s_running, true);
-    BaseType_t ok = xTaskCreatePinnedToCore(
+    /* Stack from PSRAM (MALLOC_CAP_SPIRAM) — see stack-budget comment
+     * above MIC_TASK_STACK_BYTES. */
+    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(
         mic_task, "voice_mic", MIC_TASK_STACK_BYTES,
-        NULL, MIC_TASK_PRIO, &s_task, MIC_TASK_CORE);
+        NULL, MIC_TASK_PRIO, &s_task, MIC_TASK_CORE,
+        MALLOC_CAP_SPIRAM);
     if (ok != pdPASS) {
-        ESP_LOGE(TAG, "xTaskCreate failed");
+        ESP_LOGE(TAG, "xTaskCreateWithCaps failed");
         atomic_store(&s_running, false);
         close_all();
         return false;
