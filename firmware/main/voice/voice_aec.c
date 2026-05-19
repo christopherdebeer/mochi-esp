@@ -117,6 +117,9 @@ static void ring_push(const int16_t *src, size_t n) {
     s.ref.pushed_samples += n;
 }
 
+/* Unused when VOICE_AEC_USE_ESP_SR=0 — kept defined so flipping the
+ * gate doesn't need a second edit pass. Same for the resamplers. */
+__attribute__((unused))
 static void ring_pull(int16_t *dst, size_t n) {
     if (!s.ref.buf || n == 0) return;
     unsigned head = atomic_load_explicit(&s.ref.head, memory_order_acquire);
@@ -147,6 +150,7 @@ static void ring_pull(int16_t *dst, size_t n) {
  * forgiving compared to the listening path. Upgrade to a polyphase
  * FIR with anti-alias if hardware testing shows the resampler is
  * the bottleneck on echo suppression. */
+__attribute__((unused))
 static void resample_24_to_16(const int16_t *in, size_t in_n,
                               int16_t *out, size_t out_n) {
     if (in_n == 0 || out_n == 0) return;
@@ -163,6 +167,7 @@ static void resample_24_to_16(const int16_t *in, size_t in_n,
     }
 }
 
+__attribute__((unused))
 static void resample_16_to_24(const int16_t *in, size_t in_n,
                               int16_t *out, size_t out_n) {
     if (in_n == 0 || out_n == 0) return;
