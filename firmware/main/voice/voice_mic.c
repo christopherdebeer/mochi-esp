@@ -45,12 +45,23 @@
     voice_diag_log("ERR: " fmt, ##__VA_ARGS__); \
 } while (0)
 
-/* Opus encoder state machines + esp_codec_dev_read internals push
- * the per-frame stack high water mark well past the 8 KB I tried
- * first (panic on first encode call). 16 KB is the mochi-val
- * reference value for the equivalent Korvo task. */
-#define MIC_TASK_STACK_BYTES   (16 * 1024)
+/* Stack budget. Voice mic task gets hit by:
+ *   - Opus encoder's own state machines (libopus inits FFT tables,
+ *     SILK + CELT state on first encode).
+ *   - esp_codec_dev_read blocking on I²S DMA — while blocked, ISRs
+ *     (wifi, audio DMA, the codec's own I²C transactions) pile
+ *     frames on voice_mic's stack.
+ *   - Diag log vsnprintf paths.
+ *
+ * 8 KB and 16 KB both panic'd on first run with stack-overflow caught
+ * at the very next context switch. 32 KB has enough headroom for
+ * worst-case ISR-pile scenarios. */
+#define MIC_TASK_STACK_BYTES   (32 * 1024)
 #define MIC_TASK_PRIO          5
+/* Pin to APP core (1) so wifi (which runs on core 0) doesn't pile its
+ * ISR frames onto our blocked-on-I²S stack. The peer's worker is
+ * unpinned so this is the only voice task with a hard core affinity. */
+#define MIC_TASK_CORE          1
 
 /* Match the mint's audio.input.format. gpt-realtime wants 24 kHz. */
 #define MIC_SAMPLE_RATE        24000
@@ -277,9 +288,9 @@ bool voice_mic_start(void) {
     }
 
     atomic_store(&s_running, true);
-    BaseType_t ok = xTaskCreate(
+    BaseType_t ok = xTaskCreatePinnedToCore(
         mic_task, "voice_mic", MIC_TASK_STACK_BYTES,
-        NULL, MIC_TASK_PRIO, &s_task);
+        NULL, MIC_TASK_PRIO, &s_task, MIC_TASK_CORE);
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "xTaskCreate failed");
         atomic_store(&s_running, false);
