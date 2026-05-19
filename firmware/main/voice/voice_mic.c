@@ -220,22 +220,17 @@ static void mic_task(void *arg) {
         /* Software-reference AEC. When enabled, runs the mic frame
          * against the ring of decoded speaker PCM that voice_peer's
          * pc_on_audio_data has been depositing. Returns the cancelled
-         * mic in place; no-op when disabled. The half-duplex mute
-         * below stays as the safety net during AEC bring-up. */
+         * mic in place; no-op when disabled. */
         voice_aec_process_in_place((int16_t *)s_pcm_buf,
             (size_t)(s_in_bytes / (int)sizeof(int16_t)));
 
-        /* Half-duplex AEC stop-gap: while mochi is speaking — and for
-         * a tail window after the last audio frame, while the speaker
-         * DMA drains — the ES8311's single mic picks up speaker bleed.
-         * Without AEC, the server's VAD interprets that as new user
-         * speech and self-interrupts mid-response. voice_peer maintains
-         * a deadline that voice_peer_mic_should_mute() exposes; we
-         * drop frames while it's true, but still drain the I²S read
-         * above so DMA doesn't overrun.
-         *
-         * Cost: mochi can't be interrupted mid-utterance. Worth it
-         * until we have proper software-reference AEC. */
+        /* Half-duplex mute fallback. voice_peer_mic_should_mute()
+         * returns false whenever voice_aec is enabled, so this gate
+         * only fires when AEC failed to init / enable. In that
+         * fallback case it's the same over-muting compromise as
+         * before (drop mic frames during SPEAKING + drain tail);
+         * we keep draining the I²S read above so DMA doesn't
+         * overrun. */
         if (voice_peer_mic_should_mute()) {
             s_muted_frames++;
             goto loop_tail;

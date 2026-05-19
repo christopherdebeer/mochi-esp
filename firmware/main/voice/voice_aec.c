@@ -13,9 +13,11 @@
  * Status (2026-05-19): VOICE_AEC_USE_ESP_SR=1; the runtime enable
  * is flipped by voice_peer immediately after voice_aec_init in
  * open_audio_playback, so AEC is engaged for the whole session.
- * Half-duplex mute in voice_peer_mic_should_mute() remains active
- * as defence-in-depth — relax once on-hardware testing confirms
- * the cancellation is doing the work.
+ * voice_peer_mic_should_mute() short-circuits to false whenever
+ * voice_aec_is_enabled() returns true — the half-duplex mute is a
+ * fallback only, used when AEC init or aec_create fails. The mute
+ * as previously tuned over-muted (eating the user's voice during
+ * the speaker drain tail), which was the whole reason to land AEC.
  */
 
 #include "voice_aec.h"

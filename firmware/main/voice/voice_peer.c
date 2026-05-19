@@ -246,14 +246,15 @@ static void open_audio_playback(uint32_t sample_rate, uint8_t channel) {
         (unsigned long)sample_rate, channel);
 
     /* Stand up the software-reference AEC alongside playback and
-     * engage it for the whole session. The half-duplex mute in
-     * voice_peer_mic_should_mute() stays active as defence-in-depth
-     * during AEC bring-up; relax once the cancellation is verified
-     * on hardware. */
+     * engage it for the whole session. Once enabled,
+     * voice_peer_mic_should_mute() returns false — the canceller
+     * is responsible for echo defence and barge-in works. If init
+     * or aec_create fails, the half-duplex mute remains active as
+     * the fallback. */
     if (voice_aec_init((int)sample_rate, channel)) {
         voice_aec_set_enabled(true);
     } else {
-        LOGW_DIAG("voice_aec_init failed; mute-only echo defence");
+        LOGW_DIAG("voice_aec_init failed; falling back to half-duplex mute");
     }
 }
 
@@ -1041,6 +1042,15 @@ voice_phase_t voice_peer_phase(void) {
 }
 
 bool voice_peer_mic_should_mute(void) {
+    /* AEC active → mute steps aside. The whole point of M9.f.3 is
+     * to get barge-in back, and the half-duplex mute as tuned was
+     * over-muting (cutting the user off during the speaker drain
+     * tail and any DTX-comfort-noise window). When AEC is engaged
+     * the canceller is responsible for echo; mute is only the
+     * fallback for when voice_aec_init / aec_create has failed. */
+    if (voice_aec_is_enabled()) {
+        return false;
+    }
     if ((voice_phase_t)atomic_load(&s_peer.phase) == VOICE_PHASE_SPEAKING) {
         return true;
     }

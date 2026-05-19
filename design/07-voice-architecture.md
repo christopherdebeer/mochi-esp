@@ -281,11 +281,15 @@ options are:
 - Half-duplex fallback with tap-to-talk (tear out duplex entirely;
   loses barge-in)
 
-### Half-duplex mute (current echo defence)
+### Half-duplex mute (fallback only)
 
-While the software-reference AEC is being brought up, the active
-echo defence is a half-duplex mic-mute gate maintained in
-`voice/voice_peer.c::voice_peer_mic_should_mute`:
+A half-duplex mic-mute gate is maintained in
+`voice/voice_peer.c::voice_peer_mic_should_mute` for the case
+where the software-reference AEC fails to init or enable. When
+`voice_aec_is_enabled()` returns true the function short-circuits
+to false; the gate is dead code during a healthy session.
+
+The fallback gate, when it fires:
 
 - Active when phase = `VOICE_PHASE_SPEAKING` (model generating).
 - Active for `VOICE_LOUD_DRAIN_MS` (700 ms) after the last "loud"
@@ -294,9 +298,11 @@ echo defence is a half-duplex mic-mute gate maintained in
 - Mic task continues to consume I²S frames so DMA doesn't overrun;
   the gated frames are dropped, not held.
 
-The cost is the model can't be interrupted mid-utterance. Worth
-it against a self-interrupt loop until full-duplex with AEC is
-verified.
+This was the active echo defence through M9.f.2.1 but over-muted
+in practice — eating the user's voice during the drain tail and
+any DTX-comfort-noise window. M9.f.3 retires it from the hot path
+in favour of AEC; it remains only as a graceful degradation when
+`aec_create` returns NULL.
 
 ### Software-reference AEC (M9.f.3 — engaged, on-hardware validation pending)
 
@@ -339,22 +345,28 @@ Build/runtime defaults:
 - `voice_peer.c::open_audio_playback` calls
   `voice_aec_set_enabled(true)` immediately after `voice_aec_init`
   succeeds, so AEC is engaged for the whole session.
-- The half-duplex mute in `voice_peer_mic_should_mute()` stays
-  active as defence-in-depth.
+- The half-duplex mute is *off* during a healthy session: with
+  AEC enabled, `voice_peer_mic_should_mute()` returns false and
+  the mic uplink runs full-duplex. The mute only fires when
+  `aec_create` returns NULL.
 
 On-hardware validation (next):
 1. Flash and start a voice session in a quiet room.
 2. Tail diag log; confirm `aec: init`, `aec: created mode=FD_LOW_COST`,
    `aec: ENABLED` and that `proc` increments while `under`/`over`
-   stay small relative to `pushed`/`pulled`.
-3. Verify no audible self-transcription / ping-pong loop in a
-   normal exchange (mute still active here).
-4. Tune `AEC_FILTER_LENGTH_MS` (4 → 8) and AEC mode
+   stay small relative to `pushed`/`pulled`. `muted` counter on
+   the mic side should stay at 0 — proof the half-duplex fallback
+   isn't firing.
+3. Verify barge-in: while mochi is speaking, talk over it; the
+   model should hear you and respond (without AEC, this would
+   either feed back or be eaten by the old mute).
+4. Verify no audible self-transcription / ping-pong loop in a
+   normal exchange.
+5. Tune `AEC_FILTER_LENGTH_MS` (4 → 8) and AEC mode
    (`FD_LOW_COST` → `FD_HIGH_PERF`) if echo bleed is audible.
-5. Once stable, relax the half-duplex mute (drop
-   `VOICE_LOUD_DRAIN_MS` toward 0 or short-circuit
-   `voice_peer_mic_should_mute()` to false) and verify barge-in
-   works without re-opening the feedback loop.
+6. If AEC fails / under-suppresses, the half-duplex mute is still
+   in the binary as fallback (`aec_create` returning NULL falls
+   through). The behaviour in that case matches M9.f.2.1.
 
 ## Status bar UX
 
