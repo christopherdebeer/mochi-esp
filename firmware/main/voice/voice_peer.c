@@ -125,10 +125,12 @@ static const char *phase_name(voice_phase_t p) {
 #define VOICE_LOUD_DRAIN_MS    700
 
 /* Opus packet size threshold below which we treat a frame as DTX /
- * comfort noise. The Opus DTX packet is 3 bytes; we add a couple of
- * bytes of slack in case the server uses slightly larger silence-frame
- * encodings. Real voice frames at 24 kbps / 20 ms run ~60 B. */
-#define VOICE_DTX_FRAME_BYTES  5
+ * comfort noise. Standard DTX is 3 B, but the server occasionally
+ * emits slightly larger low-energy frames during silence; bumping to
+ * 12 B keeps those out of the "loud" bucket so they don't re-mute
+ * the mic after a turn ends. Real voice frames at 24 kbps / 20 ms
+ * run ~60 B, well above the threshold. */
+#define VOICE_DTX_FRAME_BYTES  12
 
 /* Caps the first-event log so we don't dump megabytes if OpenAI
  * sends something unexpected. */
@@ -706,9 +708,16 @@ static int pc_on_audio_data(esp_peer_audio_frame_t *info, void *ctx) {
     atomic_store(&s_peer.last_audio_us, (long long)now_us);
     /* Keep the mic muted past the real speaker drain. See
      * VOICE_LOUD_DRAIN_MS for rationale. Gating on info->size > DTX
-     * threshold means silence frames don't extend the deadline — we
-     * unmute as soon as the server stops sending real voice. */
-    if (info->size > VOICE_DTX_FRAME_BYTES) {
+     * threshold means silence frames don't extend the deadline.
+     *
+     * Also gate on phase = SPEAKING — once response.done arrives the
+     * existing 700 ms tail is enough to cover the codec drain, and we
+     * don't want a stray loud-ish frame later in the silence to
+     * re-arm the mute and lock the user out (observed: mic mute
+     * latched on for tens of seconds across one bring-up session).
+     */
+    if (info->size > VOICE_DTX_FRAME_BYTES &&
+        (voice_phase_t)atomic_load(&s_peer.phase) == VOICE_PHASE_SPEAKING) {
         atomic_store(&s_peer.tail_mute_until_us,
             (long long)(now_us + (int64_t)VOICE_LOUD_DRAIN_MS * 1000));
     }
