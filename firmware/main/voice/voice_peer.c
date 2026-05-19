@@ -245,10 +245,14 @@ static void open_audio_playback(uint32_t sample_rate, uint8_t channel) {
     LOGI_DIAG("playback open: %lu Hz, %d ch",
         (unsigned long)sample_rate, channel);
 
-    /* Stand up the software-reference AEC alongside playback. The
-     * module allocates its ref ring here but stays disabled until
-     * voice_aec_set_enabled(true) — see voice_aec.c § "Build gate". */
-    if (!voice_aec_init((int)sample_rate, channel)) {
+    /* Stand up the software-reference AEC alongside playback and
+     * engage it for the whole session. The half-duplex mute in
+     * voice_peer_mic_should_mute() stays active as defence-in-depth
+     * during AEC bring-up; relax once the cancellation is verified
+     * on hardware. */
+    if (voice_aec_init((int)sample_rate, channel)) {
+        voice_aec_set_enabled(true);
+    } else {
         LOGW_DIAG("voice_aec_init failed; mute-only echo defence");
     }
 }

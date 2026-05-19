@@ -298,7 +298,7 @@ The cost is the model can't be interrupted mid-utterance. Worth
 it against a self-interrupt loop until full-duplex with AEC is
 verified.
 
-### Software-reference AEC scaffold (M9.f.3 in progress)
+### Software-reference AEC (M9.f.3 — engaged, on-hardware validation pending)
 
 The `voice/voice_aec.{c,h}` module owns the software-reference
 pipeline. Reference tap is in `voice_peer.c::pc_on_audio_data`
@@ -322,23 +322,39 @@ mic_task:
     → voice_peer_send_audio_frame
 ```
 
-The reference ring buffer (1 s of 24 kHz mono in PSRAM, lock-free
-SPSC) and resamplers (24↔16 linear) are landed and exercised on
-every call. The esp-sr `aec_create`/`aec_process` binding is
-gated behind `VOICE_AEC_USE_ESP_SR` (default 0). The runtime
-enable flag (`voice_aec_set_enabled`) defaults false, so the
-mic path is unmodified at runtime today.
+Components in play:
+- 64 KB PSRAM ref ring buffer (lock-free SPSC, power-of-2 mask).
+- 24 ↔ 16 kHz linear resamplers around the AEC boundary —
+  esp-sr's AEC is fixed at 16 kHz; the audio stack runs at 24 kHz.
+- esp-sr `aec_create(16000, 4 ms, 1 ch, AEC_MODE_FD_LOW_COST)` +
+  `aec_process(handle, mic, ref, out)`.
+- Chunk accumulator that batches the resampled 320-sample mic
+  frames into the AEC's native chunksize (typically 256), with
+  per-call carry for the remainder.
 
-To enable on hardware:
-1. Add `espressif/esp-sr` to `firmware/main/idf_component.yml`.
-2. Set `VOICE_AEC_USE_ESP_SR=1` (build flag or top-of-file).
-3. Wire a `voice_aec_set_enabled(true)` call once the peer is up
-   (e.g., on data-channel open, alongside the existing voice setup).
-4. Validate via diag log counters (`pushed/pulled/under/over/proc`)
-   that ref ring traffic and processed-frame counts look healthy.
-5. Tune `AEC_FILTER_LENGTH_MS` (4 → 8) and AEC mode
+Build/runtime defaults:
+- `espressif/esp-sr ^2.4.4` declared in `firmware/main/idf_component.yml`.
+- `VOICE_AEC_USE_ESP_SR=1` so the `aec_create`/`aec_process`
+  binding is compiled in.
+- `voice_peer.c::open_audio_playback` calls
+  `voice_aec_set_enabled(true)` immediately after `voice_aec_init`
+  succeeds, so AEC is engaged for the whole session.
+- The half-duplex mute in `voice_peer_mic_should_mute()` stays
+  active as defence-in-depth.
+
+On-hardware validation (next):
+1. Flash and start a voice session in a quiet room.
+2. Tail diag log; confirm `aec: init`, `aec: created mode=FD_LOW_COST`,
+   `aec: ENABLED` and that `proc` increments while `under`/`over`
+   stay small relative to `pushed`/`pulled`.
+3. Verify no audible self-transcription / ping-pong loop in a
+   normal exchange (mute still active here).
+4. Tune `AEC_FILTER_LENGTH_MS` (4 → 8) and AEC mode
    (`FD_LOW_COST` → `FD_HIGH_PERF`) if echo bleed is audible.
-6. Once stable, relax the half-duplex mute gate to allow barge-in.
+5. Once stable, relax the half-duplex mute (drop
+   `VOICE_LOUD_DRAIN_MS` toward 0 or short-circuit
+   `voice_peer_mic_should_mute()` to false) and verify barge-in
+   works without re-opening the feedback loop.
 
 ## Status bar UX
 

@@ -67,6 +67,7 @@ idf_component_register(
         codec_board
         json
         espressif__esp_peer
+        espressif__esp-sr
         log
 )
 

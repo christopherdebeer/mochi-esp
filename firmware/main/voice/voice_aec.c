@@ -4,17 +4,18 @@
  *
  * Build gate
  * ----------
- * The esp-sr binding (aec_create / aec_process) lives behind
- * VOICE_AEC_USE_ESP_SR. Flip to 1 once espressif/esp-sr is declared
- * in idf_component.yml and you've validated the dep pulls cleanly.
- * With the gate at 0, the module compiles as a "plumbing skeleton":
- * ring buffer + API + lifecycle all wired, process_in_place is a
- * pass-through. That keeps the integration call sites stable while
- * the actual AEC is being brought up.
+ * VOICE_AEC_USE_ESP_SR defaults to 1 — esp-sr is in
+ * idf_component.yml and the aec_create / aec_process binding is
+ * live. Override to 0 only for a quick A/B that strips the esp-sr
+ * code path entirely (process_in_place becomes pass-through, ring
+ * buffer keeps filling so push/pull counters stay observable).
  *
- * Status (2026-05-19): VOICE_AEC_USE_ESP_SR=0, AEC default OFF.
- * Half-duplex mute in voice_peer_mic_should_mute() remains the
- * active echo defence.
+ * Status (2026-05-19): VOICE_AEC_USE_ESP_SR=1; the runtime enable
+ * is flipped by voice_peer immediately after voice_aec_init in
+ * open_audio_playback, so AEC is engaged for the whole session.
+ * Half-duplex mute in voice_peer_mic_should_mute() remains active
+ * as defence-in-depth — relax once on-hardware testing confirms
+ * the cancellation is doing the work.
  */
 
 #include "voice_aec.h"
@@ -29,10 +30,11 @@
 
 #define TAG "voice_aec"
 
-/* Flip to 1 once espressif/esp-sr is in idf_component.yml and the
- * board is ready for an on-hardware AEC bring-up. */
+/* Defaults to ON now that espressif/esp-sr is declared in
+ * idf_component.yml. Flip back to 0 (build-flag override) only if
+ * you need a quick A/B without the esp-sr code path linked in. */
 #ifndef VOICE_AEC_USE_ESP_SR
-#define VOICE_AEC_USE_ESP_SR 0
+#define VOICE_AEC_USE_ESP_SR 1
 #endif
 
 #if VOICE_AEC_USE_ESP_SR

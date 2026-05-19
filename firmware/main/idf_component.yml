@@ -31,3 +31,14 @@ dependencies:
   # component decodes them to PCM16 we can hand to esp_codec_dev_write.
   # Registry-only, no extra deps beyond IDF.
   espressif/esp_audio_codec: "^2.5.0"
+
+  # M9.f.3 — software-reference acoustic echo cancellation.
+  #
+  # esp-sr ships the `aec_create` / `aec_process` API our voice_aec
+  # module binds to (see firmware/main/voice/voice_aec.{c,h}). Bigger
+  # than it looks — pulls AFE + NS + AGC + VAD + model loaders even
+  # if we only call the AEC. Cost vs benefit is justified: single-mic
+  # software-reference AEC is the only path to barge-in on the
+  # Waveshare board (no ES7210 hardware ref channel; see
+  # design/07-voice-architecture.md § "Software-reference AEC scaffold").
+  espressif/esp-sr: "^2.4.4"

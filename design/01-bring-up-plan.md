@@ -329,17 +329,19 @@ peripherals in parallel rather than serially:
   - **M9.f.2.1** ✅ half-duplex mic-mute during SPEAKING phase
     (defence-in-depth against feedback loops without AEC);
     user + assistant transcripts captured into the diag log.
-  - **M9.f.3** 🔄 software-reference AEC scaffold landed.
-    `voice/voice_aec.{c,h}` owns the ref ring buffer (1 s of 24 kHz
-    mono in PSRAM, lock-free SPSC), 24↔16 kHz linear resamplers,
-    runtime enable flag, and the esp-sr `aec_create`/`aec_process`
-    binding (gated behind `VOICE_AEC_USE_ESP_SR=0` until the dep is
-    added + on-hardware bring-up). Reference tap in `pc_on_audio_data`
-    between decode and I²S write; process call in `mic_task` between
-    I²S read and the half-duplex mute gate. With both gates off the
-    runtime behaviour is unchanged from M9.f.2.1; mute still does
-    all the work. Bring-up steps written up in
-    `07-voice-architecture.md` § "Software-reference AEC scaffold".
+  - **M9.f.3** 🔄 software-reference AEC engaged (on-hardware
+    validation pending). `voice/voice_aec.{c,h}` owns the ref ring
+    buffer (64 KB PSRAM, lock-free SPSC), 24↔16 kHz linear
+    resamplers, and the esp-sr `aec_create`/`aec_process` binding.
+    `espressif/esp-sr ^2.4.4` is declared in `idf_component.yml`;
+    `VOICE_AEC_USE_ESP_SR=1`; `voice_peer.c::open_audio_playback`
+    calls `voice_aec_set_enabled(true)` immediately after init.
+    Reference tap in `pc_on_audio_data` between decode and I²S
+    write; process call in `mic_task` between I²S read and the
+    half-duplex mute gate. Mute stays active as defence-in-depth
+    until on-hardware listening confirms the canceller is doing
+    the work. Validation steps in `07-voice-architecture.md`
+    § "Software-reference AEC".
   - **M9.g** ✅ persona fetch from
     `GET /api/voice/realtime-instructions` (re-introduced
     server-side route in mochi-val for the device path; the
@@ -352,12 +354,11 @@ peripherals in parallel rather than serially:
     All 12 tools route the same way.
 
   **Remaining for full M9 acceptance.**
-  - Software-reference AEC bring-up: the M9.f.3 scaffold is landed
-    but disabled — pull `espressif/esp-sr`, flip
-    `VOICE_AEC_USE_ESP_SR` to 1, call `voice_aec_set_enabled(true)`
-    on data-channel open, and validate the diag counters
-    (`pushed/pulled/under/over/proc`) before relaxing the
-    half-duplex mute for barge-in.
+  - Software-reference AEC on-hardware bring-up: AEC is engaged
+    by default but never run on the device — validate diag
+    counters (`pushed/pulled/under/over/proc`), check for audible
+    bleed, tune `AEC_FILTER_LENGTH_MS` and mode, then relax the
+    half-duplex mute to allow barge-in.
   - 5-min stability soak across the acceptance criteria below.
   - End-to-end on-hardware tool-call validation (M9.h is wired
     + builds + the dispatcher worker started OK in test logs;
