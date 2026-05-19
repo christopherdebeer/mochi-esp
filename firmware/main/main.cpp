@@ -59,6 +59,7 @@ extern "C" {
 #include "voice/voice_diag.h"
 }
 #include "sprite_cache.h"
+#include "ota_update.h"
 
 /*
  * Endpoints for the on-device compositor. The scene is fetched once
@@ -86,6 +87,15 @@ static constexpr size_t SCENE_W = 200;
 static constexpr size_t SCENE_H = 172;
 static constexpr size_t SCENE_BYTES = (SCENE_W / 8) * SCENE_H;  /* 4300 */
 #define MOCHI_PET_CELL_URL_BASE "https://mochi.val.run/devsprite/cell/pet-v1/"
+
+/* OTA — manifest is uploaded as a release asset by the GitHub
+ * Actions workflow on every tag push. The `/releases/latest/download/`
+ * URL is GitHub's redirector to the latest release's asset, so we
+ * never have to bake a version number into firmware. The redirect
+ * lands on objects.githubusercontent.com and is followed by the
+ * default HTTP client. */
+#define MOCHI_OTA_MANIFEST_URL \
+    "https://github.com/christopherdebeer/mochi-esp/releases/latest/download/latest.json"
 
 /* Pet cell geometry — pet-v1 template grid is 96×96. The fetcher
  * verifies the wire-format header matches before copying. */
@@ -377,6 +387,21 @@ extern "C" void app_main(void) {
     }
 
     ESP_LOGI(TAG, "online; IP=%s, joined='%s'", ip_str, joined_ssid);
+
+    /*
+     * OTA bookkeeping. If this boot is the first one after an OTA
+     * install, the running slot is marked PENDING_VERIFY and would
+     * roll back on next reset unless we promote it now. WiFi up is
+     * the earliest signal we have that the new image is healthy:
+     * provisioning, NVS, STA stack, radio + DHCP all worked.
+     *
+     * Then spawn the background OTA task. It sleeps 30s before its
+     * first manifest poll so it never competes with the boot-time
+     * sprite fetches for radio bandwidth.
+     */
+    ota_update::mark_valid_if_pending();
+    ESP_LOGI(TAG, "running firmware version: %s", ota_update::current_version());
+    ota_update::start_background_task(MOCHI_OTA_MANIFEST_URL);
 
     /*
      * One-shot environmental + RTC readout before the touch loop
@@ -1140,6 +1165,26 @@ extern "C" void app_main(void) {
         if (sleep_gesture::requested()) {
             render_asleep();
             sleep_gesture::commit_sleep();
+        }
+
+        /*
+         * OTA reboot gate. The background task signals reboot_ready()
+         * after streaming a new image into the inactive slot. We hold
+         * off rebooting until the device is genuinely idle: no active
+         * voice session, no touch in the last 60s. That avoids
+         * yanking the screen mid-tap or mid-conversation.
+         *
+         * Once we reboot, the bootloader picks the freshly-flipped
+         * otadata slot and mark_valid_if_pending() above promotes it
+         * on the next successful WiFi join. */
+        if (ota_update::reboot_ready() && !voice::is_active()) {
+            int64_t now_us = esp_timer_get_time();
+            constexpr int64_t OTA_IDLE_GATE_US = 60LL * 1000 * 1000;
+            if (now_us - last_event_us > OTA_IDLE_GATE_US) {
+                ESP_LOGI(TAG, "OTA staged + device idle → rebooting to apply");
+                vTaskDelay(pdMS_TO_TICKS(200));
+                esp_restart();
+            }
         }
 
         /* Voice auto-stop: the worker task can't safely call

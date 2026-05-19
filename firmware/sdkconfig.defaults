@@ -62,3 +62,14 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 # DTLS_SRTP depends on PROTO_DTLS, so both must be set.
 CONFIG_MBEDTLS_SSL_PROTO_DTLS=y
 CONFIG_MBEDTLS_SSL_DTLS_SRTP=y
+
+# OTA — over-the-air firmware updates from GitHub Releases (M14).
+#
+# Rollback: if a freshly-installed image fails to call
+# esp_ota_mark_app_valid_cancel_rollback() before the next reset
+# (e.g. it crashes during boot, or we lose power before the
+# WiFi+OTA-mark path completes), the bootloader auto-falls back to
+# the previous slot. ota_update::mark_valid_if_pending() is wired
+# into main right after WiFi STA joins, which is the earliest point
+# we have evidence the new image is healthy enough to keep.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

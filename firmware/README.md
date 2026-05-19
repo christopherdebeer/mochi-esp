@@ -69,7 +69,7 @@ firmware/
 ├── CMakeLists.txt              top-level project
 ├── sdkconfig.defaults          baseline IDF config (target, PSRAM, USB CDC,
 │                                 main task stack 8KB, CA bundle, …)
-├── partitions.csv              custom 8MB table: factory + storage (littlefs)
+├── partitions.csv              custom 8MB table: ota_0 + ota_1 + storage (littlefs)
 ├── dependencies.lock           pinned IDF component versions (joltwallet/littlefs)
 ├── README.md                   this file
 ├── main/
