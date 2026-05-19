@@ -329,6 +329,90 @@ static int pc_on_channel_open(esp_peer_data_channel_info_t *ch, void *ctx) {
     return 0;
 }
 
+/* ─── pending tool-call accumulators ───────────────────────────
+ *
+ * OpenAI streams a tool call across three event types:
+ *   1. response.output_item.added  with item.type === "function_call"
+ *      → captures (call_id, name)
+ *   2. response.function_call_arguments.delta × N
+ *      → text chunks of the JSON arguments string, by call_id
+ *   3. response.function_call_arguments.done
+ *      → may include the final arguments inline; if not, use accumulator
+ *
+ * We keep a small fixed-size table so multiple in-flight tool calls
+ * across a turn (asleep mode legitimately fires many) don't collide.
+ * 4 slots is plenty — observed in mochi-val: typically 1 per turn,
+ * occasional 2-3 in dream-capture bursts.
+ */
+#define MAX_PENDING_TOOLS 4
+typedef struct {
+    bool   in_use;
+    char   call_id[40];
+    char   name[40];
+    char  *args;       /* growing buffer, malloc'd */
+    size_t args_len;
+    size_t args_cap;
+} pending_tool_t;
+
+static pending_tool_t s_pending_tools[MAX_PENDING_TOOLS];
+
+static pending_tool_t *pending_find(const char *call_id) {
+    if (!call_id) return NULL;
+    for (int i = 0; i < MAX_PENDING_TOOLS; i++) {
+        if (s_pending_tools[i].in_use &&
+            strcmp(s_pending_tools[i].call_id, call_id) == 0) {
+            return &s_pending_tools[i];
+        }
+    }
+    return NULL;
+}
+
+static pending_tool_t *pending_alloc(const char *call_id, const char *name) {
+    for (int i = 0; i < MAX_PENDING_TOOLS; i++) {
+        if (!s_pending_tools[i].in_use) {
+            pending_tool_t *t = &s_pending_tools[i];
+            t->in_use = true;
+            strncpy(t->call_id, call_id, sizeof(t->call_id) - 1);
+            t->call_id[sizeof(t->call_id) - 1] = 0;
+            strncpy(t->name, name, sizeof(t->name) - 1);
+            t->name[sizeof(t->name) - 1] = 0;
+            t->args = NULL;
+            t->args_len = 0;
+            t->args_cap = 0;
+            return t;
+        }
+    }
+    return NULL;
+}
+
+static void pending_release(pending_tool_t *t) {
+    if (!t) return;
+    free(t->args);
+    memset(t, 0, sizeof(*t));
+}
+
+static void pending_release_all(void) {
+    for (int i = 0; i < MAX_PENDING_TOOLS; i++) {
+        pending_release(&s_pending_tools[i]);
+    }
+}
+
+static void pending_append_args(pending_tool_t *t, const char *delta) {
+    if (!t || !delta) return;
+    size_t dlen = strlen(delta);
+    if (t->args_len + dlen + 1 > t->args_cap) {
+        size_t new_cap = t->args_cap ? t->args_cap * 2 : 128;
+        while (new_cap < t->args_len + dlen + 1) new_cap *= 2;
+        char *grown = (char *)realloc(t->args, new_cap);
+        if (!grown) return;
+        t->args = grown;
+        t->args_cap = new_cap;
+    }
+    memcpy(t->args + t->args_len, delta, dlen);
+    t->args_len += dlen;
+    t->args[t->args_len] = 0;
+}
+
 /* Substring match against frame->data without alloc. Frames are
  * NUL-bounded JSON in practice (the data channel passes them as
  * UTF-8 strings) but we use length-bounded compare to be safe. */
@@ -397,6 +481,97 @@ static int pc_on_data(esp_peer_data_frame_t *frame, void *ctx) {
             set_phase(VOICE_PHASE_READY);
         }
     }
+
+    /* ── Tool call routing (M9.h) ──
+     *
+     * Three event types matter:
+     *   response.output_item.added            — captures (call_id, name)
+     *   response.function_call_arguments.delta — accumulates args text
+     *   response.function_call_arguments.done  — dispatches via val.run
+     *
+     * We cJSON_Parse the body once per matched event. Cheap at the
+     * ~250 B per event we see on the wire. Anything that doesn't
+     * involve tool calls skips the parse entirely via type_buf check.
+     */
+    if (strcmp(type_buf, "response.output_item.added") == 0 ||
+        strcmp(type_buf, "response.function_call_arguments.delta") == 0 ||
+        strcmp(type_buf, "response.function_call_arguments.done") == 0)
+    {
+        cJSON *root = cJSON_Parse(body);
+        if (!root) {
+            LOGW_DIAG("tool event JSON parse failed");
+            return 0;
+        }
+
+        if (strcmp(type_buf, "response.output_item.added") == 0) {
+            cJSON *item = cJSON_GetObjectItemCaseSensitive(root, "item");
+            if (cJSON_IsObject(item)) {
+                cJSON *itype = cJSON_GetObjectItemCaseSensitive(item, "type");
+                if (cJSON_IsString(itype) && itype->valuestring &&
+                    strcmp(itype->valuestring, "function_call") == 0) {
+                    cJSON *cid = cJSON_GetObjectItemCaseSensitive(item, "call_id");
+                    cJSON *nm = cJSON_GetObjectItemCaseSensitive(item, "name");
+                    if (cJSON_IsString(cid) && cJSON_IsString(nm)) {
+                        pending_tool_t *t = pending_alloc(
+                            cid->valuestring, nm->valuestring);
+                        if (t) {
+                            LOGI_DIAG("tool begin: %s call_id=%s",
+                                t->name, t->call_id);
+                        } else {
+                            LOGW_DIAG("pending tool table full; dropping %s",
+                                nm->valuestring);
+                        }
+                    }
+                }
+            }
+        } else if (strcmp(type_buf, "response.function_call_arguments.delta") == 0) {
+            cJSON *cid = cJSON_GetObjectItemCaseSensitive(root, "call_id");
+            cJSON *delta = cJSON_GetObjectItemCaseSensitive(root, "delta");
+            if (cJSON_IsString(cid) && cJSON_IsString(delta)) {
+                pending_tool_t *t = pending_find(cid->valuestring);
+                if (t) {
+                    pending_append_args(t, delta->valuestring);
+                }
+            }
+        } else if (strcmp(type_buf, "response.function_call_arguments.done") == 0) {
+            cJSON *cid = cJSON_GetObjectItemCaseSensitive(root, "call_id");
+            if (cJSON_IsString(cid)) {
+                pending_tool_t *t = pending_find(cid->valuestring);
+                /* Final args may come inline on .done OR be the
+                 * accumulator from .delta events. Prefer inline. */
+                cJSON *inline_args = cJSON_GetObjectItemCaseSensitive(
+                    root, "arguments");
+                const char *args_str = NULL;
+                if (cJSON_IsString(inline_args) && inline_args->valuestring) {
+                    args_str = inline_args->valuestring;
+                } else if (t && t->args) {
+                    args_str = t->args;
+                }
+                /* Tool name: prefer the table entry; fall back to a
+                 * .name field if the model put one on .done directly. */
+                const char *name_str = NULL;
+                cJSON *inline_name = cJSON_GetObjectItemCaseSensitive(
+                    root, "name");
+                if (cJSON_IsString(inline_name) && inline_name->valuestring) {
+                    name_str = inline_name->valuestring;
+                } else if (t) {
+                    name_str = t->name;
+                }
+                if (name_str) {
+                    LOGI_DIAG("tool dispatch: %s call_id=%s args=%u B",
+                        name_str, cid->valuestring,
+                        (unsigned)(args_str ? strlen(args_str) : 0));
+                    voice_tools_dispatch(cid->valuestring, name_str, args_str);
+                } else {
+                    LOGW_DIAG("tool .done with no known name (call_id=%s)",
+                        cid->valuestring);
+                }
+                if (t) pending_release(t);
+            }
+        }
+        cJSON_Delete(root);
+    }
+
     return 0;
 }
 
@@ -652,6 +827,11 @@ int voice_peer_start(const char *openai_key, const char *instructions) {
         (unsigned)strlen(openai_key),
         instructions && *instructions ? 1 : 0);
 
+    /* Spin up the tool-dispatch worker. Caller is responsible for
+     * voice_tools_set_pet_id() before this. Idempotent — safe to
+     * call from every session start. */
+    voice_tools_init();
+
     s_peer.key_copy = strdup(openai_key);
     if (!s_peer.key_copy) return -1;
 
@@ -860,6 +1040,12 @@ void voice_peer_stop(void) {
     s_peer.dc_stream_known = false;
     set_phase(VOICE_PHASE_IDLE);
     atomic_store(&s_peer.stop_requested, false);
+
+    /* Drop any in-flight tool-call accumulators + tear down the
+     * dispatch worker. New session will re-init lazily. */
+    pending_release_all();
+    voice_tools_shutdown();
+
     LOGI_DIAG("stopped");
 
     /* Persist the session log so it survives USB disconnect. The

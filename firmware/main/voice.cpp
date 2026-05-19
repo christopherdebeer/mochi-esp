@@ -13,6 +13,7 @@ extern "C" {
 #include "voice/openai_signaling.h"
 #include "voice/voice_peer.h"
 #include "voice/voice_https.h"
+#include "voice/voice_tools.h"
 #include "esp_peer_signaling.h"
 }
 
@@ -185,12 +186,17 @@ int start_session(void) {
      * trip (~1 s typical) before the mint round-trip; both happen
      * before the touch loop sees the session as active, so the user
      * just sees the long-press → curious render → connecting time
-     * grow by the persona-fetch cost. Fine for v1. */
+     * grow by the persona-fetch cost. Fine for v1.
+     *
+     * pet_id also gets handed to the tool-dispatch module so its
+     * worker knows which X-Pet-Id to send when posting tool calls
+     * to /api/voice/tool. */
     {
         const char *instructions = FALLBACK_INSTRUCTIONS;
         if (s_have_pair) {
             struct mochi_pair_creds pair = {};
             if (pair_creds_load(&pair)) {
+                voice_tools_set_pet_id(pair.pet_id);
                 if (fetch_persona(pair.pet_id, persona_buf, PERSONA_BUF_BYTES)) {
                     instructions = persona_buf;
                 }
