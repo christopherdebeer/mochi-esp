@@ -1,0 +1,582 @@
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x15 (USB_UART_CHIP_RESET),boot:0x9 (SPI_FAST_FLASH_BOOT)
+Saved PC:0x40056f60
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2810,len:0x1828
+load:0x403c8700,len:0x4
+load:0x403c8704,len:0xc40
+load:0x403cb700,len:0x2ec8
+entry 0x403c8908
+[0;32mI (26) boot: ESP-IDF v5.3.5-506-g0cf21f6beb 2nd stage bootloader[0m
+[0;32mI (27) boot: compile time May 18 2026 14:47:41[0m
+[0;32mI (27) boot: Multicore bootloader[0m
+[0;32mI (27) boot: chip revision: v0.2[0m
+[0;32mI (27) boot: efuse block revision: v1.4[0m
+[0;32mI (28) boot.esp32s3: Boot SPI Speed : 80MHz[0m
+[0;32mI (28) boot.esp32s3: SPI Mode       : DIO[0m
+[0;32mI (28) boot.esp32s3: SPI Flash Size : 8MB[0m
+[0;32mI (28) boot: Enabling RNG early entropy source...[0m
+[0;32mI (28) boot: Partition Table:[0m
+[0;32mI (29) boot: ## Label            Usage          Type ST Offset   Length[0m
+[0;32mI (29) boot:  0 nvs              WiFi data        01 02 00009000 00006000[0m
+[0;32mI (29) boot:  1 phy_init         RF data          01 01 0000f000 00001000[0m
+[0;32mI (30) boot:  2 factory          factory app      00 00 00010000 00200000[0m
+[0;32mI (30) boot:  3 storage          Unknown data     01 83 00210000 005f0000[0m
+[0;32mI (31) boot: End of partition table[0m
+[0;32mI (31) esp_image: segment 0: paddr=00010020 vaddr=3c100020 size=4e460h (320608) map[0m
+[0;32mI (90) esp_image: segment 1: paddr=0005e488 vaddr=3fca0900 size=01b90h (  7056) load[0m
+[0;32mI (92) esp_image: segment 2: paddr=00060020 vaddr=42000020 size=f00d0h (983248) map[0m
+[0;32mI (271) esp_image: segment 3: paddr=001500f8 vaddr=3fca2490 size=04004h ( 16388) load[0m
+[0;32mI (275) esp_image: segment 4: paddr=00154104 vaddr=40374000 size=1c81ch (116764) load[0m
+[0;32mI (302) esp_image: segment 5: paddr=00170928 vaddr=50000000 size=00004h (     4) load[0m
+[0;32mI (303) esp_image: segment 6: paddr=00170934 vaddr=600fe000 size=0006ch (   108) load[0m
+[0;32mI (314) boot: Loaded app from partition at offset 0x10000[0m
+[0;32mI (314) boot: Disabling RNG early entropy source...[0m
+[0;32mI (315) octal_psram: vendor id    : 0x0d (AP)[0m
+[0;32mI (315) octal_psram: dev id       : 0x02 (generation 3)[0m
+[0;32mI (316) octal_psram: density      : 0x03 (64 Mbit)[0m
+[0;32mI (316) octal_psram: good-die     : 0x01 (Pass)[0m
+[0;32mI (316) octal_psram: Latency      : 0x01 (Fixed)[0m
+[0;32mI (316) octal_psram: VCC          : 0x01 (3V)[0m
+[0;32mI (317) octal_psram: SRF          : 0x01 (Fast Refresh)[0m
+[0;32mI (317) octal_psram: BurstType    : 0x01 (Hybrid Wrap)[0m
+[0;32mI (317) octal_psram: BurstLen     : 0x01 (32 Byte)[0m
+[0;32mI (318) octal_psram: Readlatency  : 0x02 (10 cycles@Fixed)[0m
+[0;32mI (318) octal_psram: DriveStrength: 0x00 (1/1)[0m
+[0;32mI (319) MSPI Timing: PSRAM timing tuning index: 4[0m
+[0;32mI (319) esp_psram: Found 8MB PSRAM device[0m
+[0;32mI (319) esp_psram: Speed: 80MHz[0m
+[0;32mI (320) cpu_start: Multicore app[0m
+[0;32mI (765) esp_psram: SPI SRAM memory test OK[0m
+[0;32mI (774) cpu_start: Pro cpu start user code[0m
+[0;32mI (774) cpu_start: cpu freq: 160000000 Hz[0m
+[0;32mI (775) app_init: Application information:[0m
+[0;32mI (775) app_init: Project name:     eink-pet[0m
+[0;32mI (775) app_init: App version:      1[0m
+[0;32mI (775) app_init: Compile time:     May 19 2026 15:47:13[0m
+[0;32mI (775) app_init: ELF file SHA256:  a7e5993c0...[0m
+[0;32mI (775) app_init: ESP-IDF:          v5.3.5-506-g0cf21f6beb[0m
+[0;32mI (776) efuse_init: Min chip rev:     v0.0[0m
+[0;32mI (776) efuse_init: Max chip rev:     v0.99 [0m
+[0;32mI (776) efuse_init: Chip rev:         v0.2[0m
+[0;32mI (776) heap_init: Initializing. RAM available for dynamic allocation:[0m
+[0;32mI (777) heap_init: At 3FCABFA0 len 0003D770 (245 KiB): RAM[0m
+[0;32mI (777) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM[0m
+[0;32mI (777) heap_init: At 3FCF0000 len 00008000 (32 KiB): DRAM[0m
+[0;32mI (778) heap_init: At 600FE06C len 00001F7C (7 KiB): RTCRAM[0m
+[0;32mI (778) esp_psram: Adding pool of 8192K of PSRAM memory to heap allocator[0m
+[0;32mI (779) spi_flash: detected chip: gd[0m
+[0;32mI (779) spi_flash: flash io: dio[0m
+[0;32mI (780) sleep: Configure to isolate all GPIO pins in sleep state[0m
+[0;32mI (781) sleep: Enable automatic switching of GPIO sleep configuration[0m
+[0;32mI (781) main_task: Started on CPU0[0m
+[0;32mI (782) esp_psram: Reserving pool of 32K of internal memory for DMA/internal allocations[0m
+[0;32mI (783) main_task: Calling app_main()[0m
+[0;32mI (783) mochi: —— mochi M3: boot ——[0m
+[0;32mI (783) mochi: chip: esp32s3 rev 0.2, 2 cores[0m
+[0;32mI (783) mochi: flash: 8 MB external[0m
+[0;32mI (783) mochi: psram: 8192 KB[0m
+[0;32mI (784) gpio: GPIO[3]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 [0m
+[0;32mI (784) gpio: GPIO[0]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (785) gpio: GPIO[6]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (835) gpio: GPIO[17]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (835) gpio: GPIO[42]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (885) driver: Initialize SPI[0m
+[0;32mI (886) gpio: GPIO[9]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (887) gpio: GPIO[10]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (887) gpio: GPIO[11]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (887) gpio: GPIO[8]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (4526) factory_reset: watching for PWR+BOOT 10s hold[0m
+[0;32mI (4526) gpio: GPIO[18]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (4526) sleep_gesture: watching for PWR 3 s hold[0m
+[0;32mI (4557) mochi: have 2 stored network(s) → scan + connect_any[0m
+[0;32mI (4559) pp: pp rom version: e7ae62f[0m
+[0;32mI (4560) net80211: net80211 rom version: e7ae62f[0m
+[0;32mI (4561) wifi:wifi driver task: 3fcc161c, prio:23, stack:6656, core=0[0m
+[0;32mI (4575) wifi:wifi firmware version: 4209e03[0m
+[0;32mI (4575) wifi:wifi certification version: v7.0[0m
+[0;32mI (4576) wifi:config NVS flash: enabled[0m
+[0;32mI (4576) wifi:config nano formating: disabled[0m
+[0;32mI (4576) wifi:Init data frame dynamic rx buffer num: 32[0m
+[0;32mI (4576) wifi:Init static rx mgmt buffer num: 5[0m
+[0;32mI (4577) wifi:Init management short buffer num: 32[0m
+[0;32mI (4577) wifi:Init dynamic tx buffer num: 32[0m
+[0;32mI (4577) wifi:Init static tx FG buffer num: 2[0m
+[0;32mI (4577) wifi:Init static rx buffer size: 1600[0m
+[0;32mI (4578) wifi:Init static rx buffer num: 10[0m
+[0;32mI (4578) wifi:Init dynamic rx buffer num: 32[0m
+[0;32mI (4579) wifi_init: rx ba win: 6[0m
+[0;32mI (4579) wifi_init: accept mbox: 6[0m
+[0;32mI (4579) wifi_init: tcpip mbox: 32[0m
+[0;32mI (4579) wifi_init: udp mbox: 6[0m
+[0;32mI (4580) wifi_init: tcp mbox: 6[0m
+[0;32mI (4580) wifi_init: tcp tx win: 5760[0m
+[0;32mI (4580) wifi_init: tcp rx win: 5760[0m
+[0;32mI (4580) wifi_init: tcp mss: 1440[0m
+[0;32mI (4580) wifi_init: WiFi IRAM OP enabled[0m
+[0;32mI (4580) wifi_init: WiFi RX IRAM OP enabled[0m
+[0;32mI (4582) phy_init: phy_version 711,97bcf0a2,Aug 25 2025,19:04:10[0m
+[0;32mI (4619) wifi:mode : sta (70:04:1d:db:f9:48)[0m
+[0;32mI (4620) wifi:enable tsf[0m
+[0;32mI (7124) wifi_sta: scan: 2 APs visible[0m
+[0;32mI (7126) wifi_sta: match [0] 'Vodafone0E20F1' (rssi=-58) — trying[0m
+[0;33mW (7128) wifi:Password length matches WPA2 standards, authmode threshold changes from OPEN to WPA2[0m
+[0;32mI (7138) wifi:new:<2,0>, old:<1,0>, ap:<255,255>, sta:<2,0>, prof:1, snd_ch_cfg:0x0[0m
+[0;32mI (7139) wifi:state: init -> auth (0xb0)[0m
+[0;32mI (11535) wifi:state: auth -> init (0x200)[0m
+[0;32mI (11538) wifi:new:<2,0>, old:<2,0>, ap:<255,255>, sta:<2,0>, prof:1, snd_ch_cfg:0x0[0m
+[0;33mW (11539) wifi_sta: disconnect; retry 1/8[0m
+[0;33mW (13950) wifi_sta: disconnect; retry 2/8[0m
+[0;32mI (13959) wifi:new:<2,0>, old:<2,0>, ap:<255,255>, sta:<2,0>, prof:1, snd_ch_cfg:0x0[0m
+[0;32mI (13960) wifi:state: init -> auth (0xb0)[0m
+[0;32mI (14744) wifi:state: auth -> assoc (0x0)[0m
+[0;32mI (14762) wifi:state: assoc -> run (0x10)[0m
+[0;32mI (14786) wifi:connected with Vodafone0E20F1, aid = 19, channel 2, BW20, bssid = 62:d8:a4:0e:20:f9[0m
+[0;32mI (14786) wifi:security: WPA3-SAE HUNT_AND_PECK, phy: bgn, rssi: -58, cipher(pairwise:0x3, group:0x3), pmf:1[0m
+[0;32mI (14789) wifi:pm start, type: 1[0m
+
+[0;32mI (14790) wifi:dp: 1, bi: 102400, li: 3, scale listen interval from 307200 us to 307200 us[0m
+[0;32mI (14790) wifi:set rx beacon pti, rx_bcn_pti: 0, bcn_timeout: 25000, mt_pti: 0, mt_time: 10000[0m
+[0;32mI (14798) wifi:<ba-add>idx:0 (ifx:0, 62:d8:a4:0e:20:f9), tid:3, ssn:1, winSize:64[0m
+[0;32mI (14821) wifi:AP's beacon interval = 102400 us, DTIM period = 1[0m
+[0;32mI (15029) wifi:<ba-add>idx:1 (ifx:0, 62:d8:a4:0e:20:f9), tid:0, ssn:1, winSize:64[0m
+[0;32mI (15793) wifi_sta: got IP 192.168.1.199[0m
+[0;32mI (15793) esp_netif_handlers: sta ip: 192.168.1.199, mask: 255.255.255.0, gw: 192.168.1.1[0m
+[0;32mI (15794) mochi: online; IP=192.168.1.199, joined='Vodafone0E20F1'[0m
+i2c: {sda: 47, scl: 48}
+i2s: {mclk: 14, bclk: 15, ws: 38, din: 16, dout: 45}
+in_out: {codec: ES8311, pa: 46, use_mclk: 1, pa_gain: 6}
+[0;32mI (15796) gpio: GPIO[47]| InputEn: 1| OutputEn: 1| OpenDrain: 1| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (15796) gpio: GPIO[48]| InputEn: 1| OutputEn: 1| OpenDrain: 1| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (15797) CODEC_INIT: Set mater handle 0 0x3c151ed8[0m
+[0;32mI (15797) i2c_bus: i2c bus ready (port=0, sda=47, scl=48)[0m
+[0;32mI (15798) rtc: ready (addr=0x51, lost_power=0)[0m
+[0;32mI (15799) mochi: rtc: 2026-05-19 13:46:42 (wd=1)[0m
+[0;31mE (15800) i2c.master: i2c_master_transmit(1202): I2C transaction failed[0m
+[0;31mE (15800) shtc3: reset failed[0m
+[0;32mI (15800) CODEC_INIT: in:1 out:1 port: 1[0m
+[0;32mI (15800) CODEC_INIT: Success to int i2c: 0[0m
+[0;32mI (15801) CODEC_INIT: Init i2s 0 type: 3 mclk:14 bclk:15 ws:38 din:16 dout:45[0m
+[0;32mI (15801) CODEC_INIT: tx:0x3c1523a4 rx:0x3c152548[0m
+[0;32mI (15803) CODEC_INIT: output init std ret 0[0m
+[0;32mI (15804) CODEC_INIT: Input init std ret 0[0m
+[0;32mI (15804) CODEC_INIT: Init i2s 0 ok[0m
+[0;32mI (15804) CODEC_INIT: Success to init i2s: 0[0m
+[0;32mI (15804) CODEC_INIT: Success to int i2c: 0[0m
+[0;32mI (15805) CODEC_INIT: Success to init i2s: 0[0m
+[0;32mI (15805) CODEC_INIT: Get out handle 0x3c1523a4 port 0[0m
+[0;32mI (15805) gpio: GPIO[46]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 [0m
+[0;32mI (15812) ES8311: Work in Slave mode[0m
+[0;32mI (15816) voice: init_codec ok[0m
+[0;32mI (15818) openai_key: loaded openai key (len=164, prefix='sk-p…')[0m
+[0;32mI (15819) pair_creds: loaded pairing: pet_id=pet_441654b7-512 pet_name='Mochi'[0m
+[0;32mI (15819) voice: pet_id available: pet_441654b7-512[0m
+[0;32mI (15820) battery: ready (ADC1 ch3, 1:2 divider, curve-fit cal=yes)[0m
+[0;32mI (17821) mochi: battery diag: min=4082 mean=4091 max=4094 spread=12 mV (n=10)[0m
+[0;32mI (17821) mochi: battery diag → looks like a real LiPo on USB charge[0m
+[0;32mI (17924) sprite_cache: mounted: 102400/6225920 bytes used[0m
+[0;32mI (18089) esp-x509-crt-bundle: Certificate validated[0m
+[0;32mI (19351) mochi: etag 'pet-v1' unchanged ("7c11b551ffaeb2dd-s1") — using cache[0m
+[0;32mI (19502) esp-x509-crt-bundle: Certificate validated[0m
+[0;32mI (21193) mochi: etag 'ui-v1' unchanged ("210f9acc61b33f1f-s1") — using cache[0m
+[0;32mI (21347) esp-x509-crt-bundle: Certificate validated[0m
+[0;32mI (22527) mochi: etag 'scene-v1' unchanged ("24b5c20db347aaac") — using cache[0m
+[0;32mI (22529) pair_creds: loaded pairing: pet_id=pet_441654b7-512 pet_name='Mochi'[0m
+[0;32mI (22529) mochi: paired to 'Mochi' (pet_id=pet_441654b7-512)[0m
+[0;32mI (22551) mochi: scene loaded from cache[0m
+[0;32mI (22588) mochi: icon 'heart' loaded from cache[0m
+[0;32mI (22623) mochi: icon 'star' loaded from cache[0m
+[0;32mI (22661) mochi: icon 'bowl' loaded from cache[0m
+[0;32mI (22705) mochi: icon 'ball' loaded from cache[0m
+[0;32mI (26394) mochi: rendered 'neutral' (cache 0 ms, full refresh)[0m
+[0;32mI (26394) touch: i2c probe 0x38: ACK[0m
+[0;32mI (26395) touch: i2c probe 0x15: no[0m
+[0;32mI (26396) touch: i2c probe 0x5D: no[0m
+[0;32mI (26396) touch: i2c probe 0x51: ACK[0m
+[0;32mI (26396) touch: i2c probe 0x70: ACK[0m
+[0;32mI (26397) gpio: GPIO[7]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 [0m
+[0;32mI (26697) gpio: GPIO[21]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:2 [0m
+[0;32mI (26698) touch: ready (INT=GP21, RST=GP7, addr=0x38)[0m
+[0;32mI (32228) touch: event src=ISR x=105 y=141[0m
+[0;32mI (32228) mochi: touch (105,141) zone=4 expr=curious[0m
+[0;32mI (33029) mochi: long-press → start voice session[0m
+[0;32mI (33857) mochi: rendered 'curious' (cache 0 ms, partial refresh)[0m
+[0;32mI (33858) openai_key: loaded openai key (len=164, prefix='sk-p…')[0m
+[0;32mI (33859) pair_creds: loaded pairing: pet_id=pet_441654b7-512 pet_name='Mochi'[0m
+[0;32mI (34017) esp-x509-crt-bundle: Certificate validated[0m
+[0;32mI (36240) voice: persona fetched: 1474 bytes[0m
+[0;32mI (36241) voice: starting voice session (instructions: fetched)…[0m
+[0;32mI (36241) voice_peer: voice_peer_start (key_len=164, has_instr=1)[0m
+[0;32mI (36242) voice_peer: phase: IDLE → CONNECTING[0m
+[0;32mI (36242) voice_peer: worker_task started[0m
+[0;32mI (37389) esp-x509-crt-bundle: Certificate validated[0m
+[0;32mI (38600) voice_peer: sig → ice_info (initiator=1, stun=(none))[0m
+[0;32mI (38601) DTLS: Init SRTP OK[0m
+[0;32mI (39689) voice_peer: peer opened[0m
+[0;32mI (39690) voice_peer: peer state → 2[0m
+[0;32mI (39690) voice_peer: kicked peer: new_connection[0m
+[0;32mI (39692) voice_peer: peer state → 3[0m
+[0;32mI (39692) AGENT: Start agent as Controlling[0m
+[0;32mI (39694) voice_peer: negotiated audio: codec=3 rate=24000 ch=1[0m
+[0;33mW (39695) ESP_OPUS_DEC: Frame duration is not set, out pcm buffer size is counted as the length of 60ms.[0m
+[0;32mI (39696) I2S_IF: STD: TX, data_bit: 16, slot_bit: 16, ws_width: 16, slot_mode: MONO, slot_mask: 0x1[0m
+[0;32mI (39697) I2S_IF: STD: TX, sample_rate_hz: 24000, mclk_multiple: 256, clk_src: 6[0m
+[0;32mI (39697) I2S_IF: STD: RX, data_bit: 16, slot_bit: 16, ws_width: 16, slot_mode: MONO, slot_mask: 0x1[0m
+[0;32mI (39698) I2S_IF: STD: RX, sample_rate_hz: 24000, mclk_multiple: 256, clk_src: 6[0m
+[0;32mI (39716) Adev_Codec: Open codec device OK[0m
+[0;32mI (39717) voice_peer: playback open: 24000 Hz, 1 ch[0m
+[0;32mI (39718) voice_peer: peer → signaling: type=1 size=937[0m
+[0;32mI (40820) esp-x509-crt-bundle: Certificate validated[0m
+[0;32mI (42177) voice_peer: sig → peer: type=1 size=1494[0m
+[0;32mI (42178) PEER_DEF: Get peer role 0[0m
+[0;32mI (42178) PEER_DEF: Get peer role 0[0m
+[0;32mI (42179) PEER_DEF: Extract SDP: stream_count=2, audio_mid=255 (dir=3), video_mid=255 (dir=3), data_mid=255, assrc=3241803146, vssrc=0, vrtx_ssrc=0, vfmt=0, vrtx_fmt=0[0m
+[0;32mI (42179) AGENT: 0 Add remote type:1 20.162.96.163:3478[0m
+[0;32mI (42180) AGENT: 0 Add remote type:1 4.245.198.13:3478[0m
+[0;32mI (42180) AGENT: 0 Add remote type:1 135.220.40.201:3478[0m
+[0;32mI (42180) voice_peer: peer state → 4[0m
+[0;32mI (42181) voice_peer: peer state → 4[0m
+[0;32mI (42192) AGENT: 0 0 Send binding request (cand:0) local0:192.168.1.199:58129 remote0:20.162.96.163:3478 id:7043bfa4398150e937521657[0m
+[0;32mI (42195) AGENT: 0 1 Send binding request (cand:0) local0:192.168.1.199:58129 remote0:4.245.198.13:3478 id:4d9a2fdb76c3625e55075020[0m
+[0;32mI (42198) AGENT: 0 2 Send binding request (cand:0) local0:192.168.1.199:58129 remote0:135.220.40.201:3478 id:329b54fb381fc0385378d5a8[0m
+[0;32mI (42371) AGENT: 0 0 LocalBinding resp 7043bfa4398150e937521657 local1[0m
+[0;32mI (42371) AGENT: 0 Select pair20.162.96.163:3478[0m
+[0;32mI (42372) AGENT: 0 0 Send binding request (cand:1) local0:192.168.1.199:58129 remote0:20.162.96.163:3478 id:76e5004e797d87a62756c714[0m
+[0;32mI (42376) AGENT: 0 0 PeerBinding recv local0:192.168.1.199:58129 remote0:20.162.96.163:3478[0m
+[0;32mI (42377) AGENT: 0 0 Send binding response local0:192.168.1.199:58129 remote1:20.162.96.163:3478[0m
+[0;32mI (42381) AGENT: 0 1 LocalBinding resp 4d9a2fdb76c3625e55075020 local1[0m
+[0;32mI (42383) AGENT: 0 1 PeerBinding recv local1:192.168.1.199:58129 remote0:4.245.198.13:3478[0m
+[0;32mI (42387) AGENT: 0 2 LocalBinding resp 329b54fb381fc0385378d5a8 local1[0m
+[0;32mI (42389) AGENT: 0 2 PeerBinding recv local1:192.168.1.199:58129 remote0:135.220.40.201:3478[0m
+[0;32mI (42575) AGENT: 0 0 LocalBinding resp 76e5004e797d87a62756c714 local1[0m
+[0;32mI (42576) AGENT: 0 Candidate responded[0m
+[0;32mI (42576) AGENT: 0 Connection OK 20.162.96.163:3478[0m
+[0;32mI (42577) voice_peer: peer state → 5[0m
+[0;32mI (42577) PEER_DEF: Start DTLS role as 1[0m
+[0;32mI (42577) voice_peer: peer state → 6[0m
+[0;32mI (42587) DTLS: Start to do server handshake[0m
+[0;32mI (43340) DTLS: SRTP connected OK[0m
+[0;32mI (43346) DTLS: Server handshake success[0m
+[0;32mI (43346) PEER_DEF: DTLS handshake success[0m
+[0;32mI (43346) PEER_DEF: Sctp role as 0[0m
+[0;32mI (43347) voice_peer: peer state → 7[0m
+[0;32mI (43498) SCTP: 0 Receive chunk 1 SCTP_INIT[0m
+[0;32mI (43498) SCTP: 0 state 2[0m
+[0;32mI (43498) SCTP: Support ext 82[0m
+[0;32mI (43498) SCTP: Support ext c0[0m
+[0;32mI (43498) SCTP: Send INIT_ACK chunk[0m
+[0;32mI (43503) voice_peer: audio frame[1] size=3 TOC=0xD8 bytes=D8 FF FE[0m
+[0;32mI (43507) voice_peer: decoded[1]: pcm=960 B, info{rate=24000 ch=1 bps=16}[0m
+[0;32mI (43522) voice_peer: audio frame[2] size=3 TOC=0xD8 bytes=D8 FF FE[0m
+[0;32mI (43525) voice_peer: decoded[2]: pcm=960 B, info{rate=24000 ch=1 bps=16}[0m
+[0;32mI (43541) voice_peer: audio frame[3] size=3 TOC=0xD8 bytes=D8 FF FE[0m
+[0;32mI (43545) voice_peer: decoded[3]: pcm=960 B, info{rate=24000 ch=1 bps=16}[0m
+[0;32mI (43637) SCTP: 0 Receive chunk 10 SCTP_COOKIE_ECHO[0m
+[0;32mI (43637) SCTP: Send ECHO_ACK chunk[0m
+[0;32mI (43639) SCTP: 0 state 5[0m
+[0;32mI (43640) voice_peer: peer state → 9[0m
+[0;32mI (43643) SCTP: Send DCEP oai-events event:3 type:80 si:1[0m
+[0;32mI (43643) voice_peer: manual DCEP open: 'oai-events'[0m
+[0;32mI (43777) voice_peer: data channel opened: label='oai-events' stream_id=1[0m
+[0;32mI (43777) voice_peer: peer state → 10[0m
+[0;32mI (43778) voice_peer: phase: CONNECTING → READY[0m
+[0;32mI (43778) voice_peer: DATA_CHANNEL_OPENED — sending response.create[0m
+[0;32mI (43781) voice_peer: sent response.create on dc stream 1[0m
+[0;32mI (43789) voice_peer: first data-channel event (size=2235, first 256 B):[0m
+[0;32mI (43789) voice_peer: {"type":"session.created","event_id":"event_DhJoYmcffmeDagNehmJRB","session":{"type":"realtime","object":"realtime.session","id":"sess_DhJoUB6pPuAVpERswtO9C","model":"gpt-realtime","output_modalities":["audio"],"instructions":"you are Mochi, a small fox �[0m
+[0;32mI (43935) voice_peer: dc event type=response.created size=413[0m
+[0;32mI (43939) mochi: voice phase → 2, render comforted[0m
+[0;32mI (44199) voice_peer: dc event type=response.output_item.added size=310[0m
+[0;32mI (44206) voice_peer: dc event type=conversation.item.added size=271[0m
+[0;32mI (44212) voice_peer: dc event type=response.function_call_arguments.delta size=268[0m
+[0;32mI (44224) voice_peer: dc event type=response.function_call_arguments.delta size=267[0m
+[0;32mI (44231) voice_peer: dc event type=response.function_call_arguments.delta size=267[0m
+[0;32mI (44237) voice_peer: dc event type=response.function_call_arguments.delta size=268[0m
+[0;32mI (44248) voice_peer: dc event type=response.function_call_arguments.delta size=268[0m
+[0;32mI (44254) voice_peer: dc event type=response.function_call_arguments.delta size=267[0m
+[0;32mI (44265) voice_peer: dc event type=response.function_call_arguments.delta size=267[0m
+[0;32mI (44276) voice_peer: dc event type=response.function_call_arguments.delta size=267[0m
+[0;32mI (44283) voice_peer: dc event type=response.function_call_arguments.delta size=267[0m
+[0;32mI (44289) voice_peer: dc event type=response.function_call_arguments.delta size=267[0m
+[0;32mI (44299) voice_peer: dc event type=response.function_call_arguments.delta size=267[0m
+[0;32mI (44305) voice_peer: dc event type=response.function_call_arguments.delta size=267[0m
+[0;32mI (44311) voice_peer: dc event type=response.function_call_arguments.delta size=268[0m
+[0;32mI (44348) voice_peer: dc event type=response.function_call_arguments.done size=325[0m
+[0;32mI (44351) voice_peer: dc event type=conversation.item.done size=322[0m
+[0;32mI (44362) voice_peer: dc event type=response.output_item.done size=361[0m
+[0;32mI (44368) voice_peer: dc event type=response.done size=907[0m
+[0;32mI (44374) voice_peer: dc event type=rate_limits.updated size=159[0m
+[0;32mI (44896) mochi: rendered 'comforted' (cache 0 ms, partial refresh)[0m
+[0;32mI (57388) touch: event src=ISR x=119 y=141[0m
+[0;32mI (57389) mochi: touch (119,141) zone=4 expr=curious[0m
+[0;32mI (57389) mochi: voice active — centre tap → text talk-back[0m
+[0;32mI (57394) voice_peer: send_text: 0/0 ('Are you still there? Say a quick goodbye and stop.')[0m
+[0;32mI (57398) touch: event src=ISR x=119 y=141[0m
+[0;32mI (57408) touch: event src=ISR x=119 y=141[0m
+[0;32mI (57542) voice_peer: dc event type=conversation.item.added size=312[0m
+[0;32mI (57554) voice_peer: dc event type=conversation.item.done size=311[0m
+[0;32mI (57561) voice_peer: dc event type=response.created size=413[0m
+[0;32mI (57767) voice_peer: dc event type=response.output_item.added size=290[0m
+[0;32mI (57773) voice_peer: dc event type=conversation.item.added size=275[0m
+[0;32mI (57779) voice_peer: dc event type=response.function_call_arguments.delta size=267[0m
+[0;32mI (57791) voice_peer: dc event type=response.function_call_arguments.done size=253[0m
+[0;32mI (57796) voice_peer: dc event type=conversation.item.done size=274[0m
+[0;32mI (57803) voice_peer: dc event type=response.output_item.done size=289[0m
+[0;32mI (57808) voice_peer: dc event type=response.done size=839[0m
+[0;32mI (57814) voice_peer: dc event type=rate_limits.updated size=159[0m
+[0;32mI (178206) touch: event src=ISR x=199 y=177[0m
+[0;32mI (178206) mochi: touch (199,177) zone=3 expr=excited[0m
+[0;32mI (178207) mochi: voice active — non-centre tap → stop session[0m
+[0;32mI (178207) voice: stopping voice session…[0m
+[0;32mI (178207) voice_peer: voice_peer_stop: rx=6736 dec_ok=6736 dec_err=0 wr_err=0 pcm=6466560 B[0m
+[0;32mI (178207) voice_peer: sig closed[0m
+[0;32mI (178208) voice_peer: peer state → 1[0m
+[0;33mW (178208) voice_peer: peer DISCONNECTED[0m
+[0;32mI (178209) AGENT: agent disconnected done[0m
+[0;32mI (178209) SCTP: 0 state 6[0m
+[0;32mI (178209) voice_peer: peer state → 11[0m
+[0;32mI (178209) voice_peer: peer state → 12[0m
+[0;32mI (178209) AGENT: agent disconnected done[0m
+[0;32mI (178215) voice_peer: worker_task exiting[0m
+[0;32mI (178227) voice_peer: phase: READY → IDLE[0m
+[0;32mI (178227) voice_peer: stopped[0m
+[0;32mI (178310) voice_diag: flushed 4092 bytes to /lfs/voice_last.log[0m
+[0;32mI (178310) voice: voice session stopped[0m
+[0;32mI (179152) mochi: rendered 'neutral' (cache 0 ms, partial refresh)[0m
+[0;32mI (181136) touch: event src=ISR x=116 y=152[0m
+[0;32mI (181137) mochi: touch (116,152) zone=4 expr=curious[0m
+[0;32mI (181938) mochi: long-press → start voice session[0m
+[0;32mI (182771) mochi: rendered 'curious' (cache 0 ms, partial refresh)[0m
+[0;32mI (182773) openai_key: loaded openai key (len=164, prefix='sk-p…')[0m
+[0;32mI (182774) pair_creds: loaded pairing: pet_id=pet_441654b7-512 pet_name='Mochi'[0m
+[0;32mI (182936) esp-x509-crt-bundle: Certificate validated[0m
+[0;32mI (183814) voice: persona fetched: 4095 bytes[0m
+[0;32mI (183814) voice: starting voice session (instructions: fetched)…[0m
+[0;32mI (183815) voice_peer: voice_peer_start (key_len=164, has_instr=1)[0m
+[0;32mI (183815) voice_peer: phase: IDLE → CONNECTING[0m
+[0;32mI (183816) voice_peer: worker_task started[0m
+[0;32mI (185006) esp-x509-crt-bundle: Certificate validated[0m
+[0;32mI (186123) voice_peer: sig → ice_info (initiator=1, stun=(none))[0m
+[0;32mI (186132) voice_peer: peer opened[0m
+[0;32mI (186133) voice_peer: peer state → 2[0m
+[0;32mI (186135) voice_peer: kicked peer: new_connection[0m
+[0;32mI (186136) voice_peer: peer state → 3[0m
+[0;32mI (186136) AGENT: Start agent as Controlling[0m
+[0;32mI (186138) voice_peer: negotiated audio: codec=3 rate=24000 ch=1[0m
+[0;33mW (186139) ESP_OPUS_DEC: Frame duration is not set, out pcm buffer size is counted as the length of 60ms.[0m
+[0;31mE (186140) i2s_common: i2s_channel_disable(1151): the channel has not been enabled yet[0m
+[0;31mE (186140) i2s_common: i2s_channel_disable(1151): the channel has not been enabled yet[0m
+[0;32mI (186141) I2S_IF: STD: TX, data_bit: 16, slot_bit: 16, ws_width: 16, slot_mode: MONO, slot_mask: 0x1[0m
+[0;32mI (186142) I2S_IF: STD: TX, sample_rate_hz: 24000, mclk_multiple: 256, clk_src: 6[0m
+[0;32mI (186143) I2S_IF: STD: RX, data_bit: 16, slot_bit: 16, ws_width: 16, slot_mode: MONO, slot_mask: 0x1[0m
+[0;32mI (186143) I2S_IF: STD: RX, sample_rate_hz: 24000, mclk_multiple: 256, clk_src: 6[0m
+[0;32mI (186162) Adev_Codec: Open codec device OK[0m
+[0;32mI (186163) voice_peer: playback open: 24000 Hz, 1 ch[0m
+[0;32mI (186164) voice_peer: peer → signaling: type=1 size=937[0m
+[0;32mI (187340) esp-x509-crt-bundle: Certificate validated[0m
+[0;32mI (188677) voice_peer: sig → peer: type=1 size=1490[0m
+[0;32mI (188678) PEER_DEF: Get peer role 0[0m
+[0;32mI (188679) PEER_DEF: Get peer role 0[0m
+[0;32mI (188679) PEER_DEF: Extract SDP: stream_count=2, audio_mid=255 (dir=3), video_mid=255 (dir=3), data_mid=255, assrc=895494673, vssrc=0, vrtx_ssrc=0, vfmt=0, vrtx_fmt=0[0m
+[0;32mI (188680) AGENT: 0 Add remote type:1 20.162.96.163:3478[0m
+[0;32mI (188681) AGENT: 0 Add remote type:1 4.245.198.13:3478[0m
+[0;32mI (188682) AGENT: 0 Add remote type:1 135.220.40.201:3478[0m
+[0;32mI (188682) voice_peer: peer state → 4[0m
+[0;32mI (188682) voice_peer: peer state → 4[0m
+[0;32mI (188694) AGENT: 0 0 Send binding request (cand:0) local0:192.168.1.199:58130 remote0:20.162.96.163:3478 id:7043bfa4398150e937521657[0m
+[0;32mI (188696) AGENT: 0 1 Send binding request (cand:0) local0:192.168.1.199:58130 remote0:4.245.198.13:3478 id:4d9a2fdb76c3625e55075020[0m
+[0;32mI (188700) AGENT: 0 2 Send binding request (cand:0) local0:192.168.1.199:58130 remote0:135.220.40.201:3478 id:329b54fb381fc0385378d5a8[0m
+[0;32mI (188837) AGENT: 0 1 LocalBinding resp 4d9a2fdb76c3625e55075020 local1[0m
+[0;32mI (188838) AGENT: 0 Select pair4.245.198.13:3478[0m
+[0;32mI (188838) AGENT: 0 1 Send binding request (cand:1) local0:192.168.1.199:58130 remote0:4.245.198.13:3478 id:76e5004e797d87a62756c714[0m
+[0;32mI (188843) AGENT: 0 1 PeerBinding recv local0:192.168.1.199:58130 remote0:4.245.198.13:3478[0m
+[0;32mI (188844) AGENT: 0 1 Send binding response local0:192.168.1.199:58130 remote1:4.245.198.13:3478[0m
+[0;32mI (188847) AGENT: 0 0 LocalBinding resp 7043bfa4398150e937521657 local1[0m
+[0;32mI (188849) AGENT: 0 0 PeerBinding recv local1:192.168.1.199:58130 remote0:20.162.96.163:3478[0m
+[0;32mI (188864) AGENT: 0 2 LocalBinding resp 329b54fb381fc0385378d5a8 local1[0m
+[0;32mI (188867) AGENT: 0 2 PeerBinding recv local1:192.168.1.199:58130 remote0:135.220.40.201:3478[0m
+[0;32mI (188967) AGENT: 0 1 LocalBinding resp 76e5004e797d87a62756c714 local1[0m
+[0;32mI (188968) AGENT: 0 Candidate responded[0m
+[0;32mI (188968) AGENT: 0 Connection OK 4.245.198.13:3478[0m
+[0;32mI (188969) voice_peer: peer state → 5[0m
+[0;32mI (188969) PEER_DEF: Start DTLS role as 1[0m
+[0;32mI (188970) voice_peer: peer state → 6[0m
+[0;32mI (188980) DTLS: Start to do server handshake[0m
+[0;32mI (189700) DTLS: SRTP connected OK[0m
+[0;32mI (189707) DTLS: Server handshake success[0m
+[0;32mI (189707) PEER_DEF: DTLS handshake success[0m
+[0;32mI (189707) PEER_DEF: Sctp role as 0[0m
+[0;32mI (189708) voice_peer: peer state → 7[0m
+[0;32mI (189835) SCTP: 0 Receive chunk 1 SCTP_INIT[0m
+[0;32mI (189836) SCTP: 0 state 2[0m
+[0;32mI (189836) SCTP: Support ext 82[0m
+[0;32mI (189836) SCTP: Support ext c0[0m
+[0;32mI (189836) SCTP: Send INIT_ACK chunk[0m
+[0;32mI (189854) voice_peer: audio frame[1] size=3 TOC=0xD8 bytes=D8 FF FE[0m
+[0;32mI (189858) voice_peer: decoded[1]: pcm=960 B, info{rate=24000 ch=1 bps=16}[0m
+[0;32mI (189875) voice_peer: audio frame[2] size=3 TOC=0xD8 bytes=D8 FF FE[0m
+[0;32mI (189879) voice_peer: decoded[2]: pcm=960 B, info{rate=24000 ch=1 bps=16}[0m
+[0;32mI (189896) voice_peer: audio frame[3] size=3 TOC=0xD8 bytes=D8 FF FE[0m
+[0;32mI (189899) voice_peer: decoded[3]: pcm=960 B, info{rate=24000 ch=1 bps=16}[0m
+[0;32mI (189970) SCTP: 0 Receive chunk 10 SCTP_COOKIE_ECHO[0m
+[0;32mI (189970) SCTP: Send ECHO_ACK chunk[0m
+[0;32mI (189972) SCTP: 0 state 5[0m
+[0;32mI (189973) voice_peer: peer state → 9[0m
+[0;32mI (189976) SCTP: Send DCEP oai-events event:3 type:80 si:1[0m
+[0;32mI (189977) voice_peer: manual DCEP open: 'oai-events'[0m
+[0;32mI (190111) voice_peer: data channel opened: label='oai-events' stream_id=1[0m
+[0;32mI (190112) voice_peer: peer state → 10[0m
+[0;32mI (190112) voice_peer: phase: CONNECTING → READY[0m
+[0;32mI (190112) voice_peer: DATA_CHANNEL_OPENED — sending response.create[0m
+[0;32mI (190115) voice_peer: sent response.create on dc stream 1[0m
+[0;32mI (190273) voice_peer: first data-channel event (size=4889, first 256 B):[0m
+[0;32mI (190274) voice_peer: {"type":"session.created","event_id":"event_DhJqufOKbEoQYOhS4rtCX","session":{"type":"realtime","object":"realtime.session","id":"sess_DhJqs8h4d8i6RanM4540e","model":"gpt-realtime","output_modalities":["audio"],"instructions":"you are Mochi, a small fox �[0m
+[0;32mI (190278) voice_peer: dc event type=response.created size=413[0m
+[0;32mI (190359) mochi: voice phase → 2, render comforted[0m
+[0;32mI (190511) voice_peer: dc event type=response.output_item.added size=253[0m
+[0;32mI (190515) voice_peer: dc event type=conversation.item.added size=214[0m
+[0;32mI (190522) voice_peer: dc event type=response.content_part.added size=236[0m
+[0;32mI (190526) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (190537) voice_peer: dc event type=response.output_audio_transcript.delta size=253[0m
+[0;32mI (190602) voice_peer: dc event type=output_audio_buffer.started size=117[0m
+[0;32mI (190603) voice_peer: phase: READY → SPEAKING[0m
+[0;32mI (190815) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (190828) voice_peer: dc event type=response.output_audio_transcript.delta size=253[0m
+[0;32mI (190991) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (190998) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (191011) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (191018) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (191219) mochi: rendered 'comforted' (cache 0 ms, partial refresh)[0m
+[0;32mI (191294) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (191301) voice_peer: dc event type=response.output_audio_transcript.delta size=253[0m
+[0;32mI (191314) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (191322) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (191334) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (191732) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (191739) voice_peer: dc event type=response.output_audio_transcript.delta size=253[0m
+[0;32mI (191752) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (191767) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (191773) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (192172) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (192187) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (192193) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (192200) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (192227) mochi: voice phase → 3, render cheerful_wave[0m
+[0;32mI (192633) voice_peer: dc event type=response.output_audio.done size=195[0m
+[0;32mI (192641) voice_peer: dc event type=response.output_audio_transcript.done size=301[0m
+[0;32mI (192645) voice_peer: dc event type=response.content_part.done size=314[0m
+[0;32mI (192651) voice_peer: dc event type=conversation.item.done size=329[0m
+[0;32mI (192657) voice_peer: dc event type=response.output_item.done size=368[0m
+[0;32mI (192664) voice_peer: dc event type=response.done size=918[0m
+[0;32mI (192665) voice_peer: phase: SPEAKING → READY[0m
+[0;32mI (192676) voice_peer: dc event type=rate_limits.updated size=159[0m
+[0;32mI (193084) mochi: rendered 'cheerful_wave' (cache 0 ms, partial refresh)[0m
+[0;32mI (194084) mochi: voice phase → 2, render comforted[0m
+[0;32mI (194962) mochi: rendered 'comforted' (cache 0 ms, partial refresh)[0m
+[0;32mI (201595) voice_peer: dc event type=output_audio_buffer.stopped size=117[0m
+[0;32mI (311863) touch: event src=ISR x=115 y=165[0m
+[0;32mI (311864) mochi: touch (115,165) zone=5 expr=(gutter)[0m
+[0;32mI (311873) touch: event src=ISR x=115 y=165[0m
+[0;32mI (311882) touch: event src=ISR x=115 y=165[0m
+[0;32mI (311892) touch: event src=ISR x=115 y=165[0m
+[0;32mI (311902) touch: event src=ISR x=115 y=165[0m
+[0;32mI (311911) touch: event src=ISR x=115 y=165[0m
+[0;32mI (311921) touch: event src=ISR x=115 y=165[0m
+[0;32mI (311929) touch: event src=poll x=115 y=165[0m
+[0;32mI (311931) touch: event src=ISR x=115 y=165[0m
+[0;32mI (311941) touch: event src=ISR x=115 y=165[0m
+[0;32mI (311949) touch: event src=ISR x=115 y=165[0m
+[0;32mI (311961) touch: event src=ISR x=115 y=165[0m
+[0;32mI (311968) touch: event src=ISR x=115 y=165[0m
+[0;32mI (317241) touch: event src=ISR x=99 y=163[0m
+[0;32mI (317242) mochi: touch (99,163) zone=4 expr=curious[0m
+[0;32mI (317242) mochi: voice active — centre tap → text talk-back[0m
+[0;32mI (317247) voice_peer: send_text: 0/0 ('Are you still there? Say a quick goodbye and stop.')[0m
+[0;32mI (317249) touch: event src=ISR x=99 y=163[0m
+[0;32mI (317261) touch: event src=ISR x=99 y=163[0m
+[0;32mI (317265) touch: event src=ISR x=99 y=163[0m
+[0;32mI (317282) touch: event src=ISR x=99 y=163[0m
+[0;32mI (317284) touch: event src=ISR x=99 y=163[0m
+[0;32mI (317301) touch: event src=ISR x=99 y=163[0m
+[0;32mI (317304) touch: event src=ISR x=99 y=163[0m
+[0;32mI (317313) touch: event src=ISR x=99 y=163[0m
+[0;32mI (317323) touch: event src=ISR x=99 y=163[0m
+[0;32mI (317328) touch: event src=poll x=99 y=163[0m
+[0;32mI (317377) voice_peer: dc event type=conversation.item.added size=312[0m
+[0;32mI (317380) voice_peer: dc event type=conversation.item.done size=311[0m
+[0;32mI (317392) voice_peer: dc event type=response.created size=413[0m
+[0;32mI (317536) voice_peer: dc event type=response.output_item.added size=253[0m
+[0;32mI (317541) voice_peer: dc event type=conversation.item.added size=238[0m
+[0;32mI (317555) voice_peer: dc event type=response.content_part.added size=236[0m
+[0;32mI (317560) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (317566) voice_peer: dc event type=response.output_audio_transcript.delta size=253[0m
+[0;32mI (317624) voice_peer: dc event type=output_audio_buffer.started size=117[0m
+[0;32mI (317624) voice_peer: phase: READY → SPEAKING[0m
+[0;32mI (317703) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (317719) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (317855) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (317869) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (317875) voice_peer: dc event type=response.output_audio_transcript.delta size=253[0m
+[0;32mI (318035) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (318041) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (318055) voice_peer: dc event type=response.output_audio_transcript.delta size=253[0m
+[0;32mI (318332) mochi: voice phase → 3, render cheerful_wave[0m
+[0;32mI (318472) voice_peer: dc event type=response.output_audio.done size=195[0m
+[0;32mI (318476) voice_peer: dc event type=response.output_audio_transcript.done size=255[0m
+[0;32mI (318482) voice_peer: dc event type=response.content_part.done size=268[0m
+[0;32mI (318485) voice_peer: dc event type=conversation.item.done size=307[0m
+[0;32mI (318491) voice_peer: dc event type=response.output_item.done size=322[0m
+[0;32mI (318497) voice_peer: dc event type=response.done size=883[0m
+[0;32mI (318497) voice_peer: phase: SPEAKING → READY[0m
+[0;32mI (318502) voice_peer: dc event type=rate_limits.updated size=159[0m
+[0;32mI (319261) mochi: rendered 'cheerful_wave' (cache 0 ms, partial refresh)[0m
+[0;32mI (320263) mochi: voice phase → 2, render comforted[0m
+[0;32mI (321122) mochi: rendered 'comforted' (cache 0 ms, partial refresh)[0m
+[0;32mI (322355) voice_peer: dc event type=output_audio_buffer.stopped size=117[0m
+[0;32mI (323021) touch: event src=ISR x=107 y=155[0m
+[0;32mI (323022) mochi: touch (107,155) zone=4 expr=curious[0m
+[0;32mI (323022) mochi: voice active — centre tap → text talk-back[0m
+[0;32mI (323027) voice_peer: send_text: 0/0 ('Are you still there? Say a quick goodbye and stop.')[0m
+[0;32mI (323029) touch: event src=ISR x=107 y=155[0m
+[0;32mI (323030) touch: event src=poll x=107 y=155[0m
+[0;32mI (323043) touch: event src=ISR x=107 y=155[0m
+[0;32mI (323048) touch: event src=ISR x=107 y=155[0m
+[0;32mI (323061) touch: event src=ISR x=107 y=155[0m
+[0;32mI (323067) touch: event src=ISR x=107 y=155[0m
+[0;32mI (323082) touch: event src=ISR x=107 y=155[0m
+[0;32mI (323086) touch: event src=ISR x=107 y=155[0m
+[0;32mI (323102) touch: event src=ISR x=107 y=155[0m
+[0;32mI (323105) touch: event src=ISR x=107 y=155[0m
+[0;32mI (323164) voice_peer: dc event type=conversation.item.added size=312[0m
+[0;32mI (323169) voice_peer: dc event type=conversation.item.done size=311[0m
+[0;32mI (323192) voice_peer: dc event type=response.created size=413[0m
+[0;32mI (323354) voice_peer: dc event type=response.output_item.added size=253[0m
+[0;32mI (323359) voice_peer: dc event type=conversation.item.added size=238[0m
+[0;32mI (323376) voice_peer: dc event type=response.content_part.added size=236[0m
+[0;32mI (323382) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (323394) voice_peer: dc event type=response.output_audio_transcript.delta size=253[0m
+[0;32mI (323453) voice_peer: dc event type=output_audio_buffer.started size=117[0m
+[0;32mI (323454) voice_peer: phase: READY → SPEAKING[0m
+[0;32mI (323534) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (323540) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (323552) voice_peer: dc event type=response.output_audio_transcript.delta size=253[0m
+[0;32mI (323833) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (323840) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (323853) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (323859) voice_peer: dc event type=response.output_audio_transcript.delta size=251[0m
+[0;32mI (323872) voice_peer: dc event type=response.output_audio_transcript.delta size=253[0m
+[0;32mI (324121) mochi: voice phase → 3, render cheerful_wave[0m
+[0;32mI (324254) voice_peer: dc event type=response.output_audio.done size=195[0m
+[0;32mI (324261) voice_peer: dc event type=response.output_audio_transcript.done size=259[0m
+[0;32mI (324264) voice_peer: dc event type=response.content_part.done size=272[0m
+[0;32mI (324267) voice_peer: dc event type=conversation.item.done size=311[0m
+[0;32mI (324273) voice_peer: dc event type=response.output_item.done size=326[0m
+[0;32mI (324279) voice_peer: dc event type=response.done size=882[0m
+[0;32mI (324280) voice_peer: phase: SPEAKING → READY[0m
+[0;32mI (324292) voice_peer: dc event type=rate_limits.updated size=159[0m
+[0;32mI (325041) mochi: rendered 'cheerful_wave' (cache 0 ms, partial refresh)[0m
+[0;32mI (326042) mochi: voice phase → 2, render comforted[0m
+[0;32mI (326921) mochi: rendered 'comforted' (cache 0 ms, partial refresh)[0m
+[0;32mI (328112) voice_peer: dc event type=output_audio_buffer.stopped size=117[0m

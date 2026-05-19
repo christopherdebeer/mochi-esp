@@ -1,0 +1,2 @@
+source /Users/cdbeer/dev/mochi-esp/firmware/build/gdbinit/symbols
+source /Users/cdbeer/dev/mochi-esp/firmware/build/gdbinit/connect

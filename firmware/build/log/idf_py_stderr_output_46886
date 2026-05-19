@@ -1,0 +1,10 @@
+[0;33m--- esp-idf-monitor 1.9.0 on /dev/cu.usbmodem2101 115200[0m
+[0;33m--- Quit: Ctrl+] | Menu: Ctrl+T | Help: Ctrl+T followed by Ctrl+H[0m
+[0m--- 0x403760f2: [0;33mpanic_abort[0m[0m at [0;32m/Users/cdbeer/dev/esp-idf/components/esp_system/panic.c[0m[0m:[1;31m486[0m
+[0m--- 0x40381c99: [0;33mesp_system_abort[0m[0m at [0;32m/Users/cdbeer/dev/esp-idf/components/esp_system/port/esp_system_chip.c[0m[0m:[1;31m87[0m
+[0m--- 0x40382c56: [0;33mvApplicationStackOverflowHook[0m[0m at [0;32m/Users/cdbeer/dev/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c[0m[0m:[1;31m563[0m
+[0m--- 0x403841a3: [0;33mvTaskSwitchContext[0m[0m at [0;32m/Users/cdbeer/dev/esp-idf/components/freertos/FreeRTOS-Kernel/tasks.c[0m[0m:[1;31m3689[0m
+[0m--- 0x40382d1c: [0;33m_frxt_dispatch[0m[0m at [0;32m/Users/cdbeer/dev/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/portasm.S[0m[0m:[1;31m451[0m
+[0m--- 0x40382d12: [0;33m_frxt_int_exit[0m[0m at [0;32m/Users/cdbeer/dev/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/portasm.S[0m[0m:[1;31m246[0m
+[0m--- 0x4037602c: [0;33mesp_restart_noos[0m[0m at [0;32m/Users/cdbeer/dev/esp-idf/components/esp_system/port/soc/esp32s3/system_internal.c[0m[0m:[1;31m162[0m
+[0m

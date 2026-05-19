@@ -1,0 +1,64 @@
+# sdkconfig defaults for eink-pet.
+#
+# This file is the source of truth for project config. The `sdkconfig`
+# file that ESP-IDF generates on first build is NOT committed — delete
+# it and rebuild if you need to regenerate from these defaults.
+#
+# Documented changes here should be small and named; large reconfigs
+# belong in a successor `sdkconfig.defaults.<feature>` overlay.
+
+# Target chip
+CONFIG_IDF_TARGET="esp32s3"
+
+# 8MB flash, octal PSRAM (N8R8 variant)
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# Custom partition table (see partitions.csv)
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# Console over USB CDC (no external USB-to-serial chip; the ESP32-S3 has
+# native USB). UART0 console is disabled so all output goes to USB.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# 1kHz tick is a small power hit vs the default 100Hz but gives much
+# finer-grained vTaskDelay for animation frame pacing later. Revisit
+# if power profiling complains.
+CONFIG_FREERTOS_HZ=1000
+
+# Compiler optimisation: -Og while we're in bring-up so backtraces are
+# meaningful. Flip to -O2 once peripherals are stable.
+CONFIG_COMPILER_OPTIMIZATION_DEBUG=y
+
+# Log level: info during bring-up. Will tighten to warn for release.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# HTTPS root cert bundle — built-in Mozilla bundle covers Let's
+# Encrypt + every major commercial CA, which is what mochi.val.run
+# (and any reasonable val.town deployment) chains to. Saves us from
+# embedding individual CA PEMs and tracking renewals manually.
+# Required for esp_http_client over TLS in M4+.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+
+# Main-task stack size. Default is 3584 B which is too small for
+# inline TLS handshakes from app_main — mbedtls_mpi_grow during cert
+# verification overflows it (M5 pair-init crashed here on first
+# boot). 8 KB is comfortable for any HTTPS work app_main wants to
+# do at boot before delegating to worker tasks.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# DTLS-SRTP for esp_peer (M9). WebRTC requires SRTP for media-plane
+# encryption; on the device side it negotiates over a DTLS handshake.
+# Default ESP-IDF mbedTLS config doesn't enable DTLS or SRTP, which
+# breaks esp_peer's dtls_common.h (mbedtls_ssl_srtp_profile etc.
+# undefined). Turning these on is mandatory for any WebRTC path.
+# DTLS_SRTP depends on PROTO_DTLS, so both must be set.
+CONFIG_MBEDTLS_SSL_PROTO_DTLS=y
+CONFIG_MBEDTLS_SSL_DTLS_SRTP=y

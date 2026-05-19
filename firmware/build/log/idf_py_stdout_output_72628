@@ -1,0 +1,582 @@
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x15 (USB_UART_CHIP_RESET),boot:0x8 (SPI_FAST_FLASH_BOOT)
+Saved PC:0x4200a529
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2810,len:0x1828
+load:0x403c8700,len:0x4
+load:0x403c8704,len:0xc40
+load:0x403cb700,len:0x2ec8
+entry 0x403c8908
+[0;32mI (26) boot: ESP-IDF v5.3.5-506-g0cf21f6beb 2nd stage bootloader[0m
+[0;32mI (27) boot: compile time May 18 2026 10:41:38[0m
+[0;32mI (27) boot: Multicore bootloader[0m
+[0;32mI (27) boot: chip revision: v0.2[0m
+[0;32mI (27) boot: efuse block revision: v1.4[0m
+[0;32mI (28) boot.esp32s3: Boot SPI Speed : 80MHz[0m
+[0;32mI (28) boot.esp32s3: SPI Mode       : DIO[0m
+[0;32mI (28) boot.esp32s3: SPI Flash Size : 8MB[0m
+[0;32mI (28) boot: Enabling RNG early entropy source...[0m
+[0;32mI (28) boot: Partition Table:[0m
+[0;32mI (29) boot: ## Label            Usage          Type ST Offset   Length[0m
+[0;32mI (29) boot:  0 nvs              WiFi data        01 02 00009000 00006000[0m
+[0;32mI (29) boot:  1 phy_init         RF data          01 01 0000f000 00001000[0m
+[0;32mI (30) boot:  2 factory          factory app      00 00 00010000 00200000[0m
+[0;32mI (30) boot:  3 storage          Unknown data     01 82 00210000 005f0000[0m
+[0;32mI (31) boot: End of partition table[0m
+[0;32mI (31) esp_image: segment 0: paddr=00010020 vaddr=3c090020 size=1ebech (125932) map[0m
+[0;32mI (54) esp_image: segment 1: paddr=0002ec14 vaddr=3fc9d800 size=01404h (  5124) load[0m
+[0;32mI (56) esp_image: segment 2: paddr=00030020 vaddr=42000020 size=8c5d8h (574936) map[0m
+[0;32mI (161) esp_image: segment 3: paddr=000bc600 vaddr=3fc9ec04 size=043e0h ( 17376) load[0m
+[0;32mI (165) esp_image: segment 4: paddr=000c09e8 vaddr=40374000 size=1973ch (104252) load[0m
+[0;32mI (199) boot: Loaded app from partition at offset 0x10000[0m
+[0;32mI (199) boot: Disabling RNG early entropy source...[0m
+[0;32mI (200) octal_psram: vendor id    : 0x0d (AP)[0m
+[0;32mI (201) octal_psram: dev id       : 0x02 (generation 3)[0m
+[0;32mI (201) octal_psram: density      : 0x03 (64 Mbit)[0m
+[0;32mI (201) octal_psram: good-die     : 0x01 (Pass)[0m
+[0;32mI (201) octal_psram: Latency      : 0x01 (Fixed)[0m
+[0;32mI (202) octal_psram: VCC          : 0x01 (3V)[0m
+[0;32mI (202) octal_psram: SRF          : 0x01 (Fast Refresh)[0m
+[0;32mI (202) octal_psram: BurstType    : 0x01 (Hybrid Wrap)[0m
+[0;32mI (203) octal_psram: BurstLen     : 0x01 (32 Byte)[0m
+[0;32mI (203) octal_psram: Readlatency  : 0x02 (10 cycles@Fixed)[0m
+[0;32mI (203) octal_psram: DriveStrength: 0x00 (1/1)[0m
+[0;32mI (204) MSPI Timing: PSRAM timing tuning index: 4[0m
+[0;32mI (204) esp_psram: Found 8MB PSRAM device[0m
+[0;32mI (204) esp_psram: Speed: 80MHz[0m
+[0;32mI (205) cpu_start: Multicore app[0m
+[0;32mI (651) esp_psram: SPI SRAM memory test OK[0m
+[0;32mI (659) cpu_start: Pro cpu start user code[0m
+[0;32mI (660) cpu_start: cpu freq: 160000000 Hz[0m
+[0;32mI (660) app_init: Application information:[0m
+[0;32mI (660) app_init: Project name:     eink-pet[0m
+[0;32mI (660) app_init: App version:      1[0m
+[0;32mI (660) app_init: Compile time:     May 18 2026 10:41:26[0m
+[0;32mI (661) app_init: ELF file SHA256:  7fa5843c7...[0m
+[0;32mI (661) app_init: ESP-IDF:          v5.3.5-506-g0cf21f6beb[0m
+[0;32mI (661) efuse_init: Min chip rev:     v0.0[0m
+[0;32mI (661) efuse_init: Max chip rev:     v0.99 [0m
+[0;32mI (661) efuse_init: Chip rev:         v0.2[0m
+[0;32mI (662) heap_init: Initializing. RAM available for dynamic allocation:[0m
+[0;32mI (662) heap_init: At 3FCA6D00 len 00042A10 (266 KiB): RAM[0m
+[0;32mI (662) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM[0m
+[0;32mI (662) heap_init: At 3FCF0000 len 00008000 (32 KiB): DRAM[0m
+[0;32mI (663) heap_init: At 600FE000 len 00001FE8 (7 KiB): RTCRAM[0m
+[0;32mI (663) esp_psram: Adding pool of 8192K of PSRAM memory to heap allocator[0m
+[0;32mI (664) spi_flash: detected chip: gd[0m
+[0;32mI (664) spi_flash: flash io: dio[0m
+[0;32mI (665) sleep: Configure to isolate all GPIO pins in sleep state[0m
+[0;32mI (665) sleep: Enable automatic switching of GPIO sleep configuration[0m
+[0;32mI (666) main_task: Started on CPU0[0m
+[0;32mI (667) esp_psram: Reserving pool of 32K of internal memory for DMA/internal allocations[0m
+[0;32mI (668) main_task: Calling app_main()[0m
+[0;32mI (668) mochi: —— mochi M3: boot ——[0m
+[0;32mI (668) mochi: chip: esp32s3 rev 0.2, 2 cores[0m
+[0;32mI (668) mochi: flash: 8 MB external[0m
+[0;32mI (668) mochi: psram: 8192 KB[0m
+[0;32mI (669) gpio: GPIO[3]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 [0m
+[0;32mI (669) gpio: GPIO[6]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (720) mochi: tick 0 — uptime 0.0s — led on[0m
+[0;32mI (720) driver: Initialize SPI[0m
+[0;32mI (722) gpio: GPIO[9]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (722) gpio: GPIO[10]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (723) gpio: GPIO[11]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (723) gpio: GPIO[8]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (1220) mochi: tick 1 — uptime 0.5s — led off[0m
+[0;32mI (1720) mochi: tick 2 — uptime 1.0s — led on[0m
+[0;32mI (2220) mochi: tick 3 — uptime 1.5s — led off[0m
+[0;32mI (2720) mochi: tick 4 — uptime 2.0s — led on[0m
+[0;32mI (3220) mochi: tick 5 — uptime 2.5s — led off[0m
+[0;32mI (3720) mochi: tick 6 — uptime 3.0s — led on[0m
+[0;32mI (4220) mochi: tick 7 — uptime 3.5s — led off[0m
+[0;32mI (4385) mochi: no NVS creds → entering provisioning[0m
+[0;32mI (4385) wifi_prov: starting provisioning, AP SSID 'Mochi-F949'[0m
+[0;32mI (4387) pp: pp rom version: e7ae62f[0m
+[0;32mI (4387) net80211: net80211 rom version: e7ae62f[0m
+[0;32mI (4389) wifi:wifi driver task: 3fcba310, prio:23, stack:6656, core=0[0m
+[0;32mI (4398) wifi:wifi firmware version: 4209e03[0m
+[0;32mI (4399) wifi:wifi certification version: v7.0[0m
+[0;32mI (4399) wifi:config NVS flash: enabled[0m
+[0;32mI (4399) wifi:config nano formating: disabled[0m
+[0;32mI (4399) wifi:Init data frame dynamic rx buffer num: 32[0m
+[0;32mI (4400) wifi:Init static rx mgmt buffer num: 5[0m
+[0;32mI (4400) wifi:Init management short buffer num: 32[0m
+[0;32mI (4400) wifi:Init dynamic tx buffer num: 32[0m
+[0;32mI (4400) wifi:Init static tx FG buffer num: 2[0m
+[0;32mI (4401) wifi:Init static rx buffer size: 1600[0m
+[0;32mI (4401) wifi:Init static rx buffer num: 10[0m
+[0;32mI (4401) wifi:Init dynamic rx buffer num: 32[0m
+[0;32mI (4402) wifi_init: rx ba win: 6[0m
+[0;32mI (4402) wifi_init: accept mbox: 6[0m
+[0;32mI (4403) wifi_init: tcpip mbox: 32[0m
+[0;32mI (4403) wifi_init: udp mbox: 6[0m
+[0;32mI (4403) wifi_init: tcp mbox: 6[0m
+[0;32mI (4403) wifi_init: tcp tx win: 5760[0m
+[0;32mI (4403) wifi_init: tcp rx win: 5760[0m
+[0;32mI (4403) wifi_init: tcp mss: 1440[0m
+[0;32mI (4403) wifi_init: WiFi IRAM OP enabled[0m
+[0;32mI (4404) wifi_init: WiFi RX IRAM OP enabled[0m
+[0;32mI (4418) phy_init: phy_version 711,97bcf0a2,Aug 25 2025,19:04:10[0m
+[0;33mW (4419) phy_init: failed to load RF calibration data (0xffffffff), falling back to full calibration[0m
+[0;32mI (4450) phy_init: Saving new calibration data due to checksum failure or outdated calibration data, mode(2)[0m
+[0;32mI (4463) wifi:mode : softAP (70:04:1d:db:f9:49)[0m
+[0;32mI (4464) wifi:Total power save buffer number: 16[0m
+[0;32mI (4464) wifi:Init max length of beacon: 752/752[0m
+[0;32mI (4465) wifi:Init max length of beacon: 752/752[0m
+[0;32mI (4466) wifi_prov: softAP up: SSID 'Mochi-F949'[0m
+[0;32mI (4467) esp_netif_lwip: DHCP server started on interface WIFI_AP_DEF with IP: 192.168.4.1[0m
+[0;32mI (4471) wifi_prov: dns: hijack listening on :53[0m
+[0;32mI (4720) mochi: tick 8 — uptime 4.0s — led on[0m
+[0;32mI (5221) mochi: tick 9 — uptime 4.5s — led off[0m
+[0;32mI (5721) mochi: tick 10 — uptime 5.0s — led on[0m
+[0;32mI (6222) mochi: tick 11 — uptime 5.5s — led off[0m
+[0;32mI (6722) mochi: tick 12 — uptime 6.0s — led on[0m
+[0;32mI (7223) mochi: tick 13 — uptime 6.5s — led off[0m
+[0;32mI (7724) mochi: tick 14 — uptime 7.0s — led on[0m
+[0;32mI (8115) wifi_prov: waiting for portal submission...[0m
+[0;32mI (8225) mochi: tick 15 — uptime 7.5s — led off[0m
+[0;32mI (8725) mochi: tick 16 — uptime 8.0s — led on[0m
+[0;32mI (9226) mochi: tick 17 — uptime 8.5s — led off[0m
+[0;32mI (9726) mochi: tick 18 — uptime 9.0s — led on[0m
+[0;32mI (10227) mochi: tick 19 — uptime 9.5s — led off[0m
+[0;32mI (10728) mochi: tick 20 — uptime 10.0s — led on[0m
+[0;32mI (11229) mochi: tick 21 — uptime 10.5s — led off[0m
+[0;32mI (11729) mochi: tick 22 — uptime 11.0s — led on[0m
+[0;32mI (12230) mochi: tick 23 — uptime 11.5s — led off[0m
+[0;32mI (12730) mochi: tick 24 — uptime 12.0s — led on[0m
+[0;32mI (13231) mochi: tick 25 — uptime 12.5s — led off[0m
+[0;32mI (13731) mochi: tick 26 — uptime 13.0s — led on[0m
+[0;32mI (14232) mochi: tick 27 — uptime 13.5s — led off[0m
+[0;32mI (14732) mochi: tick 28 — uptime 14.0s — led on[0m
+[0;32mI (15233) mochi: tick 29 — uptime 14.5s — led off[0m
+[0;32mI (15733) mochi: tick 30 — uptime 15.0s — led on[0m
+[0;32mI (16234) mochi: tick 31 — uptime 15.5s — led off[0m
+[0;32mI (16734) mochi: tick 32 — uptime 16.0s — led on[0m
+[0;32mI (17235) mochi: tick 33 — uptime 16.5s — led off[0m
+[0;32mI (17736) mochi: tick 34 — uptime 17.0s — led on[0m
+[0;32mI (18237) mochi: tick 35 — uptime 17.5s — led off[0m
+[0;32mI (18738) mochi: tick 36 — uptime 18.0s — led on[0m
+[0;32mI (19239) mochi: tick 37 — uptime 18.5s — led off[0m
+[0;32mI (19740) mochi: tick 38 — uptime 19.0s — led on[0m
+[0;32mI (20241) mochi: tick 39 — uptime 19.5s — led off[0m
+[0;32mI (20742) mochi: tick 40 — uptime 20.0s — led on[0m
+[0;32mI (21243) mochi: tick 41 — uptime 20.5s — led off[0m
+[0;32mI (21744) mochi: tick 42 — uptime 21.0s — led on[0m
+[0;32mI (22245) mochi: tick 43 — uptime 21.5s — led off[0m
+[0;32mI (22746) mochi: tick 44 — uptime 22.0s — led on[0m
+[0;32mI (23247) mochi: tick 45 — uptime 22.5s — led off[0m
+[0;32mI (23748) mochi: tick 46 — uptime 23.0s — led on[0m
+[0;32mI (24249) mochi: tick 47 — uptime 23.5s — led off[0m
+[0;32mI (24750) mochi: tick 48 — uptime 24.0s — led on[0m
+[0;32mI (25251) mochi: tick 49 — uptime 24.5s — led off[0m
+[0;32mI (25752) mochi: tick 50 — uptime 25.0s — led on[0m
+[0;32mI (26253) mochi: tick 51 — uptime 25.5s — led off[0m
+[0;32mI (26754) mochi: tick 52 — uptime 26.0s — led on[0m
+[0;32mI (27255) mochi: tick 53 — uptime 26.5s — led off[0m
+[0;32mI (27756) mochi: tick 54 — uptime 27.0s — led on[0m
+[0;32mI (28257) mochi: tick 55 — uptime 27.5s — led off[0m
+[0;32mI (28758) mochi: tick 56 — uptime 28.0s — led on[0m
+[0;32mI (28953) wifi:new:<1,0>, old:<1,1>, ap:<1,1>, sta:<255,255>, prof:1, snd_ch_cfg:0x0[0m
+[0;32mI (28954) wifi:station: b2:b3:d1:f5:7e:70 join, AID=1, bgn, 20[0m
+[0;32mI (28955) wifi_prov: softAP: client connected[0m
+[0;32mI (29259) mochi: tick 57 — uptime 28.5s — led off[0m
+[0;32mI (29760) mochi: tick 58 — uptime 29.0s — led on[0m
+[0;32mI (30261) mochi: tick 59 — uptime 29.5s — led off[0m
+[0;32mI (30304) esp_netif_lwip: DHCP server assigned IP to a client, IP is: 192.168.4.2[0m
+[0;32mI (30762) mochi: tick 60 — uptime 30.0s — led on[0m
+[0;32mI (31263) mochi: tick 61 — uptime 30.5s — led off[0m
+[0;32mI (31764) mochi: tick 62 — uptime 31.0s — led on[0m
+[0;32mI (32265) mochi: tick 63 — uptime 31.5s — led off[0m
+[0;32mI (32404) wifi:<ba-add>idx:2 (ifx:1, b2:b3:d1:f5:7e:70), tid:0, ssn:0, winSize:64[0m
+[0;32mI (32766) mochi: tick 64 — uptime 32.0s — led on[0m
+[0;32mI (33267) mochi: tick 65 — uptime 32.5s — led off[0m
+[0;32mI (33768) mochi: tick 66 — uptime 33.0s — led on[0m
+[0;32mI (34269) mochi: tick 67 — uptime 33.5s — led off[0m
+[0;32mI (34770) mochi: tick 68 — uptime 34.1s — led on[0m
+[0;32mI (35271) mochi: tick 69 — uptime 34.6s — led off[0m
+[0;32mI (35772) mochi: tick 70 — uptime 35.1s — led on[0m
+[0;32mI (36273) mochi: tick 71 — uptime 35.6s — led off[0m
+[0;32mI (36774) mochi: tick 72 — uptime 36.1s — led on[0m
+[0;32mI (37275) mochi: tick 73 — uptime 36.6s — led off[0m
+[0;32mI (37776) mochi: tick 74 — uptime 37.1s — led on[0m
+[0;32mI (38277) mochi: tick 75 — uptime 37.6s — led off[0m
+[0;32mI (38692) wifi:<ba-add>idx:3 (ifx:1, b2:b3:d1:f5:7e:70), tid:1, ssn:0, winSize:64[0m
+[0;32mI (38778) mochi: tick 76 — uptime 38.1s — led on[0m
+[0;32mI (39279) mochi: tick 77 — uptime 38.6s — led off[0m
+[0;32mI (39780) mochi: tick 78 — uptime 39.1s — led on[0m
+[0;32mI (40281) mochi: tick 79 — uptime 39.6s — led off[0m
+[0;32mI (40782) mochi: tick 80 — uptime 40.1s — led on[0m
+[0;32mI (41283) mochi: tick 81 — uptime 40.6s — led off[0m
+[0;32mI (41784) mochi: tick 82 — uptime 41.1s — led on[0m
+[0;32mI (42016) wifi:station: b2:b3:d1:f5:7e:70 leave, AID = 1, reason = 8, bss_flags is 33721443, bss:0x3fcc4eb0[0m
+[0;32mI (42017) wifi:new:<1,0>, old:<1,0>, ap:<1,1>, sta:<255,255>, prof:1, snd_ch_cfg:0x0[0m
+[0;32mI (42017) wifi:<ba-del>idx:2, tid:0[0m
+[0;32mI (42017) wifi:<ba-del>idx:3, tid:1[0m
+[0;32mI (42018) wifi_prov: softAP: client disconnected[0m
+[0;32mI (42285) mochi: tick 83 — uptime 41.6s — led off[0m
+[0;32mI (42786) mochi: tick 84 — uptime 42.1s — led on[0m
+[0;32mI (43287) mochi: tick 85 — uptime 42.6s — led off[0m
+[0;32mI (43788) mochi: tick 86 — uptime 43.1s — led on[0m
+[0;32mI (44289) mochi: tick 87 — uptime 43.6s — led off[0m
+[0;32mI (44790) mochi: tick 88 — uptime 44.1s — led on[0m
+[0;32mI (45291) mochi: tick 89 — uptime 44.6s — led off[0m
+[0;32mI (45792) mochi: tick 90 — uptime 45.1s — led on[0m
+[0;32mI (46293) mochi: tick 91 — uptime 45.6s — led off[0m
+[0;32mI (46794) mochi: tick 92 — uptime 46.1s — led on[0m
+[0;32mI (47295) mochi: tick 93 — uptime 46.6s — led off[0m
+[0;32mI (47796) mochi: tick 94 — uptime 47.1s — led on[0m
+[0;32mI (48297) mochi: tick 95 — uptime 47.6s — led off[0m
+[0;32mI (48798) mochi: tick 96 — uptime 48.1s — led on[0m
+[0;32mI (49299) mochi: tick 97 — uptime 48.6s — led off[0m
+[0;32mI (49800) mochi: tick 98 — uptime 49.1s — led on[0m
+[0;32mI (50301) mochi: tick 99 — uptime 49.6s — led off[0m
+[0;32mI (50802) mochi: tick 100 — uptime 50.1s — led on[0m
+[0;32mI (51303) mochi: tick 101 — uptime 50.6s — led off[0m
+[0;32mI (51804) mochi: tick 102 — uptime 51.1s — led on[0m
+[0;32mI (52305) mochi: tick 103 — uptime 51.6s — led off[0m
+[0;32mI (52806) mochi: tick 104 — uptime 52.1s — led on[0m
+[0;32mI (53307) mochi: tick 105 — uptime 52.6s — led off[0m
+[0;32mI (53808) mochi: tick 106 — uptime 53.1s — led on[0m
+[0;32mI (54309) mochi: tick 107 — uptime 53.6s — led off[0m
+[0;32mI (54810) mochi: tick 108 — uptime 54.1s — led on[0m
+[0;32mI (55311) mochi: tick 109 — uptime 54.6s — led off[0m
+[0;32mI (55812) mochi: tick 110 — uptime 55.1s — led on[0m
+[0;32mI (56313) mochi: tick 111 — uptime 55.6s — led off[0m
+[0;32mI (56814) mochi: tick 112 — uptime 56.1s — led on[0m
+[0;32mI (57315) mochi: tick 113 — uptime 56.6s — led off[0m
+[0;32mI (57816) mochi: tick 114 — uptime 57.1s — led on[0m
+[0;32mI (58317) mochi: tick 115 — uptime 57.6s — led off[0m
+[0;32mI (58818) mochi: tick 116 — uptime 58.1s — led on[0m
+[0;32mI (59319) mochi: tick 117 — uptime 58.6s — led off[0m
+[0;32mI (59820) mochi: tick 118 — uptime 59.1s — led on[0m
+[0;32mI (60180) wifi:new:<1,0>, old:<1,0>, ap:<1,1>, sta:<255,255>, prof:1, snd_ch_cfg:0x0[0m
+[0;32mI (60181) wifi:station: b2:b3:d1:f5:7e:70 join, AID=1, bgn, 20[0m
+[0;32mI (60182) wifi_prov: softAP: client connected[0m
+[0;32mI (60321) mochi: tick 119 — uptime 59.6s — led off[0m
+[0;32mI (60492) esp_netif_lwip: DHCP server assigned IP to a client, IP is: 192.168.4.2[0m
+[0;32mI (60596) wifi:<ba-add>idx:2 (ifx:1, b2:b3:d1:f5:7e:70), tid:0, ssn:0, winSize:64[0m
+[0;32mI (60822) mochi: tick 120 — uptime 60.1s — led on[0m
+[0;32mI (61323) mochi: tick 121 — uptime 60.6s — led off[0m
+[0;32mI (61824) mochi: tick 122 — uptime 61.1s — led on[0m
+[0;32mI (62325) mochi: tick 123 — uptime 61.6s — led off[0m
+[0;32mI (62826) mochi: tick 124 — uptime 62.1s — led on[0m
+[0;32mI (63327) mochi: tick 125 — uptime 62.6s — led off[0m
+[0;32mI (63828) mochi: tick 126 — uptime 63.1s — led on[0m
+[0;32mI (64329) mochi: tick 127 — uptime 63.6s — led off[0m
+[0;32mI (64830) mochi: tick 128 — uptime 64.1s — led on[0m
+[0;32mI (65331) mochi: tick 129 — uptime 64.6s — led off[0m
+[0;32mI (65832) mochi: tick 130 — uptime 65.1s — led on[0m
+[0;32mI (66333) mochi: tick 131 — uptime 65.6s — led off[0m
+[0;32mI (66834) mochi: tick 132 — uptime 66.1s — led on[0m
+[0;32mI (67335) mochi: tick 133 — uptime 66.6s — led off[0m
+[0;32mI (67836) mochi: tick 134 — uptime 67.1s — led on[0m
+[0;32mI (68337) mochi: tick 135 — uptime 67.6s — led off[0m
+[0;32mI (68838) mochi: tick 136 — uptime 68.1s — led on[0m
+[0;32mI (69339) mochi: tick 137 — uptime 68.6s — led off[0m
+[0;32mI (69840) mochi: tick 138 — uptime 69.1s — led on[0m
+[0;32mI (70341) mochi: tick 139 — uptime 69.6s — led off[0m
+[0;32mI (70842) mochi: tick 140 — uptime 70.1s — led on[0m
+[0;32mI (71343) mochi: tick 141 — uptime 70.6s — led off[0m
+[0;32mI (71844) mochi: tick 142 — uptime 71.1s — led on[0m
+[0;32mI (72345) mochi: tick 143 — uptime 71.6s — led off[0m
+[0;32mI (72846) mochi: tick 144 — uptime 72.1s — led on[0m
+[0;32mI (73347) mochi: tick 145 — uptime 72.6s — led off[0m
+[0;32mI (73848) mochi: tick 146 — uptime 73.1s — led on[0m
+[0;32mI (74349) mochi: tick 147 — uptime 73.6s — led off[0m
+[0;32mI (74850) mochi: tick 148 — uptime 74.1s — led on[0m
+[0;32mI (75351) mochi: tick 149 — uptime 74.6s — led off[0m
+[0;32mI (75852) mochi: tick 150 — uptime 75.1s — led on[0m
+[0;32mI (76353) mochi: tick 151 — uptime 75.6s — led off[0m
+[0;32mI (76854) mochi: tick 152 — uptime 76.1s — led on[0m
+[0;32mI (77355) mochi: tick 153 — uptime 76.6s — led off[0m
+[0;32mI (77856) mochi: tick 154 — uptime 77.1s — led on[0m
+[0;32mI (78357) mochi: tick 155 — uptime 77.6s — led off[0m
+[0;32mI (78858) mochi: tick 156 — uptime 78.1s — led on[0m
+[0;32mI (79359) mochi: tick 157 — uptime 78.6s — led off[0m
+[0;32mI (79860) mochi: tick 158 — uptime 79.1s — led on[0m
+[0;32mI (80361) mochi: tick 159 — uptime 79.6s — led off[0m
+[0;32mI (80862) mochi: tick 160 — uptime 80.1s — led on[0m
+[0;32mI (81363) mochi: tick 161 — uptime 80.6s — led off[0m
+[0;32mI (81864) mochi: tick 162 — uptime 81.1s — led on[0m
+[0;32mI (82365) mochi: tick 163 — uptime 81.6s — led off[0m
+[0;32mI (82866) mochi: tick 164 — uptime 82.1s — led on[0m
+[0;32mI (83367) mochi: tick 165 — uptime 82.6s — led off[0m
+[0;32mI (83868) mochi: tick 166 — uptime 83.1s — led on[0m
+[0;32mI (84369) mochi: tick 167 — uptime 83.6s — led off[0m
+[0;32mI (84870) mochi: tick 168 — uptime 84.2s — led on[0m
+[0;32mI (85371) mochi: tick 169 — uptime 84.7s — led off[0m
+[0;32mI (85872) mochi: tick 170 — uptime 85.2s — led on[0m
+[0;32mI (86373) mochi: tick 171 — uptime 85.7s — led off[0m
+[0;32mI (86874) mochi: tick 172 — uptime 86.2s — led on[0m
+[0;32mI (87375) mochi: tick 173 — uptime 86.7s — led off[0m
+[0;32mI (87748) wifi_prov: portal: received SSID 'Vodafone0E20F1'[0m
+[0;31mE (87782) httpd: httpd_accept_conn: error in accept (23)[0m
+[0;33mW (87783) httpd: httpd_server: error accepting new connection[0m
+[0;31mE (87791) httpd: httpd_accept_conn: error in accept (23)[0m
+[0;33mW (87792) httpd: httpd_server: error accepting new connection[0m
+[0;31mE (87801) httpd: httpd_accept_conn: error in accept (23)[0m
+[0;33mW (87802) httpd: httpd_server: error accepting new connection[0m
+[0;32mI (87876) mochi: tick 174 — uptime 87.2s — led on[0m
+[0;32mI (88377) mochi: tick 175 — uptime 87.7s — led off[0m
+[0;32mI (88648) wifi:station: b2:b3:d1:f5:7e:70 leave, AID = 1, reason = 2, bss_flags is 33721443, bss:0x3fcc4eb0[0m
+[0;32mI (88649) wifi:new:<1,0>, old:<1,0>, ap:<1,1>, sta:<255,255>, prof:1, snd_ch_cfg:0x0[0m
+[0;32mI (88649) wifi:<ba-del>idx:2, tid:0[0m
+[0;32mI (88650) wifi_prov: softAP: client disconnected[0m
+[0;32mI (88691) wifi:flush txq[0m
+[0;32mI (88691) wifi:stop sw txq[0m
+[0;32mI (88691) wifi:lmac stop hw txq[0m
+[0;33mW (88695) wifi:Password length matches WPA2 standards, authmode threshold changes from OPEN to WPA2[0m
+[0;32mI (88712) wifi:mode : sta (70:04:1d:db:f9:48)[0m
+[0;32mI (88713) wifi:enable tsf[0m
+[0;32mI (88844) wifi:new:<2,0>, old:<1,0>, ap:<255,255>, sta:<2,0>, prof:1, snd_ch_cfg:0x0[0m
+[0;32mI (88846) wifi:state: init -> auth (0xb0)[0m
+[0;32mI (88878) mochi: tick 176 — uptime 88.2s — led on[0m
+[0;32mI (89379) mochi: tick 177 — uptime 88.7s — led off[0m
+[0;32mI (89645) wifi:state: auth -> assoc (0x0)[0m
+[0;32mI (89661) wifi:state: assoc -> run (0x10)[0m
+[0;32mI (89689) wifi:connected with Vodafone0E20F1, aid = 24, channel 2, BW20, bssid = 62:d8:a4:0e:20:f9[0m
+[0;32mI (89690) wifi:security: WPA3-SAE HUNT_AND_PECK, phy: bgn, rssi: -65, cipher(pairwise:0x3, group:0x3), pmf:1[0m
+[0;32mI (89696) wifi:pm start, type: 1[0m
+
+[0;32mI (89697) wifi:dp: 1, bi: 102400, li: 3, scale listen interval from 307200 us to 307200 us[0m
+[0;32mI (89697) wifi:set rx beacon pti, rx_bcn_pti: 0, bcn_timeout: 25000, mt_pti: 0, mt_time: 10000[0m
+[0;32mI (89757) wifi:AP's beacon interval = 102400 us, DTIM period = 1[0m
+[0;32mI (89880) mochi: tick 178 — uptime 89.2s — led on[0m
+[0;32mI (90381) mochi: tick 179 — uptime 89.7s — led off[0m
+[0;32mI (90882) mochi: tick 180 — uptime 90.2s — led on[0m
+[0;32mI (91383) mochi: tick 181 — uptime 90.7s — led off[0m
+[0;32mI (91884) mochi: tick 182 — uptime 91.2s — led on[0m
+[0;32mI (92385) mochi: tick 183 — uptime 91.7s — led off[0m
+[0;32mI (92886) mochi: tick 184 — uptime 92.2s — led on[0m
+[0;32mI (93387) mochi: tick 185 — uptime 92.7s — led off[0m
+[0;32mI (93754) wifi:<ba-add>idx:0 (ifx:0, 62:d8:a4:0e:20:f9), tid:3, ssn:1, winSize:64[0m
+[0;32mI (93798) wifi:<ba-add>idx:1 (ifx:0, 62:d8:a4:0e:20:f9), tid:0, ssn:1, winSize:64[0m
+[0;32mI (93888) mochi: tick 186 — uptime 93.2s — led on[0m
+[0;32mI (94389) mochi: tick 187 — uptime 93.7s — led off[0m
+[0;32mI (94700) esp_netif_handlers: sta ip: 192.168.1.199, mask: 255.255.255.0, gw: 192.168.1.1[0m
+[0;32mI (94701) wifi:state: run -> init (0x0)[0m
+[0;32mI (94704) wifi:pm stop, total sleep time: 3866174 us / 5007338 us[0m
+
+[0;32mI (94705) wifi:<ba-del>idx:1, tid:0[0m
+[0;32mI (94705) wifi:<ba-del>idx:0, tid:3[0m
+[0;32mI (94705) wifi:new:<2,0>, old:<2,0>, ap:<255,255>, sta:<2,0>, prof:1, snd_ch_cfg:0x0[0m
+[0;33mW (94706) wifi_prov: STA disconnect, retry 1/5[0m
+[0;32mI (94758) wifi:flush txq[0m
+[0;32mI (94758) wifi:stop sw txq[0m
+[0;32mI (94758) wifi:lmac stop hw txq[0m
+[0;32mI (94760) wifi_prov: provisioning OK[0m
+[0;32mI (94763) nvs_creds: saved creds for SSID 'Vodafone0E20F1'[0m
+[0;32mI (94763) mochi: provisioning complete; rebooting to clean STA boot[0m
+[0;32mI (94890) mochi: tick 188 — uptime 94.2s — led on[0m
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0xc (RTC_SW_CPU_RST),boot:0x8 (SPI_FAST_FLASH_BOOT)
+Saved PC:0x40375d40
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2810,len:0x1828
+load:0x403c8700,len:0x4
+load:0x403c8704,len:0xc40
+load:0x403cb700,len:0x2ec8
+entry 0x403c8908
+[0;32mI (26) boot: ESP-IDF v5.3.5-506-g0cf21f6beb 2nd stage bootloader[0m
+[0;32mI (26) boot: compile time May 18 2026 10:41:38[0m
+[0;32mI (26) boot: Multicore bootloader[0m
+[0;32mI (27) boot: chip revision: v0.2[0m
+[0;32mI (27) boot: efuse block revision: v1.4[0m
+[0;32mI (27) boot.esp32s3: Boot SPI Speed : 80MHz[0m
+[0;32mI (27) boot.esp32s3: SPI Mode       : DIO[0m
+[0;32mI (27) boot.esp32s3: SPI Flash Size : 8MB[0m
+[0;32mI (28) boot: Enabling RNG early entropy source...[0m
+[0;32mI (28) boot: Partition Table:[0m
+[0;32mI (28) boot: ## Label            Usage          Type ST Offset   Length[0m
+[0;32mI (28) boot:  0 nvs              WiFi data        01 02 00009000 00006000[0m
+[0;32mI (29) boot:  1 phy_init         RF data          01 01 0000f000 00001000[0m
+[0;32mI (29) boot:  2 factory          factory app      00 00 00010000 00200000[0m
+[0;32mI (30) boot:  3 storage          Unknown data     01 82 00210000 005f0000[0m
+[0;32mI (30) boot: End of partition table[0m
+[0;32mI (30) esp_image: segment 0: paddr=00010020 vaddr=3c090020 size=1ebech (125932) map[0m
+[0;32mI (54) esp_image: segment 1: paddr=0002ec14 vaddr=3fc9d800 size=01404h (  5124) load[0m
+[0;32mI (55) esp_image: segment 2: paddr=00030020 vaddr=42000020 size=8c5d8h (574936) map[0m
+[0;32mI (160) esp_image: segment 3: paddr=000bc600 vaddr=3fc9ec04 size=043e0h ( 17376) load[0m
+[0;32mI (165) esp_image: segment 4: paddr=000c09e8 vaddr=40374000 size=1973ch (104252) load[0m
+[0;32mI (198) boot: Loaded app from partition at offset 0x10000[0m
+[0;32mI (199) boot: Disabling RNG early entropy source...[0m
+[0;32mI (200) octal_psram: vendor id    : 0x0d (AP)[0m
+[0;32mI (200) octal_psram: dev id       : 0x02 (generation 3)[0m
+[0;32mI (200) octal_psram: density      : 0x03 (64 Mbit)[0m
+[0;32mI (201) octal_psram: good-die     : 0x01 (Pass)[0m
+[0;32mI (201) octal_psram: Latency      : 0x01 (Fixed)[0m
+[0;32mI (201) octal_psram: VCC          : 0x01 (3V)[0m
+[0;32mI (201) octal_psram: SRF          : 0x01 (Fast Refresh)[0m
+[0;32mI (202) octal_psram: BurstType    : 0x01 (Hybrid Wrap)[0m
+[0;32mI (202) octal_psram: BurstLen     : 0x01 (32 Byte)[0m
+[0;32mI (202) octal_psram: Readlatency  : 0x02 (10 cycles@Fixed)[0m
+[0;32mI (202) octal_psram: DriveStrength: 0x00 (1/1)[0m
+[0;32mI (203) MSPI Timing: PSRAM timing tuning index: 4[0m
+[0;32mI (204) esp_psram: Found 8MB PSRAM device[0m
+[0;32mI (204) esp_psram: Speed: 80MHz[0m
+[0;32mI (204) cpu_start: Multicore app[0m
+[0;32mI (650) esp_psram: SPI SRAM memory test OK[0m
+[0;32mI (659) cpu_start: Pro cpu start user code[0m
+[0;32mI (659) cpu_start: cpu freq: 160000000 Hz[0m
+[0;32mI (659) app_init: Application information:[0m
+[0;32mI (659) app_init: Project name:     eink-pet[0m
+[0;32mI (659) app_init: App version:      1[0m
+[0;32mI (660) app_init: Compile time:     May 18 2026 10:41:26[0m
+[0;32mI (660) app_init: ELF file SHA256:  7fa5843c7...[0m
+[0;32mI (660) app_init: ESP-IDF:          v5.3.5-506-g0cf21f6beb[0m
+[0;32mI (660) efuse_init: Min chip rev:     v0.0[0m
+[0;32mI (660) efuse_init: Max chip rev:     v0.99 [0m
+[0;32mI (661) efuse_init: Chip rev:         v0.2[0m
+[0;32mI (661) heap_init: Initializing. RAM available for dynamic allocation:[0m
+[0;32mI (661) heap_init: At 3FCA6D00 len 00042A10 (266 KiB): RAM[0m
+[0;32mI (661) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM[0m
+[0;32mI (662) heap_init: At 3FCF0000 len 00008000 (32 KiB): DRAM[0m
+[0;32mI (662) heap_init: At 600FE000 len 00001FE8 (7 KiB): RTCRAM[0m
+[0;32mI (662) esp_psram: Adding pool of 8192K of PSRAM memory to heap allocator[0m
+[0;32mI (663) spi_flash: detected chip: gd[0m
+[0;32mI (664) spi_flash: flash io: dio[0m
+[0;32mI (664) sleep: Configure to isolate all GPIO pins in sleep state[0m
+[0;32mI (665) sleep: Enable automatic switching of GPIO sleep configuration[0m
+[0;32mI (665) main_task: Started on CPU0[0m
+[0;32mI (666) esp_psram: Reserving pool of 32K of internal memory for DMA/internal allocations[0m
+[0;32mI (667) main_task: Calling app_main()[0m
+[0;32mI (667) mochi: —— mochi M3: boot ——[0m
+[0;32mI (667) mochi: chip: esp32s3 rev 0.2, 2 cores[0m
+[0;32mI (667) mochi: flash: 8 MB external[0m
+[0;32mI (667) mochi: psram: 8192 KB[0m
+[0;32mI (668) gpio: GPIO[3]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 [0m
+[0;32mI (668) gpio: GPIO[6]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (718) mochi: tick 0 — uptime 0.0s — led on[0m
+[0;32mI (718) driver: Initialize SPI[0m
+[0;32mI (720) gpio: GPIO[9]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (720) gpio: GPIO[10]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (721) gpio: GPIO[11]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (721) gpio: GPIO[8]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (1218) mochi: tick 1 — uptime 0.5s — led off[0m
+[0;32mI (1718) mochi: tick 2 — uptime 1.0s — led on[0m
+[0;32mI (2218) mochi: tick 3 — uptime 1.5s — led off[0m
+[0;32mI (2718) mochi: tick 4 — uptime 2.0s — led on[0m
+[0;32mI (3218) mochi: tick 5 — uptime 2.5s — led off[0m
+[0;32mI (3718) mochi: tick 6 — uptime 3.0s — led on[0m
+[0;32mI (4218) mochi: tick 7 — uptime 3.5s — led off[0m
+[0;32mI (4390) nvs_creds: loaded creds for SSID 'Vodafone0E20F1'[0m
+[0;32mI (4390) mochi: have creds → STA connect to 'Vodafone0E20F1'[0m
+[0;32mI (4392) pp: pp rom version: e7ae62f[0m
+[0;32mI (4392) net80211: net80211 rom version: e7ae62f[0m
+[0;32mI (4394) wifi:wifi driver task: 3fcba38c, prio:23, stack:6656, core=0[0m
+[0;32mI (4407) wifi:wifi firmware version: 4209e03[0m
+[0;32mI (4408) wifi:wifi certification version: v7.0[0m
+[0;32mI (4408) wifi:config NVS flash: enabled[0m
+[0;32mI (4408) wifi:config nano formating: disabled[0m
+[0;32mI (4408) wifi:Init data frame dynamic rx buffer num: 32[0m
+[0;32mI (4409) wifi:Init static rx mgmt buffer num: 5[0m
+[0;32mI (4409) wifi:Init management short buffer num: 32[0m
+[0;32mI (4409) wifi:Init dynamic tx buffer num: 32[0m
+[0;32mI (4409) wifi:Init static tx FG buffer num: 2[0m
+[0;32mI (4410) wifi:Init static rx buffer size: 1600[0m
+[0;32mI (4410) wifi:Init static rx buffer num: 10[0m
+[0;32mI (4410) wifi:Init dynamic rx buffer num: 32[0m
+[0;32mI (4411) wifi_init: rx ba win: 6[0m
+[0;32mI (4411) wifi_init: accept mbox: 6[0m
+[0;32mI (4412) wifi_init: tcpip mbox: 32[0m
+[0;32mI (4412) wifi_init: udp mbox: 6[0m
+[0;32mI (4412) wifi_init: tcp mbox: 6[0m
+[0;32mI (4412) wifi_init: tcp tx win: 5760[0m
+[0;32mI (4412) wifi_init: tcp rx win: 5760[0m
+[0;32mI (4412) wifi_init: tcp mss: 1440[0m
+[0;32mI (4412) wifi_init: WiFi IRAM OP enabled[0m
+[0;32mI (4413) wifi_init: WiFi RX IRAM OP enabled[0m
+[0;33mW (4414) wifi:Password length matches WPA2 standards, authmode threshold changes from OPEN to WPA2[0m
+[0;32mI (4415) phy_init: phy_version 711,97bcf0a2,Aug 25 2025,19:04:10[0m
+[0;32mI (4453) wifi:mode : sta (70:04:1d:db:f9:48)[0m
+[0;32mI (4454) wifi:enable tsf[0m
+[0;32mI (4465) wifi:new:<2,0>, old:<1,0>, ap:<255,255>, sta:<2,0>, prof:1, snd_ch_cfg:0x0[0m
+[0;32mI (4466) wifi:state: init -> auth (0xb0)[0m
+[0;32mI (4718) mochi: tick 8 — uptime 4.0s — led on[0m
+[0;32mI (5219) mochi: tick 9 — uptime 4.5s — led off[0m
+[0;32mI (5265) wifi:state: auth -> assoc (0x0)[0m
+[0;32mI (5281) wifi:state: assoc -> run (0x10)[0m
+[0;32mI (5315) wifi:connected with Vodafone0E20F1, aid = 21, channel 2, BW20, bssid = 62:d8:a4:0e:20:f9[0m
+[0;32mI (5316) wifi:security: WPA3-SAE HUNT_AND_PECK, phy: bgn, rssi: -65, cipher(pairwise:0x3, group:0x3), pmf:1[0m
+[0;32mI (5319) wifi:pm start, type: 1[0m
+
+[0;32mI (5319) wifi:dp: 1, bi: 102400, li: 3, scale listen interval from 307200 us to 307200 us[0m
+[0;32mI (5320) wifi:set rx beacon pti, rx_bcn_pti: 0, bcn_timeout: 25000, mt_pti: 0, mt_time: 10000[0m
+[0;32mI (5326) wifi:<ba-add>idx:0 (ifx:0, 62:d8:a4:0e:20:f9), tid:3, ssn:1, winSize:64[0m
+[0;32mI (5348) wifi:AP's beacon interval = 102400 us, DTIM period = 1[0m
+[0;32mI (5396) wifi:<ba-add>idx:1 (ifx:0, 62:d8:a4:0e:20:f9), tid:0, ssn:1, winSize:64[0m
+[0;32mI (5720) mochi: tick 10 — uptime 5.0s — led on[0m
+[0;32mI (6221) mochi: tick 11 — uptime 5.5s — led off[0m
+[0;32mI (6322) wifi_sta: got IP 192.168.1.199[0m
+[0;32mI (6322) esp_netif_handlers: sta ip: 192.168.1.199, mask: 255.255.255.0, gw: 192.168.1.1[0m
+[0;32mI (6323) mochi: online; IP=192.168.1.199[0m
+[0;32mI (6722) mochi: tick 12 — uptime 6.0s — led on[0m
+[0;32mI (7223) mochi: tick 13 — uptime 6.5s — led off[0m
+[0;32mI (7724) mochi: tick 14 — uptime 7.0s — led on[0m
+[0;32mI (8225) mochi: tick 15 — uptime 7.5s — led off[0m
+[0;32mI (8726) mochi: tick 16 — uptime 8.0s — led on[0m
+[0;32mI (9227) mochi: tick 17 — uptime 8.5s — led off[0m
+[0;32mI (9728) mochi: tick 18 — uptime 9.0s — led on[0m
+[0;32mI (10229) mochi: tick 19 — uptime 9.5s — led off[0m
+[0;32mI (10730) mochi: tick 20 — uptime 10.0s — led on[0m
+[0;32mI (11231) mochi: tick 21 — uptime 10.5s — led off[0m
+[0;32mI (11732) mochi: tick 22 — uptime 11.0s — led on[0m
+[0;32mI (12233) mochi: tick 23 — uptime 11.5s — led off[0m
+[0;32mI (12734) mochi: tick 24 — uptime 12.0s — led on[0m
+[0;32mI (13235) mochi: tick 25 — uptime 12.5s — led off[0m
+[0;32mI (13736) mochi: tick 26 — uptime 13.0s — led on[0m
+[0;32mI (14237) mochi: tick 27 — uptime 13.5s — led off[0m
+[0;32mI (14738) mochi: tick 28 — uptime 14.0s — led on[0m
+[0;32mI (15239) mochi: tick 29 — uptime 14.5s — led off[0m
+[0;32mI (15740) mochi: tick 30 — uptime 15.0s — led on[0m
+[0;32mI (16241) mochi: tick 31 — uptime 15.5s — led off[0m
+[0;32mI (16742) mochi: tick 32 — uptime 16.0s — led on[0m
+[0;32mI (17243) mochi: tick 33 — uptime 16.5s — led off[0m
+[0;32mI (17744) mochi: tick 34 — uptime 17.0s — led on[0m
+[0;32mI (18245) mochi: tick 35 — uptime 17.5s — led off[0m
+[0;32mI (18746) mochi: tick 36 — uptime 18.0s — led on[0m
+[0;32mI (19247) mochi: tick 37 — uptime 18.5s — led off[0m
+[0;32mI (19748) mochi: tick 38 — uptime 19.0s — led on[0m
+[0;32mI (20249) mochi: tick 39 — uptime 19.5s — led off[0m
+[0;32mI (20750) mochi: tick 40 — uptime 20.0s — led on[0m
+[0;32mI (21251) mochi: tick 41 — uptime 20.5s — led off[0m
+[0;32mI (21752) mochi: tick 42 — uptime 21.0s — led on[0m
+[0;32mI (22253) mochi: tick 43 — uptime 21.5s — led off[0m
+[0;32mI (22754) mochi: tick 44 — uptime 22.0s — led on[0m
+[0;32mI (23255) mochi: tick 45 — uptime 22.5s — led off[0m
+[0;32mI (23756) mochi: tick 46 — uptime 23.0s — led on[0m
+[0;32mI (24257) mochi: tick 47 — uptime 23.5s — led off[0m
+[0;32mI (24758) mochi: tick 48 — uptime 24.0s — led on[0m
+[0;32mI (25259) mochi: tick 49 — uptime 24.5s — led off[0m
+[0;32mI (25760) mochi: tick 50 — uptime 25.0s — led on[0m
+[0;32mI (26261) mochi: tick 51 — uptime 25.5s — led off[0m
+[0;32mI (26762) mochi: tick 52 — uptime 26.0s — led on[0m
+[0;32mI (27263) mochi: tick 53 — uptime 26.5s — led off[0m
+[0;32mI (27764) mochi: tick 54 — uptime 27.0s — led on[0m
+[0;32mI (28265) mochi: tick 55 — uptime 27.5s — led off[0m
+[0;32mI (28766) mochi: tick 56 — uptime 28.0s — led on[0m
+[0;32mI (29267) mochi: tick 57 — uptime 28.5s — led off[0m
+[0;32mI (29768) mochi: tick 58 — uptime 29.1s — led on[0m
+[0;32mI (30269) mochi: tick 59 — uptime 29.6s — led off[0m
+[0;32mI (30770) mochi: tick 60 — uptime 30.1s — led on[0m
+[0;32mI (31271) mochi: tick 61 — uptime 30.6s — led off[0m
+[0;32mI (31772) mochi: tick 62 — uptime 31.1s — led on[0m
+[0;32mI (32273) mochi: tick 63 — uptime 31.6s — led off[0m
+[0;32mI (32774) mochi: tick 64 — uptime 32.1s — led on[0m
+[0;32mI (33275) mochi: tick 65 — uptime 32.6s — led off[0m
+[0;32mI (33776) mochi: tick 66 — uptime 33.1s — led on[0m
+[0;32mI (34277) mochi: tick 67 — uptime 33.6s — led off[0m
+[0;32mI (34778) mochi: tick 68 — uptime 34.1s — led on[0m
+[0;32mI (35279) mochi: tick 69 — uptime 34.6s — led off[0m
+[0;32mI (35780) mochi: tick 70 — uptime 35.1s — led on[0m
+[0;32mI (36281) mochi: tick 71 — uptime 35.6s — led off[0m
+[0;32mI (36782) mochi: tick 72 — uptime 36.1s — led on[0m
+[0;32mI (37283) mochi: tick 73 — uptime 36.6s — led off[0m
+[0;32mI (37784) mochi: tick 74 — uptime 37.1s — led on[0m
+[0;32mI (38285) mochi: tick 75 — uptime 37.6s — led off[0m
+[0;32mI (38786) mochi: tick 76 — uptime 38.1s — led on[0m
+[0;32mI (39287) mochi: tick 77 — uptime 38.6s — led off[0m

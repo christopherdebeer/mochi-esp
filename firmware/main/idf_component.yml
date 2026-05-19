@@ -1,0 +1,33 @@
+# Managed components from the ESP-IDF Component Registry.
+#
+# joltwallet/littlefs — LittleFS port for ESP-IDF. Used by the
+# sprite-cache layer (firmware/main/sprite_cache.{cpp,h}) to mount
+# the 'storage' partition (6 MB at 0x210000) as a small filesystem
+# we can stash decoded sprite payloads in across reboots.
+#
+# Without this, every cold boot re-fetches scene + icons + pet
+# expressions over HTTPS (~22 s of boot time before first render).
+# With it, we ETag-check at boot and only re-fetch on changes.
+
+dependencies:
+  joltwallet/littlefs: "^1.14.0"
+
+  # M9 — voice direct-to-OpenAI Realtime over WebRTC.
+  #
+  # esp_peer is the WebRTC PeerConnection itself (DTLS, SRTP, ICE,
+  # SDP). Upstream `openai_demo` in esp-webrtc-solution layers
+  # esp_webrtc + av_render + esp_capture + media_lib_utils on top;
+  # we drive esp_peer directly instead. See firmware/components/README
+  # § "Path choice" and design/01-bring-up-plan.md § M9 for why.
+  #
+  # codec_board (vendored under firmware/components/) brings in
+  # esp_codec_dev transitively at the right version, so we don't
+  # pin it here.
+  espressif/esp_peer: "^1.4.1"
+
+  # Opus decode for playback of OpenAI Realtime audio. Our SDP offers
+  # Opus@24000/mono (matches mochi-val's audio.output.format hint to
+  # the model). on_audio_data delivers Opus-encoded frames; this
+  # component decodes them to PCM16 we can hand to esp_codec_dev_write.
+  # Registry-only, no extra deps beyond IDF.
+  espressif/esp_audio_codec: "^2.5.0"

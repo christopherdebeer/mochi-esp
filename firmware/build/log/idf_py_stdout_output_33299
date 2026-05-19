@@ -1,0 +1,81 @@
+[1/5] cd /Users/cdbeer/dev/mochi-esp/firmware/build/esp-idf/esptool_py && /Users/cdbeer/.espressif/python_env/idf5.3_py3.12_env/bin/python /Users/cdbeer/dev/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 partition --type app /Users/cdbeer/dev/mochi-esp/firmware/build/partition_table/partition-table.bin /Users/cdbeer/dev/mochi-esp/firmware/build/eink-pet.bin
+eink-pet.bin binary size 0xfdbe0 bytes. Smallest app partition is 0x200000 bytes. 0x102420 bytes (50%) free.
+[2/5] Performing build step for 'bootloader'
+[1/1] cd /Users/cdbeer/dev/mochi-esp/firmware/build/bootloader/esp-idf/esptool_py && /Users/cdbeer/.espressif/python_env/idf5.3_py3.12_env/bin/python /Users/cdbeer/dev/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 bootloader 0x0 /Users/cdbeer/dev/mochi-esp/firmware/build/bootloader/bootloader.bin
+Bootloader binary size 0x5390 bytes. 0x2c70 bytes (35%) free.
+[3/5] No install step for 'bootloader'
+[4/5] Completed 'bootloader'
+[4/5] cd /Users/cdbeer/dev/esp-idf/components/esptool_py && /opt/homebrew/bin/cmake -D IDF_PATH=/Users/cdbeer/dev/esp-idf -D "SERIAL_TOOL=/Users/cdbeer/.espressif/python_env/idf5.3_py3.12_env/bin/python;;/Users/cdbeer/dev/esp-idf/components/esptool_py/esptool/esptool.py;--chip;esp32s3" -D "SERIAL_TOOL_ARGS=--before=default_reset;--after=hard_reset;write_flash;@flash_args" -D WORKING_DIRECTORY=/Users/cdbeer/dev/mochi-esp/firmware/build -P /Users/cdbeer/dev/esp-idf/components/esptool_py/run_serial_tool.cmake
+esptool.py --chip esp32s3 -p /dev/cu.usbmodem2101 -b 460800 --before=default_reset --after=hard_reset write_flash --flash_mode dio --flash_freq 80m --flash_size 8MB 0x0 bootloader/bootloader.bin 0x10000 eink-pet.bin 0x8000 partition_table/partition-table.bin
+esptool.py v4.11.0
+Serial port /dev/cu.usbmodem2101
+Connecting...
+Chip is ESP32-S3-PICO-1 (LGA56) (revision v0.2)
+Features: WiFi, BLE, Embedded Flash 8MB (GD), Embedded PSRAM 8MB (AP_3v3)
+Crystal is 40MHz
+USB mode: USB-Serial/JTAG
+MAC: 70:04:1d:db:f9:48
+Uploading stub...
+Running stub...
+Stub running...
+Changing baud rate to 460800
+Changed.
+Configuring flash size...
+Flash will be erased from 0x00000000 to 0x00005fff...
+Flash will be erased from 0x00010000 to 0x0010dfff...
+Flash will be erased from 0x00008000 to 0x00008fff...
+SHA digest in image updated
+Compressed 21392 bytes to 13157...
+Writing at 0x00000000... (100 %)
+Wrote 21392 bytes (13157 compressed) at 0x00000000 in 0.3 seconds (effective 499.2 kbit/s)...
+Hash of data verified.
+Compressed 1039328 bytes to 650079...
+Writing at 0x00010000... (2 %)
+Writing at 0x0001d5d4... (5 %)
+Writing at 0x00029e8a... (7 %)
+Writing at 0x0002ed13... (10 %)
+Writing at 0x00033b2d... (12 %)
+Writing at 0x00038fe4... (15 %)
+Writing at 0x000402fc... (17 %)
+Writing at 0x0004c759... (20 %)
+Writing at 0x00052709... (22 %)
+Writing at 0x00058a90... (25 %)
+Writing at 0x0005ea1c... (27 %)
+Writing at 0x000650f2... (30 %)
+Writing at 0x0006b293... (32 %)
+Writing at 0x00070dd7... (35 %)
+Writing at 0x00076c83... (37 %)
+Writing at 0x0007c9d8... (40 %)
+Writing at 0x000825fb... (42 %)
+Writing at 0x000884f6... (45 %)
+Writing at 0x0008df7d... (47 %)
+Writing at 0x00093d7c... (50 %)
+Writing at 0x0009a37e... (52 %)
+Writing at 0x000a0289... (55 %)
+Writing at 0x000a57b5... (57 %)
+Writing at 0x000aa7e7... (60 %)
+Writing at 0x000aff4a... (62 %)
+Writing at 0x000b56da... (65 %)
+Writing at 0x000babdb... (67 %)
+Writing at 0x000c0049... (70 %)
+Writing at 0x000c5b99... (72 %)
+Writing at 0x000cb848... (75 %)
+Writing at 0x000d131a... (77 %)
+Writing at 0x000d707f... (80 %)
+Writing at 0x000dd852... (82 %)
+Writing at 0x000e2fa0... (85 %)
+Writing at 0x000e92d7... (87 %)
+Writing at 0x000f1b54... (90 %)
+Writing at 0x000f7b3d... (92 %)
+Writing at 0x000fda8a... (95 %)
+Writing at 0x0010400d... (97 %)
+Writing at 0x00109b9d... (100 %)
+Wrote 1039328 bytes (650079 compressed) at 0x00010000 in 6.8 seconds (effective 1214.0 kbit/s)...
+Hash of data verified.
+Compressed 3072 bytes to 120...
+Writing at 0x00008000... (100 %)
+Wrote 3072 bytes (120 compressed) at 0x00008000 in 0.0 seconds (effective 543.2 kbit/s)...
+Hash of data verified.
+
+Leaving...
+Hard resetting via RTS pin...

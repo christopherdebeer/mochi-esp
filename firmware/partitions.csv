@@ -1,0 +1,26 @@
+# Partition table for ESP32-S3-N8R8 (8MB flash).
+#
+# Layout:
+#   0x00000  bootloader (~32KB, managed by ESP-IDF)
+#   0x08000  partition table (4KB)
+#   0x09000  nvs              24KB    WiFi creds, pairing token, prefs
+#   0x0F000  phy_init          4KB    radio calibration
+#   0x10000  factory app       2MB    firmware (no OTA yet)
+#   0x210000 storage          ~6MB    sprite cache + event log
+#   0x800000 end (8MB)
+#
+# `storage` subtype is `spiffs` for now — partition tables can carry
+# this label even when the runtime FS is something else (LittleFS via
+# the joltwallet/littlefs component is a likely successor). Application
+# code finds the partition by label `storage`, not by subtype, so the
+# choice can flex.
+#
+# OTA partitions (ota_0, ota_1, otadata) are deliberately omitted at
+# this stage — they cost 4MB and we don't have an OTA story yet. Add
+# them when we do.
+
+# Name,   Type, SubType, Offset,   Size,    Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  0x200000,
+storage,  data, littlefs, 0x210000, 0x5f0000,

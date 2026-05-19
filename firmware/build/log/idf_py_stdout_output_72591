@@ -1,0 +1,73 @@
+[1/5] cd /Users/cdbeer/dev/mochi-esp/firmware/build/esp-idf/esptool_py && /Users/cdbeer/.espressif/python_env/idf5.3_py3.12_env/bin/python /Users/cdbeer/dev/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 partition --type app /Users/cdbeer/dev/mochi-esp/firmware/build/partition_table/partition-table.bin /Users/cdbeer/dev/mochi-esp/firmware/build/eink-pet.bin
+eink-pet.bin binary size 0xca150 bytes. Smallest app partition is 0x200000 bytes. 0x135eb0 bytes (61%) free.
+[2/5] Performing build step for 'bootloader'
+[1/1] cd /Users/cdbeer/dev/mochi-esp/firmware/build/bootloader/esp-idf/esptool_py && /Users/cdbeer/.espressif/python_env/idf5.3_py3.12_env/bin/python /Users/cdbeer/dev/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 bootloader 0x0 /Users/cdbeer/dev/mochi-esp/firmware/build/bootloader/bootloader.bin
+Bootloader binary size 0x5390 bytes. 0x2c70 bytes (35%) free.
+[3/5] No install step for 'bootloader'
+[4/5] Completed 'bootloader'
+[4/5] cd /Users/cdbeer/dev/esp-idf/components/esptool_py && /opt/homebrew/bin/cmake -D IDF_PATH=/Users/cdbeer/dev/esp-idf -D "SERIAL_TOOL=/Users/cdbeer/.espressif/python_env/idf5.3_py3.12_env/bin/python;;/Users/cdbeer/dev/esp-idf/components/esptool_py/esptool/esptool.py;--chip;esp32s3" -D "SERIAL_TOOL_ARGS=--before=default_reset;--after=hard_reset;write_flash;@flash_args" -D WORKING_DIRECTORY=/Users/cdbeer/dev/mochi-esp/firmware/build -P /Users/cdbeer/dev/esp-idf/components/esptool_py/run_serial_tool.cmake
+esptool.py --chip esp32s3 -p /dev/cu.usbmodem2101 -b 460800 --before=default_reset --after=hard_reset write_flash --flash_mode dio --flash_freq 80m --flash_size 8MB 0x0 bootloader/bootloader.bin 0x10000 eink-pet.bin 0x8000 partition_table/partition-table.bin
+esptool.py v4.11.0
+Serial port /dev/cu.usbmodem2101
+Connecting....
+Chip is ESP32-S3-PICO-1 (LGA56) (revision v0.2)
+Features: WiFi, BLE, Embedded Flash 8MB (GD), Embedded PSRAM 8MB (AP_3v3)
+Crystal is 40MHz
+USB mode: USB-Serial/JTAG
+MAC: 70:04:1d:db:f9:48
+Uploading stub...
+Running stub...
+Stub running...
+Changing baud rate to 460800
+Changed.
+Configuring flash size...
+Flash will be erased from 0x00000000 to 0x00005fff...
+Flash will be erased from 0x00010000 to 0x000dafff...
+Flash will be erased from 0x00008000 to 0x00008fff...
+SHA digest in image updated
+Compressed 21392 bytes to 13156...
+Writing at 0x00000000... (100 %)
+Wrote 21392 bytes (13156 compressed) at 0x00000000 in 0.3 seconds (effective 508.0 kbit/s)...
+Hash of data verified.
+Compressed 827728 bytes to 511792...
+Writing at 0x00010000... (3 %)
+Writing at 0x0001d297... (6 %)
+Writing at 0x00027bcc... (9 %)
+Writing at 0x00031569... (12 %)
+Writing at 0x000379e6... (15 %)
+Writing at 0x0003e06d... (18 %)
+Writing at 0x00044035... (21 %)
+Writing at 0x000498e0... (25 %)
+Writing at 0x0004f65d... (28 %)
+Writing at 0x00055201... (31 %)
+Writing at 0x0005af1e... (34 %)
+Writing at 0x00060e7e... (37 %)
+Writing at 0x00066c16... (40 %)
+Writing at 0x0006cc37... (43 %)
+Writing at 0x00071d7e... (46 %)
+Writing at 0x00077408... (50 %)
+Writing at 0x0007cbc5... (53 %)
+Writing at 0x000820bd... (56 %)
+Writing at 0x00087487... (59 %)
+Writing at 0x0008cc00... (62 %)
+Writing at 0x00092a22... (65 %)
+Writing at 0x00098455... (68 %)
+Writing at 0x0009e221... (71 %)
+Writing at 0x000a4751... (75 %)
+Writing at 0x000a9e20... (78 %)
+Writing at 0x000b293e... (81 %)
+Writing at 0x000b8461... (84 %)
+Writing at 0x000c0a40... (87 %)
+Writing at 0x000c68c6... (90 %)
+Writing at 0x000cca6b... (93 %)
+Writing at 0x000d3437... (96 %)
+Writing at 0x000d8584... (100 %)
+Wrote 827728 bytes (511792 compressed) at 0x00010000 in 5.2 seconds (effective 1266.8 kbit/s)...
+Hash of data verified.
+Compressed 3072 bytes to 120...
+Writing at 0x00008000... (100 %)
+Wrote 3072 bytes (120 compressed) at 0x00008000 in 0.0 seconds (effective 550.4 kbit/s)...
+Hash of data verified.
+
+Leaving...
+Hard resetting via RTS pin...

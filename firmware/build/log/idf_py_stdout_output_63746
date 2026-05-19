@@ -1,0 +1,36 @@
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x15 (USB_UART_CHIP_RESET),boot:0x9 (SPI_FAST_FLASH_BOOT)
+Saved PC:0x403cd79a
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2810,len:0x1828
+load:0x403c8700,len:0x4
+load:0x403c8704,len:0xc40
+load:0x403cb700,len:0x2ec8
+entry 0x403c8908
+[0;32mI (26) boot: ESP-IDF v5.3.5-506-g0cf21f6beb 2nd stage bootloader[0m
+[0;32mI (27) boot: compile time May 18 2026 14:47:41[0m
+[0;32mI (27) boot: Multicore bootloader[0m
+[0;32mI (27) boot: chip revision: v0.2[0m
+[0;32mI (27) boot: efuse block revision: v1.4[0m
+[0;32mI (28) boot.esp32s3: Boot SPI Speed : 80MHz[0m
+[0;32mI (28) boot.esp32s3: SPI Mode       : DIO[0m
+[0;32mI (28) boot.esp32s3: SPI Flash Size : 8MB[0m
+[0;32mI (28) boot: Enabling RNG early entropy source...[0m
+[0;32mI (28) boot: Partition Table:[0m
+[0;32mI (29) boot: ## Label            Usage          Type ST Offset   Length[0m
+[0;32mI (29) boot:  0 nvs              WiFi data        01 02 00009000 00006000[0m
+[0;32mI (29) boot:  1 phy_init         RF data          01 01 0000f000 00001000[0m
+[0;32mI (30) boot:  2 factory          factory app      00 00 00010000 00200000[0m
+[0;32mI (30) boot:  3 storage          Unknown data     01 83 00210000 005f0000[0m
+[0;32mI (31) boot: End of partition table[0m
+[0;32mI (31) esp_image: segment 0: paddr=00010020 vaddr=3c0c0020 size=39c14h (236564) map[0m
+[0;32mI (74) esp_image: segment 1: paddr=00049c3c vaddr=3fc9f200 size=05914h ( 22804) load[0m
+[0;32mI (80) esp_image: segment 2: paddr=0004f558 vaddr=40374000 size=00ac0h (  2752) load[0m
+[0;32mI (81) esp_image: segment 3: paddr=00050020 vaddr=42000020 size=b2ed0h (732880) map[0m
+[0;32mI (215) esp_image: segment 4: paddr=00102ef8 vaddr=40374ac0 size=1a644h (108100) load[0m
+[0;32mI (240) esp_image: segment 5: paddr=0011d544 vaddr=50000000 size=00004h (     4) load[0m
+[0;32mI (240) esp_image: segment 6: paddr=0011d550 vaddr=600fe000 size=0006ch (   108) load[0m
+[0;32mI (251) boot: Loaded app from partition at offset 0x10000[0m
+[0;32mI (251) boot: Disabling RNG early entropy source...[0m

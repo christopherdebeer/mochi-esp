@@ -1,0 +1,420 @@
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x15 (USB_UART_CHIP_RESET),boot:0x9 (SPI_FAST_FLASH_BOOT)
+Saved PC:0x403cd752
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2810,len:0x1828
+load:0x403c8700,len:0x4
+load:0x403c8704,len:0xc40
+load:0x403cb700,len:0x2ec8
+entry 0x403c8908
+[0;32mI (26) boot: ESP-IDF v5.3.5-506-g0cf21f6beb 2nd stage bootloader[0m
+[0;32mI (27) boot: compile time May 18 2026 14:47:41[0m
+[0;32mI (27) boot: Multicore bootloader[0m
+[0;32mI (27) boot: chip revision: v0.2[0m
+[0;32mI (27) boot: efuse block revision: v1.4[0m
+[0;32mI (28) boot.esp32s3: Boot SPI Speed : 80MHz[0m
+[0;32mI (28) boot.esp32s3: SPI Mode       : DIO[0m
+[0;32mI (28) boot.esp32s3: SPI Flash Size : 8MB[0m
+[0;32mI (28) boot: Enabling RNG early entropy source...[0m
+[0;32mI (28) boot: Partition Table:[0m
+[0;32mI (29) boot: ## Label            Usage          Type ST Offset   Length[0m
+[0;32mI (29) boot:  0 nvs              WiFi data        01 02 00009000 00006000[0m
+[0;32mI (29) boot:  1 phy_init         RF data          01 01 0000f000 00001000[0m
+[0;32mI (30) boot:  2 factory          factory app      00 00 00010000 00200000[0m
+[0;32mI (30) boot:  3 storage          Unknown data     01 83 00210000 005f0000[0m
+[0;32mI (31) boot: End of partition table[0m
+[0;32mI (31) esp_image: segment 0: paddr=00010020 vaddr=3c100020 size=4e420h (320544) map[0m
+[0;32mI (90) esp_image: segment 1: paddr=0005e448 vaddr=3fca0900 size=01bd0h (  7120) load[0m
+[0;32mI (92) esp_image: segment 2: paddr=00060020 vaddr=42000020 size=f00a0h (983200) map[0m
+[0;32mI (271) esp_image: segment 3: paddr=001500c8 vaddr=3fca24d0 size=03fc4h ( 16324) load[0m
+[0;32mI (275) esp_image: segment 4: paddr=00154094 vaddr=40374000 size=1c81ch (116764) load[0m
+[0;32mI (302) esp_image: segment 5: paddr=001708b8 vaddr=50000000 size=00004h (     4) load[0m
+[0;32mI (303) esp_image: segment 6: paddr=001708c4 vaddr=600fe000 size=0006ch (   108) load[0m
+[0;32mI (314) boot: Loaded app from partition at offset 0x10000[0m
+[0;32mI (314) boot: Disabling RNG early entropy source...[0m
+[0;32mI (315) octal_psram: vendor id    : 0x0d (AP)[0m
+[0;32mI (315) octal_psram: dev id       : 0x02 (generation 3)[0m
+[0;32mI (316) octal_psram: density      : 0x03 (64 Mbit)[0m
+[0;32mI (316) octal_psram: good-die     : 0x01 (Pass)[0m
+[0;32mI (316) octal_psram: Latency      : 0x01 (Fixed)[0m
+[0;32mI (316) octal_psram: VCC          : 0x01 (3V)[0m
+[0;32mI (317) octal_psram: SRF          : 0x01 (Fast Refresh)[0m
+[0;32mI (317) octal_psram: BurstType    : 0x01 (Hybrid Wrap)[0m
+[0;32mI (317) octal_psram: BurstLen     : 0x01 (32 Byte)[0m
+[0;32mI (318) octal_psram: Readlatency  : 0x02 (10 cycles@Fixed)[0m
+[0;32mI (318) octal_psram: DriveStrength: 0x00 (1/1)[0m
+[0;32mI (319) MSPI Timing: PSRAM timing tuning index: 4[0m
+[0;32mI (319) esp_psram: Found 8MB PSRAM device[0m
+[0;32mI (319) esp_psram: Speed: 80MHz[0m
+[0;32mI (320) cpu_start: Multicore app[0m
+[0;32mI (765) esp_psram: SPI SRAM memory test OK[0m
+[0;32mI (774) cpu_start: Pro cpu start user code[0m
+[0;32mI (774) cpu_start: cpu freq: 160000000 Hz[0m
+[0;32mI (775) app_init: Application information:[0m
+[0;32mI (775) app_init: Project name:     eink-pet[0m
+[0;32mI (775) app_init: App version:      1[0m
+[0;32mI (775) app_init: Compile time:     May 19 2026 15:47:13[0m
+[0;32mI (775) app_init: ELF file SHA256:  9d33532f2...[0m
+[0;32mI (775) app_init: ESP-IDF:          v5.3.5-506-g0cf21f6beb[0m
+[0;32mI (776) efuse_init: Min chip rev:     v0.0[0m
+[0;32mI (776) efuse_init: Max chip rev:     v0.99 [0m
+[0;32mI (776) efuse_init: Chip rev:         v0.2[0m
+[0;32mI (776) heap_init: Initializing. RAM available for dynamic allocation:[0m
+[0;32mI (777) heap_init: At 3FCABFA0 len 0003D770 (245 KiB): RAM[0m
+[0;32mI (777) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM[0m
+[0;32mI (777) heap_init: At 3FCF0000 len 00008000 (32 KiB): DRAM[0m
+[0;32mI (777) heap_init: At 600FE06C len 00001F7C (7 KiB): RTCRAM[0m
+[0;32mI (778) esp_psram: Adding pool of 8192K of PSRAM memory to heap allocator[0m
+[0;32mI (779) spi_flash: detected chip: gd[0m
+[0;32mI (779) spi_flash: flash io: dio[0m
+[0;32mI (780) sleep: Configure to isolate all GPIO pins in sleep state[0m
+[0;32mI (781) sleep: Enable automatic switching of GPIO sleep configuration[0m
+[0;32mI (781) main_task: Started on CPU0[0m
+[0;32mI (782) esp_psram: Reserving pool of 32K of internal memory for DMA/internal allocations[0m
+[0;32mI (783) main_task: Calling app_main()[0m
+[0;32mI (783) mochi: —— mochi M3: boot ——[0m
+[0;32mI (783) mochi: chip: esp32s3 rev 0.2, 2 cores[0m
+[0;32mI (783) mochi: flash: 8 MB external[0m
+[0;32mI (783) mochi: psram: 8192 KB[0m
+[0;32mI (784) gpio: GPIO[3]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 [0m
+[0;32mI (784) gpio: GPIO[0]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (785) gpio: GPIO[6]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (835) gpio: GPIO[17]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (835) gpio: GPIO[42]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (885) driver: Initialize SPI[0m
+[0;32mI (886) gpio: GPIO[9]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (887) gpio: GPIO[10]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (887) gpio: GPIO[11]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (887) gpio: GPIO[8]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (4526) factory_reset: watching for PWR+BOOT 10s hold[0m
+[0;32mI (4526) gpio: GPIO[18]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (4526) sleep_gesture: watching for PWR 3 s hold[0m
+[0;32mI (4557) mochi: have 2 stored network(s) → scan + connect_any[0m
+[0;32mI (4559) pp: pp rom version: e7ae62f[0m
+[0;32mI (4560) net80211: net80211 rom version: e7ae62f[0m
+[0;32mI (4561) wifi:wifi driver task: 3fcc161c, prio:23, stack:6656, core=0[0m
+[0;32mI (4575) wifi:wifi firmware version: 4209e03[0m
+[0;32mI (4575) wifi:wifi certification version: v7.0[0m
+[0;32mI (4575) wifi:config NVS flash: enabled[0m
+[0;32mI (4576) wifi:config nano formating: disabled[0m
+[0;32mI (4576) wifi:Init data frame dynamic rx buffer num: 32[0m
+[0;32mI (4576) wifi:Init static rx mgmt buffer num: 5[0m
+[0;32mI (4577) wifi:Init management short buffer num: 32[0m
+[0;32mI (4577) wifi:Init dynamic tx buffer num: 32[0m
+[0;32mI (4577) wifi:Init static tx FG buffer num: 2[0m
+[0;32mI (4577) wifi:Init static rx buffer size: 1600[0m
+[0;32mI (4578) wifi:Init static rx buffer num: 10[0m
+[0;32mI (4578) wifi:Init dynamic rx buffer num: 32[0m
+[0;32mI (4579) wifi_init: rx ba win: 6[0m
+[0;32mI (4579) wifi_init: accept mbox: 6[0m
+[0;32mI (4579) wifi_init: tcpip mbox: 32[0m
+[0;32mI (4579) wifi_init: udp mbox: 6[0m
+[0;32mI (4580) wifi_init: tcp mbox: 6[0m
+[0;32mI (4580) wifi_init: tcp tx win: 5760[0m
+[0;32mI (4580) wifi_init: tcp rx win: 5760[0m
+[0;32mI (4580) wifi_init: tcp mss: 1440[0m
+[0;32mI (4580) wifi_init: WiFi IRAM OP enabled[0m
+[0;32mI (4580) wifi_init: WiFi RX IRAM OP enabled[0m
+[0;32mI (4582) phy_init: phy_version 711,97bcf0a2,Aug 25 2025,19:04:10[0m
+[0;32mI (4620) wifi:mode : sta (70:04:1d:db:f9:48)[0m
+[0;32mI (4621) wifi:enable tsf[0m
+[0;32mI (7124) wifi_sta: scan: 2 APs visible[0m
+[0;32mI (7126) wifi_sta: match [0] 'Vodafone0E20F1' (rssi=-59) — trying[0m
+[0;33mW (7127) wifi:Password length matches WPA2 standards, authmode threshold changes from OPEN to WPA2[0m
+[0;32mI (7138) wifi:new:<2,0>, old:<1,0>, ap:<255,255>, sta:<2,0>, prof:1, snd_ch_cfg:0x0[0m
+[0;32mI (7139) wifi:state: init -> auth (0xb0)[0m
+[0;32mI (11533) wifi:state: auth -> init (0x200)[0m
+[0;32mI (11537) wifi:new:<2,0>, old:<2,0>, ap:<255,255>, sta:<2,0>, prof:1, snd_ch_cfg:0x0[0m
+[0;33mW (11538) wifi_sta: disconnect; retry 1/8[0m
+[0;33mW (13949) wifi_sta: disconnect; retry 2/8[0m
+[0;32mI (13957) wifi:new:<2,0>, old:<2,0>, ap:<255,255>, sta:<2,0>, prof:1, snd_ch_cfg:0x0[0m
+[0;32mI (13958) wifi:state: init -> auth (0xb0)[0m
+[0;32mI (14741) wifi:state: auth -> assoc (0x0)[0m
+[0;32mI (14759) wifi:state: assoc -> run (0x10)[0m
+[0;32mI (14789) wifi:connected with Vodafone0E20F1, aid = 16, channel 2, BW20, bssid = 62:d8:a4:0e:20:f9[0m
+[0;32mI (14790) wifi:security: WPA3-SAE HUNT_AND_PECK, phy: bgn, rssi: -60, cipher(pairwise:0x3, group:0x3), pmf:1[0m
+[0;32mI (14793) wifi:pm start, type: 1[0m
+
+[0;32mI (14793) wifi:dp: 1, bi: 102400, li: 3, scale listen interval from 307200 us to 307200 us[0m
+[0;32mI (14794) wifi:set rx beacon pti, rx_bcn_pti: 0, bcn_timeout: 25000, mt_pti: 0, mt_time: 10000[0m
+[0;32mI (14801) wifi:<ba-add>idx:0 (ifx:0, 62:d8:a4:0e:20:f9), tid:3, ssn:1, winSize:64[0m
+[0;32mI (14877) wifi:AP's beacon interval = 102400 us, DTIM period = 1[0m
+[0;32mI (14982) wifi:<ba-add>idx:1 (ifx:0, 62:d8:a4:0e:20:f9), tid:0, ssn:1, winSize:64[0m
+[0;32mI (15797) wifi_sta: got IP 192.168.1.199[0m
+[0;32mI (15797) esp_netif_handlers: sta ip: 192.168.1.199, mask: 255.255.255.0, gw: 192.168.1.1[0m
+[0;32mI (15797) mochi: online; IP=192.168.1.199, joined='Vodafone0E20F1'[0m
+i2c: {sda: 47, scl: 48}
+i2s: {mclk: 14, bclk: 15, ws: 38, din: 16, dout: 45}
+in_out: {codec: ES8311, pa: 46, use_mclk: 1, pa_gain: 6}
+[0;32mI (15800) gpio: GPIO[47]| InputEn: 1| OutputEn: 1| OpenDrain: 1| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (15801) gpio: GPIO[48]| InputEn: 1| OutputEn: 1| OpenDrain: 1| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (15801) CODEC_INIT: Set mater handle 0 0x3c151ed8[0m
+[0;32mI (15802) i2c_bus: i2c bus ready (port=0, sda=47, scl=48)[0m
+[0;32mI (15803) rtc: ready (addr=0x51, lost_power=0)[0m
+[0;32mI (15803) mochi: rtc: 2026-05-19 13:42:38 (wd=1)[0m
+[0;32mI (15806) shtc3: id=0x0887 (low6=0x07, expect 0x07)[0m
+[0;32mI (15822) mochi: shtc3: 26.71°C, 35.7%RH[0m
+[0;32mI (15823) CODEC_INIT: in:1 out:1 port: 1[0m
+[0;32mI (15823) CODEC_INIT: Success to int i2c: 0[0m
+[0;32mI (15823) CODEC_INIT: Init i2s 0 type: 3 mclk:14 bclk:15 ws:38 din:16 dout:45[0m
+[0;32mI (15824) CODEC_INIT: tx:0x3c1523a4 rx:0x3c152548[0m
+[0;32mI (15825) CODEC_INIT: output init std ret 0[0m
+[0;32mI (15826) CODEC_INIT: Input init std ret 0[0m
+[0;32mI (15826) CODEC_INIT: Init i2s 0 ok[0m
+[0;32mI (15827) CODEC_INIT: Success to init i2s: 0[0m
+[0;32mI (15827) CODEC_INIT: Success to int i2c: 0[0m
+[0;32mI (15827) CODEC_INIT: Success to init i2s: 0[0m
+[0;32mI (15827) CODEC_INIT: Get out handle 0x3c1523a4 port 0[0m
+[0;32mI (15828) gpio: GPIO[46]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 [0m
+[0;32mI (15835) ES8311: Work in Slave mode[0m
+[0;32mI (15839) voice: init_codec ok[0m
+[0;32mI (15840) openai_key: loaded openai key (len=164, prefix='sk-p…')[0m
+[0;32mI (15841) pair_creds: loaded pairing: pet_id=pet_441654b7-512 pet_name='Mochi'[0m
+[0;32mI (15842) voice: pet_id available: pet_441654b7-512[0m
+[0;32mI (15842) battery: ready (ADC1 ch3, 1:2 divider, curve-fit cal=yes)[0m
+[0;32mI (17843) mochi: battery diag: min=4090 mean=4093 max=4094 spread=4 mV (n=10)[0m
+[0;32mI (17843) mochi: battery diag → looks like a real LiPo on USB charge[0m
+[0;32mI (17946) sprite_cache: mounted: 102400/6225920 bytes used[0m
+[0;32mI (18111) esp-x509-crt-bundle: Certificate validated[0m
+[0;32mI (19508) mochi: etag 'pet-v1' unchanged ("7c11b551ffaeb2dd-s1") — using cache[0m
+[0;32mI (19661) esp-x509-crt-bundle: Certificate validated[0m
+[0;32mI (20838) mochi: etag 'ui-v1' unchanged ("210f9acc61b33f1f-s1") — using cache[0m
+[0;32mI (20990) esp-x509-crt-bundle: Certificate validated[0m
+[0;32mI (21968) mochi: etag 'scene-v1' unchanged ("24b5c20db347aaac") — using cache[0m
+[0;32mI (21970) pair_creds: loaded pairing: pet_id=pet_441654b7-512 pet_name='Mochi'[0m
+[0;32mI (21970) mochi: paired to 'Mochi' (pet_id=pet_441654b7-512)[0m
+[0;32mI (21992) mochi: scene loaded from cache[0m
+[0;32mI (22029) mochi: icon 'heart' loaded from cache[0m
+[0;32mI (22063) mochi: icon 'star' loaded from cache[0m
+[0;32mI (22101) mochi: icon 'bowl' loaded from cache[0m
+[0;32mI (22146) mochi: icon 'ball' loaded from cache[0m
+[0;32mI (25834) mochi: rendered 'neutral' (cache 0 ms, full refresh)[0m
+[0;32mI (25835) touch: i2c probe 0x38: ACK[0m
+[0;32mI (25835) touch: i2c probe 0x15: no[0m
+[0;32mI (25835) touch: i2c probe 0x5D: no[0m
+[0;32mI (25835) touch: i2c probe 0x51: ACK[0m
+[0;32mI (25836) touch: i2c probe 0x70: ACK[0m
+[0;32mI (25836) gpio: GPIO[7]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 [0m
+[0;32mI (26137) gpio: GPIO[21]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:2 [0m
+[0;32mI (26138) touch: ready (INT=GP21, RST=GP7, addr=0x38)[0m
+[0;32mI (27793) touch: event src=ISR x=105 y=148[0m
+[0;32mI (27793) mochi: touch (105,148) zone=4 expr=curious[0m
+[0;32mI (28594) mochi: long-press → start voice session[0m
+[0;32mI (29422) mochi: rendered 'curious' (cache 0 ms, partial refresh)[0m
+[0;32mI (29423) openai_key: loaded openai key (len=164, prefix='sk-p…')[0m
+[0;32mI (29424) pair_creds: loaded pairing: pet_id=pet_441654b7-512 pet_name='Mochi'[0m
+
+***ERROR*** A stack overflow in task main has been detected.
+
+
+Backtrace: 0x403760f2:0x3fcae810 0x40381c99:0x3fcae830 0x40382c56:0x3fcae850 0x403841a3:0x3fcae8d0 0x40382d1c:0x3fcae8f0 0x40382d12:0x3fcaeae8 |<-CORRUPTED
+
+
+
+
+ELF file SHA256: 9d33532f2
+
+Rebooting...
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0xc (RTC_SW_CPU_RST),boot:0x9 (SPI_FAST_FLASH_BOOT)
+Saved PC:0x4037602c
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2810,len:0x1828
+load:0x403c8700,len:0x4
+load:0x403c8704,len:0xc40
+load:0x403cb700,len:0x2ec8
+entry 0x403c8908
+[0;32mI (26) boot: ESP-IDF v5.3.5-506-g0cf21f6beb 2nd stage bootloader[0m
+[0;32mI (26) boot: compile time May 18 2026 14:47:41[0m
+[0;32mI (26) boot: Multicore bootloader[0m
+[0;32mI (27) boot: chip revision: v0.2[0m
+[0;32mI (27) boot: efuse block revision: v1.4[0m
+[0;32mI (27) boot.esp32s3: Boot SPI Speed : 80MHz[0m
+[0;32mI (27) boot.esp32s3: SPI Mode       : DIO[0m
+[0;32mI (27) boot.esp32s3: SPI Flash Size : 8MB[0m
+[0;32mI (28) boot: Enabling RNG early entropy source...[0m
+[0;32mI (28) boot: Partition Table:[0m
+[0;32mI (28) boot: ## Label            Usage          Type ST Offset   Length[0m
+[0;32mI (28) boot:  0 nvs              WiFi data        01 02 00009000 00006000[0m
+[0;32mI (29) boot:  1 phy_init         RF data          01 01 0000f000 00001000[0m
+[0;32mI (29) boot:  2 factory          factory app      00 00 00010000 00200000[0m
+[0;32mI (30) boot:  3 storage          Unknown data     01 83 00210000 005f0000[0m
+[0;32mI (30) boot: End of partition table[0m
+[0;32mI (30) esp_image: segment 0: paddr=00010020 vaddr=3c100020 size=4e420h (320544) map[0m
+[0;32mI (89) esp_image: segment 1: paddr=0005e448 vaddr=3fca0900 size=01bd0h (  7120) load[0m
+[0;32mI (91) esp_image: segment 2: paddr=00060020 vaddr=42000020 size=f00a0h (983200) map[0m
+[0;32mI (271) esp_image: segment 3: paddr=001500c8 vaddr=3fca24d0 size=03fc4h ( 16324) load[0m
+[0;32mI (275) esp_image: segment 4: paddr=00154094 vaddr=40374000 size=1c81ch (116764) load[0m
+[0;32mI (302) esp_image: segment 5: paddr=001708b8 vaddr=50000000 size=00004h (     4) load[0m
+[0;32mI (302) esp_image: segment 6: paddr=001708c4 vaddr=600fe000 size=0006ch (   108) load[0m
+[0;32mI (314) boot: Loaded app from partition at offset 0x10000[0m
+[0;32mI (314) boot: Disabling RNG early entropy source...[0m
+[0;32mI (315) octal_psram: vendor id    : 0x0d (AP)[0m
+[0;32mI (315) octal_psram: dev id       : 0x02 (generation 3)[0m
+[0;32mI (315) octal_psram: density      : 0x03 (64 Mbit)[0m
+[0;32mI (316) octal_psram: good-die     : 0x01 (Pass)[0m
+[0;32mI (316) octal_psram: Latency      : 0x01 (Fixed)[0m
+[0;32mI (316) octal_psram: VCC          : 0x01 (3V)[0m
+[0;32mI (316) octal_psram: SRF          : 0x01 (Fast Refresh)[0m
+[0;32mI (317) octal_psram: BurstType    : 0x01 (Hybrid Wrap)[0m
+[0;32mI (317) octal_psram: BurstLen     : 0x01 (32 Byte)[0m
+[0;32mI (317) octal_psram: Readlatency  : 0x02 (10 cycles@Fixed)[0m
+[0;32mI (318) octal_psram: DriveStrength: 0x00 (1/1)[0m
+[0;32mI (318) MSPI Timing: PSRAM timing tuning index: 4[0m
+[0;32mI (319) esp_psram: Found 8MB PSRAM device[0m
+[0;32mI (319) esp_psram: Speed: 80MHz[0m
+[0;32mI (319) cpu_start: Multicore app[0m
+[0;32mI (765) esp_psram: SPI SRAM memory test OK[0m
+[0;32mI (774) cpu_start: Pro cpu start user code[0m
+[0;32mI (774) cpu_start: cpu freq: 160000000 Hz[0m
+[0;32mI (774) app_init: Application information:[0m
+[0;32mI (774) app_init: Project name:     eink-pet[0m
+[0;32mI (774) app_init: App version:      1[0m
+[0;32mI (775) app_init: Compile time:     May 19 2026 15:47:13[0m
+[0;32mI (775) app_init: ELF file SHA256:  9d33532f2...[0m
+[0;32mI (775) app_init: ESP-IDF:          v5.3.5-506-g0cf21f6beb[0m
+[0;32mI (775) efuse_init: Min chip rev:     v0.0[0m
+[0;32mI (775) efuse_init: Max chip rev:     v0.99 [0m
+[0;32mI (776) efuse_init: Chip rev:         v0.2[0m
+[0;32mI (776) heap_init: Initializing. RAM available for dynamic allocation:[0m
+[0;32mI (776) heap_init: At 3FCABFA0 len 0003D770 (245 KiB): RAM[0m
+[0;32mI (776) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM[0m
+[0;32mI (777) heap_init: At 3FCF0000 len 00008000 (32 KiB): DRAM[0m
+[0;32mI (777) heap_init: At 600FE06C len 00001F7C (7 KiB): RTCRAM[0m
+[0;32mI (777) esp_psram: Adding pool of 8192K of PSRAM memory to heap allocator[0m
+[0;32mI (779) spi_flash: detected chip: gd[0m
+[0;32mI (779) spi_flash: flash io: dio[0m
+[0;32mI (780) sleep: Configure to isolate all GPIO pins in sleep state[0m
+[0;32mI (780) sleep: Enable automatic switching of GPIO sleep configuration[0m
+[0;32mI (781) main_task: Started on CPU0[0m
+[0;32mI (782) esp_psram: Reserving pool of 32K of internal memory for DMA/internal allocations[0m
+[0;32mI (783) main_task: Calling app_main()[0m
+[0;32mI (783) mochi: —— mochi M3: boot ——[0m
+[0;32mI (783) mochi: chip: esp32s3 rev 0.2, 2 cores[0m
+[0;32mI (783) mochi: flash: 8 MB external[0m
+[0;32mI (783) mochi: psram: 8192 KB[0m
+[0;32mI (784) gpio: GPIO[3]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 [0m
+[0;32mI (784) gpio: GPIO[0]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (785) gpio: GPIO[6]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (835) gpio: GPIO[17]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (835) gpio: GPIO[42]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (885) driver: Initialize SPI[0m
+[0;32mI (886) gpio: GPIO[9]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (887) gpio: GPIO[10]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (887) gpio: GPIO[11]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (887) gpio: GPIO[8]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (4531) factory_reset: watching for PWR+BOOT 10s hold[0m
+[0;32mI (4531) gpio: GPIO[18]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (4531) sleep_gesture: watching for PWR 3 s hold[0m
+[0;32mI (4562) mochi: have 2 stored network(s) → scan + connect_any[0m
+[0;32mI (4564) pp: pp rom version: e7ae62f[0m
+[0;32mI (4565) net80211: net80211 rom version: e7ae62f[0m
+[0;32mI (4566) wifi:wifi driver task: 3fcc161c, prio:23, stack:6656, core=0[0m
+[0;32mI (4580) wifi:wifi firmware version: 4209e03[0m
+[0;32mI (4580) wifi:wifi certification version: v7.0[0m
+[0;32mI (4580) wifi:config NVS flash: enabled[0m
+[0;32mI (4581) wifi:config nano formating: disabled[0m
+[0;32mI (4581) wifi:Init data frame dynamic rx buffer num: 32[0m
+[0;32mI (4581) wifi:Init static rx mgmt buffer num: 5[0m
+[0;32mI (4582) wifi:Init management short buffer num: 32[0m
+[0;32mI (4582) wifi:Init dynamic tx buffer num: 32[0m
+[0;32mI (4582) wifi:Init static tx FG buffer num: 2[0m
+[0;32mI (4582) wifi:Init static rx buffer size: 1600[0m
+[0;32mI (4583) wifi:Init static rx buffer num: 10[0m
+[0;32mI (4583) wifi:Init dynamic rx buffer num: 32[0m
+[0;32mI (4584) wifi_init: rx ba win: 6[0m
+[0;32mI (4584) wifi_init: accept mbox: 6[0m
+[0;32mI (4584) wifi_init: tcpip mbox: 32[0m
+[0;32mI (4584) wifi_init: udp mbox: 6[0m
+[0;32mI (4585) wifi_init: tcp mbox: 6[0m
+[0;32mI (4585) wifi_init: tcp tx win: 5760[0m
+[0;32mI (4585) wifi_init: tcp rx win: 5760[0m
+[0;32mI (4585) wifi_init: tcp mss: 1440[0m
+[0;32mI (4585) wifi_init: WiFi IRAM OP enabled[0m
+[0;32mI (4585) wifi_init: WiFi RX IRAM OP enabled[0m
+[0;32mI (4587) phy_init: phy_version 711,97bcf0a2,Aug 25 2025,19:04:10[0m
+[0;32mI (4625) wifi:mode : sta (70:04:1d:db:f9:48)[0m
+[0;32mI (4625) wifi:enable tsf[0m
+[0;32mI (7129) wifi_sta: scan: 2 APs visible[0m
+[0;32mI (7131) wifi_sta: match [0] 'Vodafone0E20F1' (rssi=-61) — trying[0m
+[0;33mW (7132) wifi:Password length matches WPA2 standards, authmode threshold changes from OPEN to WPA2[0m
+[0;32mI (7143) wifi:new:<2,0>, old:<1,0>, ap:<255,255>, sta:<2,0>, prof:1, snd_ch_cfg:0x0[0m
+[0;32mI (7144) wifi:state: init -> auth (0xb0)[0m
+[0;32mI (11536) wifi:state: auth -> init (0x200)[0m
+[0;32mI (11540) wifi:new:<2,0>, old:<2,0>, ap:<255,255>, sta:<2,0>, prof:1, snd_ch_cfg:0x0[0m
+[0;33mW (11541) wifi_sta: disconnect; retry 1/8[0m
+[0;33mW (13952) wifi_sta: disconnect; retry 2/8[0m
+[0;32mI (13961) wifi:new:<2,0>, old:<2,0>, ap:<255,255>, sta:<2,0>, prof:1, snd_ch_cfg:0x0[0m
+[0;32mI (13962) wifi:state: init -> auth (0xb0)[0m
+[0;32mI (14748) wifi:state: auth -> assoc (0x0)[0m
+[0;32mI (14765) wifi:state: assoc -> run (0x10)[0m
+[0;32mI (14792) wifi:connected with Vodafone0E20F1, aid = 33, channel 2, BW20, bssid = 62:d8:a4:0e:20:f9[0m
+[0;32mI (14792) wifi:security: WPA3-SAE HUNT_AND_PECK, phy: bgn, rssi: -62, cipher(pairwise:0x3, group:0x3), pmf:1[0m
+[0;32mI (14796) wifi:pm start, type: 1[0m
+
+[0;32mI (14796) wifi:dp: 1, bi: 102400, li: 3, scale listen interval from 307200 us to 307200 us[0m
+[0;32mI (14796) wifi:set rx beacon pti, rx_bcn_pti: 0, bcn_timeout: 25000, mt_pti: 0, mt_time: 10000[0m
+[0;32mI (14803) wifi:<ba-add>idx:0 (ifx:0, 62:d8:a4:0e:20:f9), tid:3, ssn:1, winSize:64[0m
+[0;32mI (14854) wifi:AP's beacon interval = 102400 us, DTIM period = 1[0m
+[0;32mI (14862) wifi:<ba-add>idx:1 (ifx:0, 62:d8:a4:0e:20:f9), tid:0, ssn:1, winSize:64[0m
+[0;32mI (15799) wifi_sta: got IP 192.168.1.199[0m
+[0;32mI (15799) esp_netif_handlers: sta ip: 192.168.1.199, mask: 255.255.255.0, gw: 192.168.1.1[0m
+[0;32mI (15800) mochi: online; IP=192.168.1.199, joined='Vodafone0E20F1'[0m
+i2c: {sda: 47, scl: 48}
+i2s: {mclk: 14, bclk: 15, ws: 38, din: 16, dout: 45}
+in_out: {codec: ES8311, pa: 46, use_mclk: 1, pa_gain: 6}
+[0;32mI (15802) gpio: GPIO[47]| InputEn: 1| OutputEn: 1| OpenDrain: 1| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (15802) gpio: GPIO[48]| InputEn: 1| OutputEn: 1| OpenDrain: 1| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (15803) CODEC_INIT: Set mater handle 0 0x3c151ed8[0m
+[0;32mI (15803) i2c_bus: i2c bus ready (port=0, sda=47, scl=48)[0m
+[0;32mI (15804) rtc: ready (addr=0x51, lost_power=0)[0m
+[0;32mI (15805) mochi: rtc: 2026-05-19 13:43:08 (wd=1)[0m
+[0;32mI (15808) shtc3: id=0x0887 (low6=0x07, expect 0x07)[0m
+[0;32mI (15824) mochi: shtc3: 27.01°C, 35.8%RH[0m
+[0;32mI (15825) CODEC_INIT: in:1 out:1 port: 1[0m
+[0;32mI (15825) CODEC_INIT: Success to int i2c: 0[0m
+[0;32mI (15825) CODEC_INIT: Init i2s 0 type: 3 mclk:14 bclk:15 ws:38 din:16 dout:45[0m
+[0;32mI (15826) CODEC_INIT: tx:0x3c1523a4 rx:0x3c152548[0m
+[0;32mI (15827) CODEC_INIT: output init std ret 0[0m
+[0;32mI (15828) CODEC_INIT: Input init std ret 0[0m
+[0;32mI (15828) CODEC_INIT: Init i2s 0 ok[0m
+[0;32mI (15829) CODEC_INIT: Success to init i2s: 0[0m
+[0;32mI (15829) CODEC_INIT: Success to int i2c: 0[0m
+[0;32mI (15829) CODEC_INIT: Success to init i2s: 0[0m
+[0;32mI (15829) CODEC_INIT: Get out handle 0x3c1523a4 port 0[0m
+[0;32mI (15830) gpio: GPIO[46]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 [0m
+[0;32mI (15837) ES8311: Work in Slave mode[0m
+[0;32mI (15841) voice: init_codec ok[0m
+[0;32mI (15842) openai_key: loaded openai key (len=164, prefix='sk-p…')[0m
+[0;32mI (15843) pair_creds: loaded pairing: pet_id=pet_441654b7-512 pet_name='Mochi'[0m
+[0;32mI (15844) voice: pet_id available: pet_441654b7-512[0m
+[0;32mI (15844) battery: ready (ADC1 ch3, 1:2 divider, curve-fit cal=yes)[0m
+[0;32mI (17845) mochi: battery diag: min=4074 mean=4092 max=4094 spread=20 mV (n=10)[0m
+[0;32mI (17845) mochi: battery diag → looks like a real LiPo on USB charge[0m
+[0;32mI (17948) sprite_cache: mounted: 102400/6225920 bytes used[0m
+[0;32mI (18135) esp-x509-crt-bundle: Certificate validated[0m
+[0;32mI (19281) mochi: etag 'pet-v1' unchanged ("7c11b551ffaeb2dd-s1") — using cache[0m
+[0;32mI (19432) esp-x509-crt-bundle: Certificate validated[0m
+[0;32mI (20508) mochi: etag 'ui-v1' unchanged ("210f9acc61b33f1f-s1") — using cache[0m
+[0;32mI (20660) esp-x509-crt-bundle: Certificate validated[0m
+[0;32mI (21843) mochi: etag 'scene-v1' unchanged ("24b5c20db347aaac") — using cache[0m
+[0;32mI (21845) pair_creds: loaded pairing: pet_id=pet_441654b7-512 pet_name='Mochi'[0m
+[0;32mI (21845) mochi: paired to 'Mochi' (pet_id=pet_441654b7-512)[0m
+[0;32mI (21867) mochi: scene loaded from cache[0m
+[0;32mI (21903) mochi: icon 'heart' loaded from cache[0m
+[0;32mI (21938) mochi: icon 'star' loaded from cache[0m
+[0;32mI (21976) mochi: icon 'bowl' loaded from cache[0m
+[0;32mI (22021) mochi: icon 'ball' loaded from cache[0m
+[0;32mI (25709) mochi: rendered 'neutral' (cache 0 ms, full refresh)[0m
+[0;32mI (25709) touch: i2c probe 0x38: ACK[0m
+[0;32mI (25710) touch: i2c probe 0x15: no[0m
+[0;32mI (25710) touch: i2c probe 0x5D: no[0m
+[0;32mI (25710) touch: i2c probe 0x51: ACK[0m
+[0;32mI (25711) touch: i2c probe 0x70: ACK[0m
+[0;32mI (25711) gpio: GPIO[7]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 [0m
+[0;32mI (26012) gpio: GPIO[21]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:2 [0m
+[0;32mI (26013) touch: ready (INT=GP21, RST=GP7, addr=0x38)[0m

@@ -1,0 +1,10 @@
+-- git rev-parse returned 'fatal: not a git repository (or any of the parent directories): .git'
+-- Could not use 'git describe' to determine PROJECT_VER.
+-- Building ESP-IDF components for target esp32s3
+NOTICE: Manifest files have changed, solving dependencies.
+NOTICE: Skipping optional dependency: espressif/esp_lcd_ek79007
+NOTICE: Skipping optional dependency: espressif/esp_lcd_ili9881c
+...............NOTICE: Skipping optional dependency: espressif/esp_h264
+NOTICE: Skipping optional dependency: espressif/esp_ipa
+.....NOTICE: Skipping optional dependency: espressif/usb
+.....................................................................................................-- Configuring incomplete, errors occurred!

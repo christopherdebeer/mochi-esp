@@ -1,0 +1,122 @@
+[0/1] Re-running CMake...
+-- git rev-parse returned 'fatal: not a git repository (or any of the parent directories): .git'
+-- Could not use 'git describe' to determine PROJECT_VER.
+-- Building ESP-IDF components for target esp32s3
+-- Project sdkconfig file /Users/cdbeer/dev/mochi-esp/firmware/sdkconfig
+Loading defaults file /Users/cdbeer/dev/mochi-esp/firmware/sdkconfig.defaults...
+-- Compiler supported targets: xtensa-esp-elf
+-- USING O3
+-- App "eink-pet" version: 1
+-- Adding linker script /Users/cdbeer/dev/mochi-esp/firmware/build/esp-idf/esp_system/ld/memory.ld
+-- Adding linker script /Users/cdbeer/dev/mochi-esp/firmware/build/esp-idf/esp_system/ld/sections.ld.in
+-- Adding linker script /Users/cdbeer/dev/esp-idf/components/esp_rom/esp32s3/ld/esp32s3.rom.ld
+-- Adding linker script /Users/cdbeer/dev/esp-idf/components/esp_rom/esp32s3/ld/esp32s3.rom.api.ld
+-- Adding linker script /Users/cdbeer/dev/esp-idf/components/esp_rom/esp32s3/ld/esp32s3.rom.bt_funcs.ld
+-- Adding linker script /Users/cdbeer/dev/esp-idf/components/esp_rom/esp32s3/ld/esp32s3.rom.libgcc.ld
+-- Adding linker script /Users/cdbeer/dev/esp-idf/components/esp_rom/esp32s3/ld/esp32s3.rom.wdt.ld
+-- Adding linker script /Users/cdbeer/dev/esp-idf/components/esp_rom/esp32s3/ld/esp32s3.rom.version.ld
+-- Adding linker script /Users/cdbeer/dev/esp-idf/components/esp_rom/esp32s3/ld/esp32s3.rom.ble_master.ld
+-- Adding linker script /Users/cdbeer/dev/esp-idf/components/esp_rom/esp32s3/ld/esp32s3.rom.ble_50.ld
+-- Adding linker script /Users/cdbeer/dev/esp-idf/components/esp_rom/esp32s3/ld/esp32s3.rom.ble_smp.ld
+-- Adding linker script /Users/cdbeer/dev/esp-idf/components/esp_rom/esp32s3/ld/esp32s3.rom.ble_dtm.ld
+-- Adding linker script /Users/cdbeer/dev/esp-idf/components/esp_rom/esp32s3/ld/esp32s3.rom.ble_test.ld
+-- Adding linker script /Users/cdbeer/dev/esp-idf/components/esp_rom/esp32s3/ld/esp32s3.rom.ble_scan.ld
+-- Adding linker script /Users/cdbeer/dev/esp-idf/components/esp_rom/esp32s3/ld/esp32s3.rom.newlib.ld
+-- Adding linker script /Users/cdbeer/dev/esp-idf/components/soc/esp32s3/ld/esp32s3.peripherals.ld
+-- Components: app_trace app_update bootloader bootloader_support bt cmock console cxx driver efuse esp-tls esp_adc esp_app_format esp_bootloader_format esp_coex esp_common esp_driver_ana_cmpr esp_driver_cam esp_driver_dac esp_driver_gpio esp_driver_gptimer esp_driver_i2c esp_driver_i2s esp_driver_isp esp_driver_jpeg esp_driver_ledc esp_driver_mcpwm esp_driver_parlio esp_driver_pcnt esp_driver_ppa esp_driver_rmt esp_driver_sdio esp_driver_sdm esp_driver_sdmmc esp_driver_sdspi esp_driver_spi esp_driver_touch_sens esp_driver_tsens esp_driver_uart esp_driver_usb_serial_jtag esp_eth esp_event esp_gdbstub esp_hal_ieee802154 esp_hid esp_http_client esp_http_server esp_https_ota esp_https_server esp_hw_support esp_lcd esp_local_ctrl esp_mm esp_netif esp_netif_stack esp_partition esp_phy esp_pm esp_psram esp_ringbuf esp_rom esp_system esp_timer esp_vfs_console esp_wifi espcoredump esptool_py fatfs freertos hal heap http_parser idf_test ieee802154 json log lwip main mbedtls mqtt newlib nvs_flash nvs_sec_provider openthread partition_table perfmon protobuf-c protocomm pthread sdmmc soc spi_flash spiffs tcp_transport touch_element ulp unity usb vfs wear_levelling wifi_provisioning wpa_supplicant xtensa
+-- Component paths: /Users/cdbeer/dev/esp-idf/components/app_trace /Users/cdbeer/dev/esp-idf/components/app_update /Users/cdbeer/dev/esp-idf/components/bootloader /Users/cdbeer/dev/esp-idf/components/bootloader_support /Users/cdbeer/dev/esp-idf/components/bt /Users/cdbeer/dev/esp-idf/components/cmock /Users/cdbeer/dev/esp-idf/components/console /Users/cdbeer/dev/esp-idf/components/cxx /Users/cdbeer/dev/esp-idf/components/driver /Users/cdbeer/dev/esp-idf/components/efuse /Users/cdbeer/dev/esp-idf/components/esp-tls /Users/cdbeer/dev/esp-idf/components/esp_adc /Users/cdbeer/dev/esp-idf/components/esp_app_format /Users/cdbeer/dev/esp-idf/components/esp_bootloader_format /Users/cdbeer/dev/esp-idf/components/esp_coex /Users/cdbeer/dev/esp-idf/components/esp_common /Users/cdbeer/dev/esp-idf/components/esp_driver_ana_cmpr /Users/cdbeer/dev/esp-idf/components/esp_driver_cam /Users/cdbeer/dev/esp-idf/components/esp_driver_dac /Users/cdbeer/dev/esp-idf/components/esp_driver_gpio /Users/cdbeer/dev/esp-idf/components/esp_driver_gptimer /Users/cdbeer/dev/esp-idf/components/esp_driver_i2c /Users/cdbeer/dev/esp-idf/components/esp_driver_i2s /Users/cdbeer/dev/esp-idf/components/esp_driver_isp /Users/cdbeer/dev/esp-idf/components/esp_driver_jpeg /Users/cdbeer/dev/esp-idf/components/esp_driver_ledc /Users/cdbeer/dev/esp-idf/components/esp_driver_mcpwm /Users/cdbeer/dev/esp-idf/components/esp_driver_parlio /Users/cdbeer/dev/esp-idf/components/esp_driver_pcnt /Users/cdbeer/dev/esp-idf/components/esp_driver_ppa /Users/cdbeer/dev/esp-idf/components/esp_driver_rmt /Users/cdbeer/dev/esp-idf/components/esp_driver_sdio /Users/cdbeer/dev/esp-idf/components/esp_driver_sdm /Users/cdbeer/dev/esp-idf/components/esp_driver_sdmmc /Users/cdbeer/dev/esp-idf/components/esp_driver_sdspi /Users/cdbeer/dev/esp-idf/components/esp_driver_spi /Users/cdbeer/dev/esp-idf/components/esp_driver_touch_sens /Users/cdbeer/dev/esp-idf/components/esp_driver_tsens /Users/cdbeer/dev/esp-idf/components/esp_driver_uart /Users/cdbeer/dev/esp-idf/components/esp_driver_usb_serial_jtag /Users/cdbeer/dev/esp-idf/components/esp_eth /Users/cdbeer/dev/esp-idf/components/esp_event /Users/cdbeer/dev/esp-idf/components/esp_gdbstub /Users/cdbeer/dev/esp-idf/components/esp_hal_ieee802154 /Users/cdbeer/dev/esp-idf/components/esp_hid /Users/cdbeer/dev/esp-idf/components/esp_http_client /Users/cdbeer/dev/esp-idf/components/esp_http_server /Users/cdbeer/dev/esp-idf/components/esp_https_ota /Users/cdbeer/dev/esp-idf/components/esp_https_server /Users/cdbeer/dev/esp-idf/components/esp_hw_support /Users/cdbeer/dev/esp-idf/components/esp_lcd /Users/cdbeer/dev/esp-idf/components/esp_local_ctrl /Users/cdbeer/dev/esp-idf/components/esp_mm /Users/cdbeer/dev/esp-idf/components/esp_netif /Users/cdbeer/dev/esp-idf/components/esp_netif_stack /Users/cdbeer/dev/esp-idf/components/esp_partition /Users/cdbeer/dev/esp-idf/components/esp_phy /Users/cdbeer/dev/esp-idf/components/esp_pm /Users/cdbeer/dev/esp-idf/components/esp_psram /Users/cdbeer/dev/esp-idf/components/esp_ringbuf /Users/cdbeer/dev/esp-idf/components/esp_rom /Users/cdbeer/dev/esp-idf/components/esp_system /Users/cdbeer/dev/esp-idf/components/esp_timer /Users/cdbeer/dev/esp-idf/components/esp_vfs_console /Users/cdbeer/dev/esp-idf/components/esp_wifi /Users/cdbeer/dev/esp-idf/components/espcoredump /Users/cdbeer/dev/esp-idf/components/esptool_py /Users/cdbeer/dev/esp-idf/components/fatfs /Users/cdbeer/dev/esp-idf/components/freertos /Users/cdbeer/dev/esp-idf/components/hal /Users/cdbeer/dev/esp-idf/components/heap /Users/cdbeer/dev/esp-idf/components/http_parser /Users/cdbeer/dev/esp-idf/components/idf_test /Users/cdbeer/dev/esp-idf/components/ieee802154 /Users/cdbeer/dev/esp-idf/components/json /Users/cdbeer/dev/esp-idf/components/log /Users/cdbeer/dev/esp-idf/components/lwip /Users/cdbeer/dev/mochi-esp/firmware/main /Users/cdbeer/dev/esp-idf/components/mbedtls /Users/cdbeer/dev/esp-idf/components/mqtt /Users/cdbeer/dev/esp-idf/components/newlib /Users/cdbeer/dev/esp-idf/components/nvs_flash /Users/cdbeer/dev/esp-idf/components/nvs_sec_provider /Users/cdbeer/dev/esp-idf/components/openthread /Users/cdbeer/dev/esp-idf/components/partition_table /Users/cdbeer/dev/esp-idf/components/perfmon /Users/cdbeer/dev/esp-idf/components/protobuf-c /Users/cdbeer/dev/esp-idf/components/protocomm /Users/cdbeer/dev/esp-idf/components/pthread /Users/cdbeer/dev/esp-idf/components/sdmmc /Users/cdbeer/dev/esp-idf/components/soc /Users/cdbeer/dev/esp-idf/components/spi_flash /Users/cdbeer/dev/esp-idf/components/spiffs /Users/cdbeer/dev/esp-idf/components/tcp_transport /Users/cdbeer/dev/esp-idf/components/touch_element /Users/cdbeer/dev/esp-idf/components/ulp /Users/cdbeer/dev/esp-idf/components/unity /Users/cdbeer/dev/esp-idf/components/usb /Users/cdbeer/dev/esp-idf/components/vfs /Users/cdbeer/dev/esp-idf/components/wear_levelling /Users/cdbeer/dev/esp-idf/components/wifi_provisioning /Users/cdbeer/dev/esp-idf/components/wpa_supplicant /Users/cdbeer/dev/esp-idf/components/xtensa
+-- Configuring done (3.8s)
+-- Generating done (0.3s)
+-- Build files have been written to: /Users/cdbeer/dev/mochi-esp/firmware/build
+[1/11] Performing build step for 'bootloader'
+[1/1] cd /Users/cdbeer/dev/mochi-esp/firmware/build/bootloader/esp-idf/esptool_py && /Users/cdbeer/.espressif/python_env/idf5.3_py3.12_env/bin/python /Users/cdbeer/dev/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 bootloader 0x0 /Users/cdbeer/dev/mochi-esp/firmware/build/bootloader/bootloader.bin
+Bootloader binary size 0x5390 bytes. 0x2c70 bytes (35%) free.
+[2/11] No install step for 'bootloader'
+[3/11] Completed 'bootloader'
+[4/11] Building CXX object esp-idf/main/CMakeFiles/__idf_main.dir/sleep_gesture.cpp.obj
+[5/11] Linking C static library esp-idf/main/libmain.a
+[6/11] Generating ld/sections.ld
+[7/11] Linking CXX executable eink-pet.elf
+[8/11] Generating binary image from built executable
+esptool.py v4.11.0
+Creating esp32s3 image...
+Merged 2 ELF sections
+Successfully created esp32s3 image.
+Generated /Users/cdbeer/dev/mochi-esp/firmware/build/eink-pet.bin
+[9/11] cd /Users/cdbeer/dev/mochi-esp/firmware/build/esp-idf/esptool_py && /Users/cdbeer/.espressif/python_env/idf5.3_py3.12_env/bin/python /Users/cdbeer/dev/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 partition --type app /Users/cdbeer/dev/mochi-esp/firmware/build/partition_table/partition-table.bin /Users/cdbeer/dev/mochi-esp/firmware/build/eink-pet.bin
+eink-pet.bin binary size 0x100c90 bytes. Smallest app partition is 0x200000 bytes. 0xff370 bytes (50%) free.
+[9/11] cd /Users/cdbeer/dev/esp-idf/components/esptool_py && /opt/homebrew/bin/cmake -D IDF_PATH=/Users/cdbeer/dev/esp-idf -D "SERIAL_TOOL=/Users/cdbeer/.espressif/python_env/idf5.3_py3.12_env/bin/python;;/Users/cdbeer/dev/esp-idf/components/esptool_py/esptool/esptool.py;--chip;esp32s3" -D "SERIAL_TOOL_ARGS=--before=default_reset;--after=hard_reset;write_flash;@flash_args" -D WORKING_DIRECTORY=/Users/cdbeer/dev/mochi-esp/firmware/build -P /Users/cdbeer/dev/esp-idf/components/esptool_py/run_serial_tool.cmake
+esptool.py --chip esp32s3 -p /dev/cu.usbmodem2101 -b 460800 --before=default_reset --after=hard_reset write_flash --flash_mode dio --flash_freq 80m --flash_size 8MB 0x0 bootloader/bootloader.bin 0x10000 eink-pet.bin 0x8000 partition_table/partition-table.bin
+esptool.py v4.11.0
+Serial port /dev/cu.usbmodem2101
+Connecting...
+Chip is ESP32-S3-PICO-1 (LGA56) (revision v0.2)
+Features: WiFi, BLE, Embedded Flash 8MB (GD), Embedded PSRAM 8MB (AP_3v3)
+Crystal is 40MHz
+USB mode: USB-Serial/JTAG
+MAC: 70:04:1d:db:f9:48
+Uploading stub...
+Running stub...
+Stub running...
+Changing baud rate to 460800
+Changed.
+Configuring flash size...
+Flash will be erased from 0x00000000 to 0x00005fff...
+Flash will be erased from 0x00010000 to 0x00110fff...
+Flash will be erased from 0x00008000 to 0x00008fff...
+SHA digest in image updated
+Compressed 21392 bytes to 13157...
+Writing at 0x00000000... (100 %)
+Wrote 21392 bytes (13157 compressed) at 0x00000000 in 0.3 seconds (effective 500.8 kbit/s)...
+Hash of data verified.
+Compressed 1051792 bytes to 656339...
+Writing at 0x00010000... (2 %)
+Writing at 0x0001d585... (4 %)
+Writing at 0x0002a346... (7 %)
+Writing at 0x0002f25c... (9 %)
+Writing at 0x000340d0... (12 %)
+Writing at 0x00039545... (14 %)
+Writing at 0x000407f0... (17 %)
+Writing at 0x0004cb12... (19 %)
+Writing at 0x00053050... (21 %)
+Writing at 0x000592a2... (24 %)
+Writing at 0x0005f225... (26 %)
+Writing at 0x00065a60... (29 %)
+Writing at 0x0006bc02... (31 %)
+Writing at 0x0007174a... (34 %)
+Writing at 0x000775ee... (36 %)
+Writing at 0x0007d327... (39 %)
+Writing at 0x00083051... (41 %)
+Writing at 0x00088efb... (43 %)
+Writing at 0x0008e9ec... (46 %)
+Writing at 0x000947ea... (48 %)
+Writing at 0x0009ad13... (51 %)
+Writing at 0x000a0d0a... (53 %)
+Writing at 0x000a62c1... (56 %)
+Writing at 0x000ab336... (58 %)
+Writing at 0x000b09e8... (60 %)
+Writing at 0x000b6124... (63 %)
+Writing at 0x000bb617... (65 %)
+Writing at 0x000c0ba5... (68 %)
+Writing at 0x000c63b6... (70 %)
+Writing at 0x000cc5f5... (73 %)
+Writing at 0x000d1ec8... (75 %)
+Writing at 0x000d7cf8... (78 %)
+Writing at 0x000de3f0... (80 %)
+Writing at 0x000e3de8... (82 %)
+Writing at 0x000e962e... (85 %)
+Writing at 0x000f24be... (87 %)
+Writing at 0x000f83de... (90 %)
+Writing at 0x000fe356... (92 %)
+Writing at 0x0010460d... (95 %)
+Writing at 0x0010ad48... (97 %)
+Writing at 0x001107d1... (100 %)
+Wrote 1051792 bytes (656339 compressed) at 0x00010000 in 6.9 seconds (effective 1213.3 kbit/s)...
+Hash of data verified.
+Compressed 3072 bytes to 120...
+Writing at 0x00008000... (100 %)
+Wrote 3072 bytes (120 compressed) at 0x00008000 in 0.0 seconds (effective 543.6 kbit/s)...
+Hash of data verified.
+
+Leaving...
+Hard resetting via RTS pin...

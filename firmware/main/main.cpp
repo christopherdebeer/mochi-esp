@@ -1,0 +1,1289 @@
+/*
+ * mochi firmware — M4: first sprite from server.
+ *
+ * Boot path (M3 → M4 superset):
+ *   1. e-paper power on, render boot splash via full refresh
+ *   2. NVS load → if no creds, wifi_prov::run() (SoftAP + portal),
+ *      persist creds, reboot
+ *   3. NVS has creds → wifi_sta::connect(), render online IP
+ *   4. Idle screen: "Tap BOOT to fetch sprite"
+ *   5. On BOOT press: HTTPS GET https://mochi.val.run/devsprite/test
+ *      → memcpy 5000 bytes into the e-paper framebuffer →
+ *      EPD_Display() (full refresh). Show round-trip time as a
+ *      caption overlay below the sprite.
+ *
+ * The blink LED stays on throughout as the "firmware is alive"
+ * signal. Heartbeat runs on its own task so it survives every
+ * blocking call in app_main.
+ *
+ * Acceptance (design/01-bring-up-plan.md M4): device on home WiFi →
+ * BOOT press → fetch /devsprite/test → render fox sprite → round
+ * trip <3s.
+ */
+
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/gpio.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "esp_chip_info.h"
+#include "esp_flash.h"
+#include "esp_psram.h"
+#include "esp_system.h"
+#include "esp_heap_caps.h"
+
+#include "board_pins.h"
+#include "epaper_driver_bsp.h"
+#include "epd_ui.h"
+#include "nvs_creds.h"
+#include "wifi_prov.h"
+#include "wifi_sta.h"
+#include "sprite_fetch.h"
+#include "touch.h"
+#include "rtc.h"
+#include "shtc3.h"
+#include "pair_creds.h"
+#include "openai_key.h"
+#include "device_pair.h"
+#include "factory_reset.h"
+#include "compositor.h"
+#include "font8x8.h"
+#include "battery.h"
+#include "sleep_gesture.h"
+#include "voice.h"
+extern "C" {
+#include "voice/voice_diag.h"
+}
+#include "sprite_cache.h"
+
+/*
+ * Endpoints for the on-device compositor. The scene is fetched once
+ * at boot and cached in PSRAM; pet expressions are fetched per-tap
+ * via the cell endpoint (native 96×96, 8-byte header + 1152 bytes).
+ *
+ * Touch zone → expression map:
+ *   TL  feed     → 'eating'
+ *   TR  play     → 'excited'
+ *   BL  comfort  → 'comforted'
+ *   BR  cheer    → 'cheerful_wave'
+ *   centre attention → 'curious'
+ * After each tap we render the expression for ~5 s, then re-fetch
+ * 'neutral' as the resting pose.
+ */
+/* Scene area = panel below the status bar. We fetch the scene
+ * pre-rendered at this exact size so it doesn't get vertically
+ * squashed by the legacy 200×200 fit (the scene templates are 360×336,
+ * not square).
+ *
+ * STATUS_BAR_H rows are reserved at the top, leaving the rest for
+ * the scene. The fetch URL uses the server's `?fit=area` form. */
+#define MOCHI_SCENE_URL  "https://mochi.val.run/devsprite/scene-v1/day?fit=fill&w=200&h=172"
+static constexpr size_t SCENE_W = 200;
+static constexpr size_t SCENE_H = 172;
+static constexpr size_t SCENE_BYTES = (SCENE_W / 8) * SCENE_H;  /* 4300 */
+#define MOCHI_PET_CELL_URL_BASE "https://mochi.val.run/devsprite/cell/pet-v1/"
+
+/* Pet cell geometry — pet-v1 template grid is 96×96. The fetcher
+ * verifies the wire-format header matches before copying. */
+static constexpr size_t PET_CELL_W = 96;
+static constexpr size_t PET_CELL_H = 96;
+static constexpr size_t PET_CELL_BYTES = (PET_CELL_W / 8) * PET_CELL_H;  /* 1152 */
+
+/* Foot-anchored placement on the 200×200 panel: horizontally
+ * centred, vertical position chosen so the pet sits on the scene
+ * floor rather than floating mid-screen. With the status bar
+ * eating the top 28 px and the scene cropped via fit=fill, the
+ * "ground" lands near the bottom of the panel — pet bottom at
+ * y≈190 puts feet on the floor. */
+static constexpr int PET_DX = (MOCHI_EPD_WIDTH  - (int)PET_CELL_W) / 2;
+static constexpr int PET_DY = (MOCHI_EPD_HEIGHT - (int)PET_CELL_H) - 12;
+
+static constexpr int RESTING_AFTER_TAP_MS = 5000;
+
+/* Care icons — 4 ui-v1 cells, one per zone, downsampled from 80×80
+ * to 32×32 once at boot and stamped into the panel corners every
+ * frame. 32×32 packed = 128 bytes per plane × 2 planes × 4 icons
+ * = 1024 bytes total in PSRAM. */
+static constexpr size_t UI_CELL_NATIVE_W = 80;
+static constexpr size_t UI_CELL_NATIVE_H = 80;
+static constexpr size_t UI_CELL_NATIVE_BYTES =
+    (UI_CELL_NATIVE_W / 8) * UI_CELL_NATIVE_H;  /* 800 */
+
+static constexpr size_t ICON_W = 48;
+static constexpr size_t ICON_H = 48;
+static constexpr size_t ICON_BYTES = (ICON_W / 8) * ICON_H;  /* 288 */
+static constexpr int ICON_MARGIN = 4;
+
+/*
+ * Care-icon assignments and their target-zone screen positions.
+ * Order matches the touch-zone enum (TL, TR, BL, BR). After a
+ * 2026-05-18 reshuffle the comfort + cheer icons live at the top
+ * (closer to the status bar) and the more "active" feed + play
+ * sit at the bottom near the pet's feet — feels more natural for
+ * thumb-reach on a handheld device.
+ *
+ *   TL (top-left)     → heart  → 'comforted'
+ *   TR (top-right)    → star   → 'cheerful_wave'
+ *   BL (bottom-left)  → bowl   → 'eating'
+ *   BR (bottom-right) → ball   → 'excited'
+ */
+static const char *CARE_ICON_KEYS[4] = { "heart", "star", "bowl", "ball" };
+#define MOCHI_UI_CELL_URL_BASE "https://mochi.val.run/devsprite/cell/ui-v1/"
+
+/* Status bar — full-width slab at the top of the panel. Time on
+ * left, pet name centred, battery on right. The bar is its own
+ * band (no icons inside it); icons live below in the scene area.
+ *
+ * Tight vertical: 8-px font + 5-px top + 5-px bottom + 1-px
+ * divider = 19 px. Reduces the wasted space the previous 28-px
+ * bar had above and below the text. */
+static constexpr int STATUS_BAR_H = 19;
+static constexpr int STATUS_TEXT_Y = 5;
+static constexpr int SCENE_TOP_Y = STATUS_BAR_H;     /* icons + pet
+                                                        live below this */
+
+static const char *TAG = "mochi";
+
+static void log_chip_info(void) {
+    esp_chip_info_t chip;
+    esp_chip_info(&chip);
+
+    uint32_t flash_size_bytes = 0;
+    if (esp_flash_get_size(NULL, &flash_size_bytes) != ESP_OK) {
+        flash_size_bytes = 0;
+    }
+
+    size_t psram_size = 0;
+#if CONFIG_SPIRAM
+    psram_size = esp_psram_get_size();
+#endif
+
+    ESP_LOGI(TAG, "chip: %s rev %d.%d, %d cores",
+        CONFIG_IDF_TARGET, chip.revision / 100, chip.revision % 100,
+        chip.cores);
+    ESP_LOGI(TAG, "flash: %lu MB %s",
+        (unsigned long)(flash_size_bytes / (1024 * 1024)),
+        (chip.features & CHIP_FEATURE_EMB_FLASH) ? "embedded" : "external");
+    ESP_LOGI(TAG, "psram: %u KB",
+        (unsigned)(psram_size / 1024));
+}
+
+static void led_init(void) {
+    gpio_config_t cfg = {};
+    cfg.pin_bit_mask = 1ULL << MOCHI_LED_GPIO;
+    cfg.mode = GPIO_MODE_OUTPUT;
+    cfg.pull_up_en = GPIO_PULLUP_DISABLE;
+    cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    cfg.intr_type = GPIO_INTR_DISABLE;
+    ESP_ERROR_CHECK(gpio_config(&cfg));
+    gpio_set_level(MOCHI_LED_GPIO, 0);
+}
+
+static void boot_button_init(void) {
+    gpio_config_t cfg = {};
+    cfg.pin_bit_mask = 1ULL << MOCHI_BOOT_BUTTON_GPIO;
+    cfg.mode = GPIO_MODE_INPUT;
+    cfg.pull_up_en = GPIO_PULLUP_ENABLE;
+    cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    cfg.intr_type = GPIO_INTR_DISABLE;
+    ESP_ERROR_CHECK(gpio_config(&cfg));
+}
+
+static void epd_power_on(void) {
+    gpio_config_t cfg = {};
+    cfg.pin_bit_mask = 1ULL << MOCHI_EPD_PWR_GPIO;
+    cfg.mode = GPIO_MODE_OUTPUT;
+    cfg.pull_up_en = GPIO_PULLUP_ENABLE;
+    cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    cfg.intr_type = GPIO_INTR_DISABLE;
+    ESP_ERROR_CHECK(gpio_config(&cfg));
+    gpio_set_level(MOCHI_EPD_PWR_GPIO, 0);
+    vTaskDelay(pdMS_TO_TICKS(50));
+}
+
+/*
+ * The Waveshare board has three independent power rails (EPD,
+ * audio, VBAT-sense) controlled by GPIOs 6/42/17. The vendor RTC +
+ * SHTC3 examples enable ALL THREE before bringing up I²C — even
+ * though those devices have nothing to do with audio or battery.
+ * Empirically, leaving Audio_PWR off makes the I²C bus dead at the
+ * wire level (every probe times out), so the touch controller, RTC
+ * and SHTC3 must sit downstream of the same regulator the codec
+ * uses. Diagnosed 2026-05-18 when the touch bring-up returned
+ * universal probe timeouts.
+ *
+ * All rails are active-low (drive 0 to enable). VBAT_PWR is
+ * different — its sense path is active-HIGH per the vendor
+ * board_power_bsp::VBAT_POWER_ON. We mirror their convention
+ * exactly here.
+ */
+static void peripheral_rails_on(void) {
+    gpio_config_t cfg = {};
+    cfg.pin_bit_mask =
+        (1ULL << MOCHI_AUDIO_PWR_GPIO) |
+        (1ULL << MOCHI_VBAT_SENSE_GPIO);
+    cfg.mode = GPIO_MODE_OUTPUT;
+    cfg.pull_up_en = GPIO_PULLUP_ENABLE;
+    cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    cfg.intr_type = GPIO_INTR_DISABLE;
+    ESP_ERROR_CHECK(gpio_config(&cfg));
+    gpio_set_level(MOCHI_AUDIO_PWR_GPIO, 0);   /* active-low: enable */
+    gpio_set_level(MOCHI_VBAT_SENSE_GPIO, 1);  /* active-high per vendor */
+    vTaskDelay(pdMS_TO_TICKS(50));
+}
+
+/*
+ * The 1 Hz LED heartbeat lived here through M1–M6; it served as the
+ * "firmware is alive" signal during bring-up. Removed 2026-05-18
+ * once we trusted the panel + USB log enough that a blinking LED
+ * was just noise. The LED pin (GP3) is still configured by
+ * led_init() and held low; future milestones can repurpose it
+ * (e.g. notification flash on incoming voice).
+ */
+
+extern "C" void app_main(void) {
+    ESP_LOGI(TAG, "—— mochi M3: boot ——");
+    log_chip_info();
+
+    led_init();
+    boot_button_init();
+    epd_power_on();
+    peripheral_rails_on();
+
+    /* Bring up the e-paper driver. Same pin map as M2. */
+    custom_lcd_spi_t lcd_cfg = {};
+    lcd_cfg.cs       = MOCHI_EPD_CS_GPIO;
+    lcd_cfg.dc       = MOCHI_EPD_DC_GPIO;
+    lcd_cfg.rst      = MOCHI_EPD_RST_GPIO;
+    lcd_cfg.busy     = MOCHI_EPD_BUSY_GPIO;
+    lcd_cfg.mosi     = MOCHI_EPD_MOSI_GPIO;
+    lcd_cfg.scl      = MOCHI_EPD_SCK_GPIO;
+    lcd_cfg.spi_host = SPI2_HOST;
+    lcd_cfg.buffer_len = MOCHI_EPD_BUFFER_LEN;
+    auto *epd = new epaper_driver_display(
+        MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT, lcd_cfg);
+
+    /* Boot splash — full refresh so the partial-refresh "previous
+     * image" buffer is seeded before any later partial calls. */
+    epd_ui::render_boot_splash(epd);
+    epd->EPD_Init();
+    epd->EPD_Display();
+    epd->EPD_DisplayPartBaseImage();
+
+    /* Factory-reset watchdog. Runs in parallel with everything from
+     * here on, so the gesture works in any state — including stuck
+     * provisioning or a failed STA join where the touch loop never
+     * starts. PWR + BOOT held 10 seconds wipes NVS and reboots. */
+    factory_reset::start(epd);
+
+    /* Sleep watchdog. Like factory_reset but only fires on PWR
+     * alone (BOOT must not be held). Sets a flag main polls in the
+     * touch loop; we render the asleep screen ourselves so it has
+     * the full set of buffers in scope. */
+    sleep_gesture::start();
+
+    /* NVS first; cred lookup decides which branch we take. */
+    nvs_creds_init();
+
+    struct mochi_wifi_creds creds = {};
+    bool have_creds = nvs_creds_count() > 0;
+
+    /* "Enter provisioning on next boot" flag — set when a previous
+     * boot's connect_any failed (e.g., user moved networks). We DON'T
+     * try to do an in-process STA→AP swap from the connect_any error
+     * path; ESP-IDF v5.3 has a known-rough mode-swap path that hangs
+     * intermittently (see project_eink_wifi_handover memory).
+     * Instead: persist the flag, reboot, and the next-boot's pre-wifi
+     * branch lands directly in the no-creds provisioning flow without
+     * touching the wifi STA stack first. */
+    bool force_prov = nvs_creds_get_prov_on_boot();
+    if (force_prov) {
+        ESP_LOGI(TAG, "prov_on_boot flag set → force provisioning branch");
+        nvs_creds_set_prov_on_boot(false);  /* one-shot */
+        have_creds = false;                  /* fall through to prov */
+    }
+
+    if (!have_creds) {
+        ESP_LOGI(TAG, "no NVS creds → entering provisioning");
+        char openai_key[MOCHI_OPENAI_KEY_MAX + 1] = {};
+        if (!wifi_prov::run(epd, &creds, openai_key, sizeof(openai_key))) {
+            /* run() doesn't return false in current impl; if it ever
+             * does, the only sensible response is to retry. */
+            ESP_LOGE(TAG, "provisioning returned false; rebooting");
+            esp_restart();
+        }
+        if (!nvs_creds_append(&creds)) {
+            ESP_LOGE(TAG, "NVS append failed; rebooting");
+            esp_restart();
+        }
+        /* Persist the key independently so factory_reset can wipe
+         * either bucket on its own. Empty-key is allowed at submit
+         * time; failures surface at the first voice session. */
+        if (strlen(openai_key) > 0) {
+            if (!openai_key_save(openai_key)) {
+                ESP_LOGW(TAG, "openai_key_save failed; voice will be"
+                              " unavailable until re-provisioned");
+            }
+        } else {
+            ESP_LOGI(TAG, "no openai key supplied at provisioning");
+        }
+        /* Wipe the local copy now that NVS has it (or doesn't). */
+        memset(openai_key, 0, sizeof(openai_key));
+        ESP_LOGI(TAG, "provisioning complete; rebooting to clean STA boot");
+        vTaskDelay(pdMS_TO_TICKS(500));
+        esp_restart();
+    }
+
+    /* --- Already-provisioned branch. --- */
+
+    size_t cred_count = nvs_creds_count();
+    ESP_LOGI(TAG, "have %u stored network(s) → scan + connect_any",
+        (unsigned)cred_count);
+    wifi_sta::init_stack();
+
+    char ip_str[16] = {};
+    char joined_ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
+    bool ok = wifi_sta::connect_any(
+        ip_str, sizeof(ip_str),
+        joined_ssid, sizeof(joined_ssid));
+    if (!ok) {
+        /*
+         * No stored network was reachable. Could be we moved house,
+         * stored APs are off, password rotated. We do *not* wipe
+         * stored creds — when we eventually return to a known
+         * network the cred is still there.
+         *
+         * We persist a "prov_on_boot" flag and reboot rather than
+         * doing an in-process STA→AP swap. ESP-IDF v5.3 has a
+         * known-rough mode-swap path that hangs (and `wifi_prov::run`
+         * also calls `esp_event_loop_create_default` with
+         * ESP_ERROR_CHECK — that aborts when the STA path already
+         * created the loop, which is what bit us). The reboot path
+         * lands in a clean boot, then the prov_on_boot flag forces
+         * the no-creds branch above. See project_eink_wifi_handover.
+         */
+        ESP_LOGW(TAG, "no stored network reachable; persisting prov_on_boot"
+                      " flag and rebooting (existing creds preserved)");
+        nvs_creds_set_prov_on_boot(true);
+        epd_ui::render_prov_failed(epd);
+        epd->EPD_Init_Partial();
+        epd->EPD_DisplayPart();
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        esp_restart();
+    }
+
+    ESP_LOGI(TAG, "online; IP=%s, joined='%s'", ip_str, joined_ssid);
+
+    /*
+     * One-shot environmental + RTC readout before the touch loop
+     * takes over. Bus and rails are already up (they came up for
+     * touch); these drivers just attach as additional devices on
+     * the same I2cMasterBus singleton.
+     *
+     * If the RTC's oscillator-stop flag is set we plant a sentinel
+     * time (2026-05-18 12:00:00) so that subsequent reads return
+     * something visibly non-zero. M11 (decay clock) will replace
+     * this with a real "set from network time" path.
+     */
+    if (rtc_init()) {
+        if (rtc_lost_power()) {
+            mochi_datetime t = { 2026, 5, 18, 12, 0, 0, 0 };
+            if (rtc_set(&t)) {
+                ESP_LOGI(TAG, "rtc: planted sentinel 2026-05-18 12:00:00");
+            }
+        }
+        mochi_datetime now = {};
+        if (rtc_get(&now)) {
+            ESP_LOGI(TAG, "rtc: %04u-%02u-%02u %02u:%02u:%02u (wd=%u)",
+                now.year, now.month, now.day,
+                now.hour, now.minute, now.second, now.weekday);
+        }
+    }
+
+    if (shtc3_init()) {
+        float temp_c = 0, rh = 0;
+        if (shtc3_read(&temp_c, &rh)) {
+            ESP_LOGI(TAG, "shtc3: %.2f°C, %.1f%%RH", temp_c, rh);
+        }
+    }
+
+    /*
+     * M9 codec init smoke test. After RTC + SHTC3 we know the I²C
+     * bus + Audio_PWR rail are healthy. voice::init() probes the
+     * ES8311 over the same bus and configures the I²S pins for
+     * future audio work. Failure is logged-and-continued — codec
+     * init must not break the existing M8.5 pet UI path. If this
+     * collides with our existing I²C bus singleton (the vendor
+     * Waveshare i2c_bsp), the codec_board module's own bus init
+     * will trip; we'll see it in the log and decide how to refactor.
+     */
+    if (!voice::init()) {
+        ESP_LOGW(TAG, "voice init failed; continuing boot");
+    }
+
+    /* Battery sense — ADC1 ch3 via the 1:2 divider on VBAT_PWR
+     * (GPIO 17 already enabled by peripheral_rails_on()). One read
+     * at boot for the log; render_chrome() polls again per frame.
+     *
+     * Diagnostic: take 10 samples over 2 s and report min/mean/max.
+     * With a real LiPo present the readings are tight (<50 mV
+     * spread) and sit at 4.05–4.20 V on USB charge. Without a
+     * battery the readings drift, saturate, or report something
+     * implausible — that tells us the "with lithium battery"
+     * SKU shipped without one (or the cell is in over-discharge
+     * cutoff and needs more USB time). */
+    if (battery_init()) {
+        uint16_t mv_min = 0xFFFF, mv_max = 0;
+        uint32_t mv_sum = 0;
+        int samples = 0;
+        for (int i = 0; i < 10; i++) {
+            uint16_t mv = 0; uint8_t pct = 0;
+            if (battery_read(&mv, &pct)) {
+                if (mv < mv_min) mv_min = mv;
+                if (mv > mv_max) mv_max = mv;
+                mv_sum += mv;
+                samples++;
+            }
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+        if (samples > 0) {
+            uint16_t mean = (uint16_t)(mv_sum / samples);
+            int spread = (int)mv_max - (int)mv_min;
+            ESP_LOGI(TAG,
+                "battery diag: min=%u mean=%u max=%u spread=%d mV (n=%d)",
+                (unsigned)mv_min, (unsigned)mean,
+                (unsigned)mv_max, spread, samples);
+            /* Heuristic interpretation. Calibrated against typical
+             * single-cell LiPo behaviour on USB. */
+            if (mean >= 4000 && mean <= 4250 && spread < 50) {
+                ESP_LOGI(TAG, "battery diag → looks like a real LiPo on USB charge");
+            } else if (mean >= 3300 && mean <= 4000 && spread < 50) {
+                ESP_LOGI(TAG, "battery diag → looks like a LiPo discharging or just plugged in");
+            } else if (spread >= 50) {
+                ESP_LOGW(TAG, "battery diag → readings drift; likely NO LiPo connected");
+            } else {
+                ESP_LOGW(TAG, "battery diag → out-of-range mean (%u mV); LiPo presence unclear",
+                    (unsigned)mean);
+            }
+        }
+    }
+
+    /*
+     * Persistent sprite cache — LittleFS on the 'storage' partition.
+     * Per-sheet ETag check at boot: HEAD each sheet we use, compare
+     * against the locally-stored tag, and invalidate that sheet's
+     * cached blobs if they don't match. Subsequent fetches go
+     * through fetch_or_load_* helpers below — they read from cache
+     * when present and only hit the network on cache miss.
+     *
+     * First boot has no cache yet, so everything misses and we pay
+     * the full ~22s of fetches once. Subsequent boots — and any
+     * post-pair reboot — skip the network entirely if the server
+     * artwork hasn't changed.
+     */
+    /* sprite_cache was already init'd in the early-dump block above;
+     * re-init is idempotent and returns the same result. */
+    bool cache_ok = sprite_cache::init();
+
+    /* Once LittleFS is mounted, dump (and consume) any voice session
+     * log left behind by the previous boot. This is what makes
+     * disconnected-USB voice testing recoverable: the device flushes
+     * the session log on stop_session, the next boot prints it.
+     * Idempotent — no-op if no session ran. */
+    if (cache_ok) {
+        voice_diag_dump_last();
+    }
+
+    if (cache_ok) {
+        struct { const char *sheet; const char *probe_url; } probes[] = {
+            { "pet-v1",   "https://mochi.val.run/devsprite/cell/pet-v1/neutral" },
+            { "ui-v1",    "https://mochi.val.run/devsprite/cell/ui-v1/heart"    },
+            { "scene-v1", "https://mochi.val.run/devsprite/scene-v1/day"        },
+        };
+        for (auto &p : probes) {
+            char remote[40] = {};
+            char local[40]  = {};
+            if (!sprite_fetch_head_etag(p.probe_url, remote, sizeof(remote))) {
+                ESP_LOGW(TAG, "etag probe failed for '%s'; cache unchanged",
+                    p.sheet);
+                continue;
+            }
+            sprite_cache::load_etag(p.sheet, local, sizeof(local));
+            if (strcmp(remote, local) != 0) {
+                ESP_LOGI(TAG, "etag '%s': remote=%s local=%s — invalidating",
+                    p.sheet, remote, local[0] ? local : "(none)");
+                sprite_cache::invalidate_sheet(p.sheet);
+                sprite_cache::store_etag(p.sheet, remote);
+            } else {
+                ESP_LOGI(TAG, "etag '%s' unchanged (%s) — using cache",
+                    p.sheet, remote);
+            }
+        }
+    } else {
+        ESP_LOGW(TAG, "sprite cache disabled; falling back to per-fetch");
+    }
+
+    /*
+     * M5 — device pairing. If NVS has no pet binding yet, run the
+     * pair-init / pair-check protocol against mochi.val.run, persist
+     * the result, and reboot. The reboot is deliberate: it re-enters
+     * this same code path with creds present, which keeps the
+     * already-paired branch the canonical "boot path", and avoids
+     * having to special-case "we just paired" anywhere downstream.
+     *
+     * If we already have a pairing, just log it. We don't (yet) verify
+     * with the server on each boot — the substrate is durable and the
+     * pet_id is what every future call uses as bearer. A future
+     * health-check on /api/pets/<id> can reject revoked devices.
+     */
+    struct mochi_pair_creds pair = {};
+    bool have_pair = pair_creds_load(&pair);
+    if (!have_pair) {
+        ESP_LOGI(TAG, "no pairing → entering pair flow");
+        device_pair::InitResult init = {};
+        if (!device_pair::request_code(&init)) {
+            epd_ui::render_pair_failed(epd);
+            epd->EPD_Init_Partial();
+            epd->EPD_DisplayPart();
+            ESP_LOGE(TAG, "pair-init failed; halting (touch tap to retry)");
+            /* Sit on the failed screen — touch handler below isn't
+             * running yet, so this halts. M5 acceptance: user
+             * power-cycles to retry. M5+ will retry automatically. */
+            while (true) vTaskDelay(pdMS_TO_TICKS(60000));
+        }
+
+        epd_ui::render_pair_prompt(epd, init.code);
+        epd->EPD_Init_Partial();
+        epd->EPD_DisplayPart();
+
+        /*
+         * Block here, polling every 5 s, for up to the server's
+         * 10-min code TTL. If we hit timeout (or 410 expired) the
+         * function returns false and we render the failed screen.
+         */
+        if (!device_pair::wait_for_user(&init, &pair, 10 * 60 * 1000)) {
+            epd_ui::render_pair_failed(epd);
+            epd->EPD_Init_Partial();
+            epd->EPD_DisplayPart();
+            ESP_LOGW(TAG, "pair-check did not complete; halting");
+            while (true) vTaskDelay(pdMS_TO_TICKS(60000));
+        }
+
+        if (!pair_creds_save(&pair)) {
+            ESP_LOGE(TAG, "pair save failed; rebooting to retry");
+            esp_restart();
+        }
+
+        epd_ui::render_pair_success(epd, pair.pet_name);
+        epd->EPD_Init_Partial();
+        epd->EPD_DisplayPart();
+
+        ESP_LOGI(TAG, "pairing complete; rebooting to clean post-pair boot");
+        vTaskDelay(pdMS_TO_TICKS(1500));
+        esp_restart();
+    }
+    ESP_LOGI(TAG, "paired to '%s' (pet_id=%s)",
+        pair.pet_name, pair.pet_id);
+
+    /*
+     * Pet-on-scene compositor pipeline.
+     *
+     * Three buffers live in PSRAM:
+     *   scene_fb (5000 B)    — fetched once at boot, never written
+     *                          again. The home backdrop.
+     *   pet_cell (1152 B)    — the current pet expression, fetched
+     *                          per-tap from /devsprite/cell.
+     *   composite (5000 B)   — what we push to the panel. Built each
+     *                          render: copy(scene) → blit(pet at
+     *                          PET_DX, PET_DY) → push.
+     *
+     * The compositor's blit_mask treats source bit `1` as "leave the
+     * scene visible" (transparent), so cell PNGs with cream
+     * backgrounds composite cleanly without any keying step on the
+     * device side.
+     */
+    constexpr size_t FB_LEN = MOCHI_EPD_BUFFER_LEN;  /* 5000 */
+    /* Scene buffer is sized for the area BELOW the status bar
+     * (200×172 = 4300 bytes) — not the whole panel. The composite
+     * remains full-panel size. */
+    uint8_t *scene_fb  = (uint8_t *)heap_caps_malloc(SCENE_BYTES, MALLOC_CAP_SPIRAM);
+    uint8_t *composite = (uint8_t *)heap_caps_malloc(FB_LEN, MALLOC_CAP_SPIRAM);
+    /* Pet cell uses the two-plane format: ink (line work) + mask
+     * (silhouette). Both same size; allocated separately so we can
+     * pass them to blit_two_plane without packing. */
+    uint8_t *pet_ink   = (uint8_t *)heap_caps_malloc(PET_CELL_BYTES, MALLOC_CAP_SPIRAM);
+    uint8_t *pet_mask  = (uint8_t *)heap_caps_malloc(PET_CELL_BYTES, MALLOC_CAP_SPIRAM);
+
+    /* Care icon storage: 4 icons × 2 planes (ink + mask), each at
+     * the downsampled 32×32 = 128-byte size. We also need a single
+     * 800-byte staging buffer at the native 80×80 size to fetch
+     * into before downsampling. The staging buffer is used once
+     * per icon at boot and then thrown away by going out of scope. */
+    uint8_t *icon_ink[4]  = {};
+    uint8_t *icon_mask[4] = {};
+    for (int i = 0; i < 4; i++) {
+        icon_ink[i]  = (uint8_t *)heap_caps_malloc(ICON_BYTES, MALLOC_CAP_SPIRAM);
+        icon_mask[i] = (uint8_t *)heap_caps_malloc(ICON_BYTES, MALLOC_CAP_SPIRAM);
+    }
+
+    if (!scene_fb || !composite || !pet_ink || !pet_mask) {
+        ESP_LOGE(TAG, "PSRAM alloc failed");
+        while (true) vTaskDelay(pdMS_TO_TICKS(60000));
+    }
+    for (int i = 0; i < 4; i++) {
+        if (!icon_ink[i] || !icon_mask[i]) {
+            ESP_LOGE(TAG, "PSRAM alloc failed for icon %d", i);
+            while (true) vTaskDelay(pdMS_TO_TICKS(60000));
+        }
+    }
+
+    /*
+     * Fetch the home scene at the scene-area size (200×172).
+     * Cache-first: if the LittleFS cache has fill_200x172 for
+     * scene-v1, load from disk (typical ~5-10 ms vs ~1500 ms for
+     * a network fetch). Miss → network → store.
+     *
+     * If both fail (no cache + no network) we fall back to a
+     * paper-white background so the pet is still visible.
+     */
+    {
+        size_t got = 0;
+        if (cache_ok && sprite_cache::load("scene-v1", "fill_200x172",
+                scene_fb, SCENE_BYTES, &got) && got == SCENE_BYTES) {
+            ESP_LOGI(TAG, "scene loaded from cache");
+        } else {
+            uint32_t ms = 0;
+            if (sprite_fetch(MOCHI_SCENE_URL, scene_fb, SCENE_BYTES, &ms)) {
+                ESP_LOGI(TAG, "scene fetched in %lu ms", (unsigned long)ms);
+                if (cache_ok) {
+                    sprite_cache::store("scene-v1", "fill_200x172",
+                        scene_fb, SCENE_BYTES);
+                }
+            } else {
+                ESP_LOGW(TAG, "scene fetch failed; using blank backdrop");
+                compositor::clear_to_paper(scene_fb, SCENE_W, SCENE_H);
+            }
+        }
+    }
+
+    /*
+     * Fetch each care icon at native 80×80, downsample to 32×32
+     * once, cache the downsampled planes for the rest of the
+     * device's life.
+     *
+     * The native staging buffers are intentionally PSRAM-allocated
+     * (rather than on the main task stack) because sprite_fetch_cell
+     * already uses ~4 KB of stack for its own staging during TLS,
+     * and adding 1.6 KB of stack-resident staging here was enough
+     * to overflow the 8 KB main task stack on the first icon fetch.
+     */
+    uint8_t *native_ink  = (uint8_t *)heap_caps_malloc(UI_CELL_NATIVE_BYTES, MALLOC_CAP_SPIRAM);
+    uint8_t *native_mask = (uint8_t *)heap_caps_malloc(UI_CELL_NATIVE_BYTES, MALLOC_CAP_SPIRAM);
+    if (!native_ink || !native_mask) {
+        ESP_LOGE(TAG, "PSRAM alloc failed for icon staging");
+        while (true) vTaskDelay(pdMS_TO_TICKS(60000));
+    }
+    {
+        /* Suffix for cached icons baked into the layout. If we ever
+         * change ICON_W or ICON_H, bump this string so old cached
+         * blobs get ignored. */
+        char icon_suffix[24];
+        snprintf(icon_suffix, sizeof(icon_suffix), "_icon_%ux%u",
+            (unsigned)ICON_W, (unsigned)ICON_H);
+
+        /*
+         * Two cached blobs per icon: one for ink, one for mask.
+         * Suffix is "<icon>_icon_48x48_ink" / "<icon>_icon_48x48_mask".
+         * Loaded together; if either misses we re-fetch + re-downsample.
+         */
+        for (int i = 0; i < 4; i++) {
+            char ink_suffix[40], mask_suffix[40];
+            snprintf(ink_suffix,  sizeof(ink_suffix),  "%s%s_ink",
+                CARE_ICON_KEYS[i], icon_suffix);
+            snprintf(mask_suffix, sizeof(mask_suffix), "%s%s_mask",
+                CARE_ICON_KEYS[i], icon_suffix);
+
+            size_t got_ink = 0, got_mask = 0;
+            bool from_cache =
+                cache_ok &&
+                sprite_cache::load("ui-v1", ink_suffix,
+                    icon_ink[i], ICON_BYTES, &got_ink) &&
+                got_ink == ICON_BYTES &&
+                sprite_cache::load("ui-v1", mask_suffix,
+                    icon_mask[i], ICON_BYTES, &got_mask) &&
+                got_mask == ICON_BYTES;
+            if (from_cache) {
+                ESP_LOGI(TAG, "icon '%s' loaded from cache",
+                    CARE_ICON_KEYS[i]);
+                continue;
+            }
+
+            /* Cache miss → network fetch native size, downsample,
+             * store the downsampled planes. */
+            char url[160];
+            snprintf(url, sizeof(url), "%s%s",
+                MOCHI_UI_CELL_URL_BASE, CARE_ICON_KEYS[i]);
+            uint16_t w = 0, h = 0; uint32_t ms = 0;
+            bool ok = sprite_fetch_cell(url, native_ink, native_mask,
+                UI_CELL_NATIVE_BYTES, &w, &h, &ms);
+            if (!ok || w != UI_CELL_NATIVE_W || h != UI_CELL_NATIVE_H) {
+                ESP_LOGW(TAG, "icon '%s' fetch failed (%ux%u); blanking",
+                    CARE_ICON_KEYS[i], w, h);
+                memset(icon_ink[i],  0xFF, ICON_BYTES);
+                memset(icon_mask[i], 0xFF, ICON_BYTES);
+                continue;
+            }
+            memset(icon_ink[i],  0xFF, ICON_BYTES);
+            memset(icon_mask[i], 0xFF, ICON_BYTES);
+            compositor::downsample_plane(icon_ink[i],  ICON_W, ICON_H,
+                native_ink,  UI_CELL_NATIVE_W, UI_CELL_NATIVE_H);
+            compositor::downsample_plane(icon_mask[i], ICON_W, ICON_H,
+                native_mask, UI_CELL_NATIVE_W, UI_CELL_NATIVE_H);
+            if (cache_ok) {
+                sprite_cache::store("ui-v1", ink_suffix,  icon_ink[i],  ICON_BYTES);
+                sprite_cache::store("ui-v1", mask_suffix, icon_mask[i], ICON_BYTES);
+            }
+            ESP_LOGI(TAG, "icon '%s' fetched + cached (%lu ms)",
+                CARE_ICON_KEYS[i], (unsigned long)ms);
+        }
+        /* Free the native staging — only used during boot. */
+        free(native_ink);
+        free(native_mask);
+        native_ink = nullptr;
+        native_mask = nullptr;
+    }
+
+    /*
+     * Per-corner placement for icons. Order matches CARE_ICON_KEYS:
+     * TL, TR, BL, BR. Top row sits flush against the bottom of the
+     * status bar; bottom row flush with the bottom of the panel,
+     * both with a small horizontal margin.
+     */
+    const int icon_pos_x[4] = {
+        ICON_MARGIN,
+        (int)MOCHI_EPD_WIDTH - (int)ICON_W - ICON_MARGIN,
+        ICON_MARGIN,
+        (int)MOCHI_EPD_WIDTH - (int)ICON_W - ICON_MARGIN,
+    };
+    const int icon_pos_y[4] = {
+        SCENE_TOP_Y + ICON_MARGIN,
+        SCENE_TOP_Y + ICON_MARGIN,
+        (int)MOCHI_EPD_HEIGHT - (int)ICON_H - ICON_MARGIN,
+        (int)MOCHI_EPD_HEIGHT - (int)ICON_H - ICON_MARGIN,
+    };
+
+    /* Helper: fetch <expression> cell, composite scene + pet, push
+     * to panel. Returns true on render success. Used for every tap
+     * and for the post-tap return-to-neutral. */
+    /* Stamp the status bar + 4 corner icons into composite. Called
+     * after scene + pet have been laid down. The bar lives at the
+     * very top of the panel (rows 0..27) and is a clean
+     * paper-white slab so the time + name are legible regardless of
+     * what the scene drew there. The icons sit at the four corners
+     * over scene/bar; their two-plane format means they only draw
+     * where opaque. */
+    auto render_chrome = [&]() {
+        /* Paper-white bar at top, full-width, STATUS_BAR_H rows
+         * tall. The bar is its own band: scene + pet + icons all
+         * live BELOW it, not behind it. Stride is 25 bytes/row for
+         * a 200-pixel wide framebuffer. */
+        memset(composite, 0xFF, 25 * STATUS_BAR_H);
+
+        /*
+         * Status bar layout, all scale-1 (8 px tall, 8 px wide per
+         * glyph):
+         *
+         *   HH:MM      Mochi      87%
+         *   ↑ left    ↑ centre    ↑ right
+         *   x=4       x=centred   x=W-4-text_w
+         *
+         * Time, name, and battery are independent strings — the
+         * pet name centres on the bar regardless of how long the
+         * other two pieces are.
+         */
+        char time_str[8] = "--:--";
+        mochi_datetime now = {};
+        if (rtc_get(&now)) {
+            snprintf(time_str, sizeof(time_str), "%02u:%02u",
+                now.hour, now.minute);
+        }
+
+        char batt_str[8] = "--%";
+        uint16_t batt_mv = 0; uint8_t batt_pct = 0;
+        if (battery_read(&batt_mv, &batt_pct)) {
+            snprintf(batt_str, sizeof(batt_str), "%u%%",
+                (unsigned)batt_pct);
+        }
+
+        /* One pass blits a glyph string at a chosen x. Reused for
+         * each of the three segments. */
+        auto blit_status_text = [&](const char *s, int x_origin) {
+            for (size_t i = 0; s[i]; i++) {
+                const uint8_t *g = font8x8_glyph(s[i]);
+                const int ox = x_origin + (int)i * 8;
+                for (int row = 0; row < 8; row++) {
+                    const uint8_t bits = g[row];
+                    for (int col = 0; col < 8; col++) {
+                        if (!((bits >> col) & 1)) continue;
+                        const int px = ox + col;
+                        const int py = STATUS_TEXT_Y + row;
+                        if (px < 0 || py < 0 ||
+                            px >= (int)MOCHI_EPD_WIDTH ||
+                            py >= (int)MOCHI_EPD_HEIGHT) continue;
+                        const size_t off = (size_t)py * 25 + ((size_t)px >> 3);
+                        composite[off] &= (uint8_t)~(1u << (7 - ((size_t)px & 7)));
+                    }
+                }
+            }
+        };
+
+        /* Left: time. Right: battery. Centre: pet name (centred on
+         * panel midpoint, not the slot between the two — the centre
+         * looks more visually balanced). */
+        constexpr int STATUS_PAD = 4;
+        blit_status_text(time_str, STATUS_PAD);
+
+        const int batt_w = (int)strlen(batt_str) * 8;
+        blit_status_text(batt_str,
+            (int)MOCHI_EPD_WIDTH - STATUS_PAD - batt_w);
+
+        const int name_w = (int)strlen(pair.pet_name) * 8;
+        int name_x = ((int)MOCHI_EPD_WIDTH - name_w) / 2;
+        if (name_x < STATUS_PAD) name_x = STATUS_PAD;
+        blit_status_text(pair.pet_name, name_x);
+
+        /* 1-pixel black divider at the bottom of the status bar
+         * (y = STATUS_BAR_H - 1). Sits between bar text and the
+         * scene; reinforces the bar as its own band. */
+        {
+            const int y = STATUS_BAR_H - 1;
+            const size_t row_off = (size_t)y * 25;
+            memset(composite + row_off, 0x00, 25);
+        }
+
+        /* Stamp the 4 care icons. All 4 sit below the status bar
+         * inside the scene area; the two-plane blit means
+         * transparent pixels in the icon don't trash the
+         * underlying scene. */
+        for (int i = 0; i < 4; i++) {
+            compositor::blit_two_plane(composite,
+                MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
+                icon_ink[i], icon_mask[i],
+                ICON_W, ICON_H,
+                icon_pos_x[i], icon_pos_y[i]);
+        }
+    };
+
+    auto render_with_expression = [&](const char *expr,
+                                      bool full_refresh) -> bool {
+        /*
+         * Cache-first pet cell load. Two suffixes per expression
+         * (ink + mask). If both hit, no network. If either misses
+         * (or is the wrong size), refetch from the server and
+         * persist both planes back to the cache.
+         */
+        char ink_suffix[40], mask_suffix[40];
+        snprintf(ink_suffix,  sizeof(ink_suffix),  "%s_cell_ink",  expr);
+        snprintf(mask_suffix, sizeof(mask_suffix), "%s_cell_mask", expr);
+
+        size_t got_ink = 0, got_mask = 0;
+        bool from_cache =
+            cache_ok &&
+            sprite_cache::load("pet-v1", ink_suffix,
+                pet_ink, PET_CELL_BYTES, &got_ink) &&
+            got_ink == PET_CELL_BYTES &&
+            sprite_cache::load("pet-v1", mask_suffix,
+                pet_mask, PET_CELL_BYTES, &got_mask) &&
+            got_mask == PET_CELL_BYTES;
+
+        uint32_t ms = 0;
+        if (!from_cache) {
+            char url[160];
+            snprintf(url, sizeof(url), "%s%s", MOCHI_PET_CELL_URL_BASE, expr);
+            uint16_t w = 0, h = 0;
+            if (!sprite_fetch_cell(url, pet_ink, pet_mask, PET_CELL_BYTES,
+                                   &w, &h, &ms)) {
+                ESP_LOGW(TAG, "pet cell fetch failed for '%s'", expr);
+                return false;
+            }
+            if (w != PET_CELL_W || h != PET_CELL_H) {
+                ESP_LOGW(TAG, "unexpected cell dims %ux%u (want %ux%u)",
+                    w, h, (unsigned)PET_CELL_W, (unsigned)PET_CELL_H);
+                return false;
+            }
+            if (cache_ok) {
+                sprite_cache::store("pet-v1", ink_suffix,  pet_ink,  PET_CELL_BYTES);
+                sprite_cache::store("pet-v1", mask_suffix, pet_mask, PET_CELL_BYTES);
+            }
+        }
+
+        /* Top STATUS_BAR_H rows are paper-white; render_chrome()
+         * paints status text + icons over the top of that. The
+         * scene fills 200×172 below the bar — same stride as
+         * composite (25 bytes/row) so a single memcpy is the
+         * natural blit. */
+        memset(composite, 0xFF, 25 * STATUS_BAR_H);
+        memcpy(composite + 25 * SCENE_TOP_Y, scene_fb, SCENE_BYTES);
+
+        compositor::blit_two_plane(composite,
+            MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
+            pet_ink, pet_mask,
+            PET_CELL_W, PET_CELL_H, PET_DX, PET_DY);
+        render_chrome();
+
+        epd->EPD_LoadBuffer(composite, FB_LEN);
+        if (full_refresh) {
+            epd->EPD_Init();
+            epd->EPD_Display();
+            epd->EPD_DisplayPartBaseImage();
+        } else {
+            epd->EPD_Init_Partial();
+            epd->EPD_DisplayPart();
+        }
+        ESP_LOGI(TAG, "rendered '%s' (%s%s%lu ms, %s refresh)",
+            expr,
+            from_cache ? "cache" : "fetch",
+            from_cache ? " " : " ",
+            (unsigned long)ms,
+            full_refresh ? "full" : "partial");
+        return true;
+    };
+
+    /*
+     * Asleep render — used when the PWR-long-press gesture fires.
+     * Same composition pipeline as the wake render, except:
+     *   - pet expression is 'sleeping'
+     *   - the status bar shows a single centred "Asleep — PWR to wake"
+     *     line (no time, no battery, no pet name) so the persistent
+     *     pixels are honest about the device being off
+     *   - icons are NOT drawn (they're mute when asleep)
+     *
+     * This is captured as a lambda so it can call render_with_expression
+     * (the network fetch path) and then re-paint the bar locally.
+     * Full refresh because the screen will sit untouched for hours.
+     */
+    auto render_asleep = [&]() {
+        /* Try cache first for the 'sleeping' cell so falling asleep
+         * is responsive even on a flaky network. */
+        size_t got_ink = 0, got_mask = 0;
+        bool got_pet =
+            cache_ok &&
+            sprite_cache::load("pet-v1", "sleeping_cell_ink",
+                pet_ink,  PET_CELL_BYTES, &got_ink) &&
+            got_ink == PET_CELL_BYTES &&
+            sprite_cache::load("pet-v1", "sleeping_cell_mask",
+                pet_mask, PET_CELL_BYTES, &got_mask) &&
+            got_mask == PET_CELL_BYTES;
+        if (!got_pet) {
+            char url[160];
+            snprintf(url, sizeof(url), "%s%s", MOCHI_PET_CELL_URL_BASE, "sleeping");
+            uint16_t w = 0, h = 0; uint32_t ms = 0;
+            if (sprite_fetch_cell(url, pet_ink, pet_mask, PET_CELL_BYTES,
+                    &w, &h, &ms) && w == PET_CELL_W && h == PET_CELL_H) {
+                got_pet = true;
+                if (cache_ok) {
+                    sprite_cache::store("pet-v1", "sleeping_cell_ink",
+                        pet_ink,  PET_CELL_BYTES);
+                    sprite_cache::store("pet-v1", "sleeping_cell_mask",
+                        pet_mask, PET_CELL_BYTES);
+                }
+            }
+        }
+
+        /* Scene + (sleeping) pet base. If the pet fetch failed (no
+         * network, etc) we still render the asleep status — pet
+         * just doesn't update from whatever was last shown. */
+        memset(composite, 0xFF, 25 * STATUS_BAR_H);
+        memcpy(composite + 25 * SCENE_TOP_Y, scene_fb, SCENE_BYTES);
+        if (got_pet) {
+            compositor::blit_two_plane(composite,
+                MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
+                pet_ink, pet_mask,
+                PET_CELL_W, PET_CELL_H, PET_DX, PET_DY);
+        }
+
+        /* Asleep status bar: centred string, no icons. Reuse the
+         * inline glyph blit pattern. */
+        const char *line = "Asleep - PWR to wake";
+        const int text_w = (int)strlen(line) * 8;
+        int text_x = ((int)MOCHI_EPD_WIDTH - text_w) / 2;
+        if (text_x < 0) text_x = 0;
+        for (size_t i = 0; line[i]; i++) {
+            const uint8_t *g = font8x8_glyph(line[i]);
+            const int ox = text_x + (int)i * 8;
+            for (int row = 0; row < 8; row++) {
+                const uint8_t bits = g[row];
+                for (int col = 0; col < 8; col++) {
+                    if (!((bits >> col) & 1)) continue;
+                    const int px = ox + col;
+                    const int py = STATUS_TEXT_Y + row;
+                    if (px < 0 || py < 0 ||
+                        px >= (int)MOCHI_EPD_WIDTH ||
+                        py >= (int)MOCHI_EPD_HEIGHT) continue;
+                    const size_t off = (size_t)py * 25 + ((size_t)px >> 3);
+                    composite[off] &= (uint8_t)~(1u << (7 - ((size_t)px & 7)));
+                }
+            }
+        }
+        /* 1-pixel divider, same as the awake bar. */
+        const size_t row_off = (size_t)(STATUS_BAR_H - 1) * 25;
+        memset(composite + row_off, 0x00, 25);
+
+        epd->EPD_LoadBuffer(composite, FB_LEN);
+        epd->EPD_Init();
+        epd->EPD_Display();
+        ESP_LOGI(TAG, "asleep render committed");
+    };
+
+    /* Initial render: pet on scene, neutral. Full refresh seeds the
+     * partial-refresh "previous frame" so subsequent taps are
+     * flicker-free. */
+    if (!render_with_expression("neutral", true)) {
+        ESP_LOGE(TAG, "initial neutral render failed; halting");
+        while (true) vTaskDelay(pdMS_TO_TICKS(60000));
+    }
+
+    /*
+     * Touch zones — five care actions mapped onto the 200×200 panel:
+     *
+     *   ┌──────────┬───────────┬──────────┐
+     *   │  feed    │           │   play   │
+     *   │  (TL)    │           │   (TR)   │
+     *   ├──────────┤  attention├──────────┤
+     *   │          │  (centre) │          │
+     *   │          │           │          │
+     *   ├──────────┤           ├──────────┤
+     *   │ comfort  │           │  cheer   │
+     *   │  (BL)    │           │   (BR)   │
+     *   └──────────┴───────────┴──────────┘
+     *
+     * Each zone fetches the matching expression cell, composites,
+     * renders for ~5 s, then re-fetches 'neutral' for a resting pose.
+     */
+    /*
+     * Touch zones map to the four icon rectangles (with a small
+     * padding around each so off-by-a-few-pixels finger taps still
+     * register) plus a centre zone for "attention". The status bar
+     * itself is non-interactive; its y range is excluded.
+     */
+    enum class Zone : uint8_t { CornerTL, CornerTR, CornerBL, CornerBR, Center, None };
+    auto classify = [&](uint16_t x, uint16_t y) -> Zone {
+        constexpr int PAD = 6;  /* enlarge each icon hit-rect by 6px on every side */
+        for (int i = 0; i < 4; i++) {
+            const int x0 = icon_pos_x[i] - PAD;
+            const int y0 = icon_pos_y[i] - PAD;
+            const int x1 = icon_pos_x[i] + (int)ICON_W + PAD;
+            const int y1 = icon_pos_y[i] + (int)ICON_H + PAD;
+            if ((int)x >= x0 && (int)x < x1 && (int)y >= y0 && (int)y < y1) {
+                return (Zone)i;   /* enum order matches icon order: TL TR BL BR */
+            }
+        }
+        /* Centre: a square in the middle of the panel, away from icons.
+         * 100×100 centred at (100, 114) — slightly low to favour the
+         * pet's body rather than the status bar. */
+        if (x >= 50 && x < 150 && y >= 64 && y < 164) return Zone::Center;
+        return Zone::None;
+    };
+    auto zone_to_expr = [](Zone z) -> const char * {
+        switch (z) {
+            case Zone::CornerTL: return "comforted";       /* heart icon */
+            case Zone::CornerTR: return "cheerful_wave";   /* star icon */
+            case Zone::CornerBL: return "eating";          /* bowl icon */
+            case Zone::CornerBR: return "excited";         /* ball icon */
+            case Zone::Center:   return "curious";         /* attention */
+            default:             return nullptr;
+        }
+    };
+
+    touch::init();
+    int64_t last_event_us = 0;
+    constexpr int64_t DEBOUNCE_US = 200 * 1000;
+
+    /*
+     * Phase-driven expression for active voice sessions. The user
+     * sees the pet's current expression and infers session state
+     * from that — no chrome required. Mapping:
+     *
+     *   CONNECTING → "curious"        — "what's happening?"
+     *   READY      → "comforted"      — calm, listening, between turns
+     *   SPEAKING   → "cheerful_wave"  — animated, audio playing
+     *   IDLE       → not rendered here; tap-to-stop branch already
+     *                snaps to "neutral".
+     *
+     * Re-rendered only on transition (not every poll) so we don't
+     * burn partial-refresh flicker on the e-paper.
+     */
+    auto phase_expr = [](voice::Phase p) -> const char * {
+        switch (p) {
+            case voice::Phase::Connecting: return "curious";
+            case voice::Phase::Ready:      return "comforted";
+            case voice::Phase::Speaking:   return "cheerful_wave";
+            case voice::Phase::Idle:
+            default:                       return nullptr;
+        }
+    };
+    voice::Phase last_voice_phase = voice::Phase::Idle;
+
+    while (true) {
+        touch::Event ev;
+        bool got_touch = touch::wait_event(&ev, 1000);
+
+        /* Sleep gesture takes priority over touch. The wait_event
+         * 1-second timeout means we check this at least once per
+         * second even with no taps. When the long-press fires we
+         * render the asleep frame, then commit_sleep() — never
+         * returns. */
+        if (sleep_gesture::requested()) {
+            render_asleep();
+            sleep_gesture::commit_sleep();
+        }
+
+        /* Voice auto-stop: the worker task can't safely call
+         * voice::stop_session itself (would deadlock joining its own
+         * task). Caps + remote disconnect set a flag we poll here. */
+        if (voice::stop_requested()) {
+            ESP_LOGI(TAG, "voice auto-stop requested → stopping");
+            voice::stop_session();
+            render_with_expression("neutral", false);
+            last_voice_phase = voice::Phase::Idle;
+        }
+
+        /* Phase-driven expression update. Runs on every loop tick
+         * (1 Hz minimum from wait_event's timeout) so the pet's
+         * expression follows the voice session lifecycle without
+         * needing the data-channel callbacks to call back into the
+         * main task. Only re-renders on transition. */
+        {
+            voice::Phase cur = voice::phase();
+            if (cur != last_voice_phase) {
+                const char *e = phase_expr(cur);
+                if (e) {
+                    ESP_LOGI(TAG, "voice phase → %d, render %s", (int)cur, e);
+                    render_with_expression(e, false);
+                }
+                last_voice_phase = cur;
+            }
+        }
+
+        if (!got_touch) continue;
+
+        int64_t now_us = esp_timer_get_time();
+        if (now_us - last_event_us < DEBOUNCE_US) continue;
+        last_event_us = now_us;
+
+        Zone z = classify(ev.x, ev.y);
+        const char *expr = zone_to_expr(z);
+        ESP_LOGI(TAG, "touch (%u,%u) zone=%u expr=%s",
+            (unsigned)ev.x, (unsigned)ev.y, (unsigned)z,
+            expr ? expr : "(gutter)");
+        if (!expr) continue;
+
+        /* Voice trigger: long-press of the centre-attention zone
+         * starts a session; tap-anywhere while a session is running
+         * stops it. Same gesture as design/07-voice-architecture.md
+         * specifies. The hold check polls the FT6336 at 50 ms cadence
+         * for up to 800 ms — if the finger stays in the centre zone
+         * the whole time, treat as long-press; otherwise fall through
+         * to the existing tap-to-cycle-expression behaviour. */
+        if (voice::is_active()) {
+            /* Active-session tap rules:
+             *   centre tap → text talk-back (debug path: send a fixed
+             *                user message + response.create over the
+             *                data channel). Validates multi-turn
+             *                lifecycle without committing to mic
+             *                capture (M9.f.2). The pet's expression
+             *                will hop SPEAKING → READY automatically
+             *                via the data-channel event handler.
+             *   anywhere else → stop session.
+             */
+            if (z == Zone::Center) {
+                ESP_LOGI(TAG, "voice active — centre tap → text talk-back");
+                static const char *DEBUG_TEXT =
+                    "Are you still there? Say a quick goodbye and stop.";
+                if (!voice::send_text(DEBUG_TEXT)) {
+                    ESP_LOGW(TAG, "send_text failed; falling through");
+                }
+                continue;
+            }
+            ESP_LOGI(TAG, "voice active — non-centre tap → stop session");
+            voice::stop_session();
+            /* Render neutral immediately so the user sees the
+             * "session over" state. */
+            render_with_expression("neutral", false);
+            last_voice_phase = voice::Phase::Idle;
+            continue;
+        } else if (z == Zone::Center && voice::is_ready()) {
+            constexpr int HOLD_POLL_MS = 50;
+            constexpr int HOLD_TARGET_MS = 800;
+            int held_ms = 0;
+            bool released = false;
+            for (; held_ms < HOLD_TARGET_MS; held_ms += HOLD_POLL_MS) {
+                touch::Event hold_ev;
+                if (!touch::current_point(&hold_ev)) {
+                    released = true;
+                    break;
+                }
+                if (classify(hold_ev.x, hold_ev.y) != Zone::Center) {
+                    /* finger drifted off-zone — treat as a tap */
+                    released = true;
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(HOLD_POLL_MS));
+            }
+            if (!released) {
+                ESP_LOGI(TAG, "long-press → start voice session");
+                /* Visual affordance: render 'curious' immediately so the
+                 * user knows their long-press registered. Without this,
+                 * the user sees nothing for the ~2.4 s mint blocking
+                 * call and tends to keep holding longer to be certain.
+                 * Once the session enters CONNECTING, phase_expr maps
+                 * it to 'curious' too, so the next tick of the touch
+                 * loop won't re-render. */
+                render_with_expression("curious", false);
+                last_voice_phase = voice::Phase::Connecting;
+                if (voice::start_session() == 0) {
+                    /* Drain pending touch events that piled up while
+                     * start_session was blocked on the mint round-trip
+                     * (~2.4 s). Without this, the still-held finger
+                     * generates a "stale" touch on the next wait_event,
+                     * which trips the is_active() branch above and
+                     * stops the session 1 ms after starting it. */
+                    touch::Event drain;
+                    while (touch::wait_event(&drain, 0)) { /* drain */ }
+                    /* Then wait for finger-up so any in-progress hold
+                     * doesn't trigger an immediate stop on lift-off. */
+                    constexpr int LIFT_TIMEOUT_MS = 5000;
+                    constexpr int LIFT_POLL_MS = 50;
+                    int lifted_ms = 0;
+                    while (lifted_ms < LIFT_TIMEOUT_MS) {
+                        touch::Event probe;
+                        if (!touch::current_point(&probe)) break;
+                        vTaskDelay(pdMS_TO_TICKS(LIFT_POLL_MS));
+                        lifted_ms += LIFT_POLL_MS;
+                    }
+                    /* Drain again — the lift-off itself can leave
+                     * one final ISR marker on the queue. */
+                    while (touch::wait_event(&drain, 0)) { /* drain */ }
+                    continue;
+                }
+                ESP_LOGW(TAG, "voice start failed; falling through to tap UX");
+            }
+        }
+
+        /* Render the action expression via partial refresh — fast
+         * cadence, no flicker. */
+        if (!render_with_expression(expr, false)) continue;
+
+        /* Hold the expression for ~5 s. We block here rather than
+         * scheduling a timer so the next touch event sees a quiet
+         * pet, not a half-finished transition. */
+        vTaskDelay(pdMS_TO_TICKS(RESTING_AFTER_TAP_MS));
+
+        /* Settle back to neutral. Partial refresh again. */
+        render_with_expression("neutral", false);
+    }
+}
