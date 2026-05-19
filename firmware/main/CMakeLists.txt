@@ -30,6 +30,7 @@ idf_component_register(
         "battery.cpp"
         "sleep_gesture.cpp"
         "sprite_cache.cpp"
+        "ota_update.cpp"
         "voice.cpp"
         "voice/voice_https.c"
         "voice/openai_signaling.c"
@@ -65,6 +66,8 @@ idf_component_register(
         joltwallet__littlefs
         codec_board
         json
+        app_update
+        esp_https_ota
         espressif__esp_peer
         log
 )

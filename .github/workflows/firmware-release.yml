@@ -1,0 +1,103 @@
+# Build the eink-pet firmware in CI and publish it as a GitHub Release.
+#
+# Trigger: push of a tag matching v*. Tag the release with semver:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# What this produces on the release:
+#   eink-pet.bin       The full application image. esp_https_ota
+#                      streams this straight into the inactive OTA
+#                      partition (ota_0 or ota_1, picked by the
+#                      bootloader).
+#   latest.json        The OTA manifest. The device fetches it via
+#                      https://github.com/<owner>/<repo>/releases/latest/download/latest.json
+#                      and compares its `version` field against the
+#                      running esp_app_get_description()->version.
+#
+# The IDF version is pinned to v5.3 to match firmware/README.md. If
+# we move the floor (e.g. to v5.4 for some component requirement),
+# bump the container tag here in lockstep.
+name: firmware-release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:release-v5.3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # esp_app_desc's version field defaults to `git describe`,
+          # which needs the tag history present in the checkout.
+          fetch-depth: 0
+
+      - name: Mark workspace safe
+        # The container runs as root but the checkout is owned by
+        # the runner user, which trips git's safe.directory check.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Build firmware
+        working-directory: firmware
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          idf.py set-target esp32s3
+          idf.py build
+
+      - name: Stage release artifacts
+        id: stage
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          mkdir -p release
+          cp firmware/build/eink-pet.bin release/eink-pet.bin
+          # Also publish the bootloader + partition table for users
+          # doing the one-time USB reflash from a prior factory-only
+          # build. They're small and harmless to include.
+          cp firmware/build/bootloader/bootloader.bin release/bootloader.bin
+          cp firmware/build/partition_table/partition-table.bin release/partition-table.bin
+
+          SHA256=$(sha256sum release/eink-pet.bin | awk '{print $1}')
+          BIN_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/eink-pet.bin"
+          cat > release/latest.json <<EOF
+          {
+            "version": "${VERSION}",
+            "url": "${BIN_URL}",
+            "sha256": "${SHA256}"
+          }
+          EOF
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Manifest:"
+          cat release/latest.json
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/eink-pet.bin
+            release/bootloader.bin
+            release/partition-table.bin
+            release/latest.json
+          body: |
+            Automated firmware build for ${{ github.ref_name }}.
+
+            Devices on M14+ firmware will OTA to this build at the next
+            daily check. To install on a device still running pre-M14
+            (factory-only partition table), do a one-time USB reflash:
+
+            ```sh
+            esptool.py --chip esp32s3 -p /dev/cu.usbmodem* write_flash \
+              0x0      bootloader.bin \
+              0x8000   partition-table.bin \
+              0x10000  eink-pet.bin
+            ```

@@ -1,6 +1,7 @@
 /*
  * Persistent sprite cache backed by LittleFS on the 'storage'
- * partition (6 MB at 0x210000).
+ * partition (~4 MB at 0x410000; was 6 MB at 0x210000 pre-M14 OTA
+ * repartition — see firmware/partitions.csv).
  *
  * Each cached blob is keyed by (sheet_id, suffix). The suffix is
  * a short string identifying the variant — e.g. "neutral.cell"

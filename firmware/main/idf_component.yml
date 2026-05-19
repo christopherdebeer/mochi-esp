@@ -2,7 +2,7 @@
 #
 # joltwallet/littlefs — LittleFS port for ESP-IDF. Used by the
 # sprite-cache layer (firmware/main/sprite_cache.{cpp,h}) to mount
-# the 'storage' partition (6 MB at 0x210000) as a small filesystem
+# the 'storage' partition (~4 MB at 0x410000; see partitions.csv)
 # we can stash decoded sprite payloads in across reboots.
 #
 # Without this, every cold boot re-fetches scene + icons + pet

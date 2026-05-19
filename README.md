@@ -101,6 +101,7 @@ device.
 | M11.5 — Scene contracts | | Replaces hardcoded corner-icon UI; see `design/06-scene-contracts.md` |
 | M12 — Event log | | LittleFS-backed |
 | M13 — Sync model | | Push events / pull deltas |
+| M14 — OTA updates | ✅ 05-19 | A/B partition table, `esp_https_ota` against GitHub Releases manifest, daily check + idle reboot, rollback on boot failure (`design/08-ota-updates.md`) |
 
 > **The M8.5 corner-icon UI is scaffolding.** Care actions are fixed
 > tap-zones in firmware today; the long-term shape is per-scene
