@@ -50,6 +50,7 @@
 #include "codec_init.h"
 #include "voice_diag.h"
 #include "voice_tools.h"
+#include "voice_mic.h"
 
 #define TAG "voice_peer"
 
@@ -584,6 +585,13 @@ static int pc_on_audio_info(esp_peer_audio_stream_info_t *info, void *ctx) {
         return -1;
     }
     open_audio_playback(info->sample_rate, info->channel);
+    /* Start mic capture as soon as the codec/I²S is configured. The
+     * mic task will stall on voice_peer_is_running()=false until the
+     * peer reaches CONNECTED, so encoded frames don't get pushed
+     * before the SRTP transport is ready. */
+    if (!voice_mic_start()) {
+        LOGW_DIAG("voice_mic_start failed — talking back disabled");
+    }
     return 0;
 }
 
@@ -936,6 +944,24 @@ int voice_peer_send_dc_json(const char *json) {
     return esp_peer_send_data(s_peer.pc, &f);
 }
 
+int voice_peer_send_audio_frame(const uint8_t *buf, int size) {
+    if (!buf || size <= 0) return -1;
+    if (!s_peer.pc) return -1;
+    /* PTS is informational; esp_peer fills the RTP timestamp from
+     * its own clock. Pass 0; encoder also produces a PTS in pts ms
+     * but we don't have a use for it on the wire. */
+    esp_peer_audio_frame_t f = {
+        .pts = 0,
+        .data = (uint8_t *)buf,
+        .size = size,
+    };
+    return esp_peer_send_audio(s_peer.pc, &f);
+}
+
+bool voice_peer_is_running(void) {
+    return atomic_load(&s_peer.running);
+}
+
 int voice_peer_send_text(const char *text) {
     if (!text || !*text) return -1;
     if (!s_peer.dc_stream_known) {
@@ -1006,6 +1032,13 @@ void voice_peer_stop(void) {
         (unsigned long)s_aud_pcm_bytes);
 
     atomic_store(&s_peer.running, false);
+
+    /* Stop mic FIRST. voice_mic's loop checks voice_peer_is_running()
+     * (which now reads false), drops out of esp_codec_dev_read on
+     * its next iteration, and exits cleanly. Doing this before peer
+     * teardown means the mic task never sees s_peer.pc==NULL and
+     * the error counters stay clean. */
+    voice_mic_stop();
 
     if (s_peer.sig) {
         const esp_peer_signaling_impl_t *impl =

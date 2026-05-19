@@ -36,6 +36,7 @@ idf_component_register(
         "voice/voice_peer.c"
         "voice/voice_diag.c"
         "voice/voice_tools.c"
+        "voice/voice_mic.c"
         "voice/peer_log_shim.c"
         "i2c_bus.cpp"
         "../vendor/waveshare-eink/epaper_driver_bsp.cpp"

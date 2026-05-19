@@ -159,13 +159,41 @@ static void get_ephemeral_token(openai_signaling_t *sig, char *token, char *voic
 
     cJSON *audio = cJSON_CreateObject();
     cJSON_AddItemToObject(session, "audio", audio);
+
+    /* audio.output: voice + PCM16/24kHz format hint. */
     cJSON *audio_out = cJSON_CreateObject();
     cJSON_AddItemToObject(audio, "output", audio_out);
     cJSON_AddStringToObject(audio_out, "voice", voice);
-    cJSON *fmt = cJSON_CreateObject();
-    cJSON_AddItemToObject(audio_out, "format", fmt);
-    cJSON_AddStringToObject(fmt, "type", "audio/pcm");
-    cJSON_AddNumberToObject(fmt, "rate", 24000);
+    cJSON *out_fmt = cJSON_CreateObject();
+    cJSON_AddItemToObject(audio_out, "format", out_fmt);
+    cJSON_AddStringToObject(out_fmt, "type", "audio/pcm");
+    cJSON_AddNumberToObject(out_fmt, "rate", 24000);
+
+    /* audio.input: server-side STT + VAD so the model can hear the
+     * user. Without this, OpenAI accepts our audio but doesn't emit
+     * transcription events on the data channel and won't auto-commit
+     * input audio buffers — the model would never see input. Same
+     * shape as mochi-val's realtime-mint.ts.
+     *
+     *   transcription.model = gpt-4o-mini-transcribe (cheapest viable)
+     *   turn_detection.type = semantic_vad, eagerness = "low"
+     *     "low" pairs with the absent-AEC posture: less eager VAD
+     *     means mochi's own audio leaking into the mic is less
+     *     likely to trigger a spurious user turn that the model
+     *     interrupts itself for. */
+    cJSON *audio_in = cJSON_CreateObject();
+    cJSON_AddItemToObject(audio, "input", audio_in);
+    cJSON *in_fmt = cJSON_CreateObject();
+    cJSON_AddItemToObject(audio_in, "format", in_fmt);
+    cJSON_AddStringToObject(in_fmt, "type", "audio/pcm");
+    cJSON_AddNumberToObject(in_fmt, "rate", 24000);
+    cJSON *transcription = cJSON_CreateObject();
+    cJSON_AddItemToObject(audio_in, "transcription", transcription);
+    cJSON_AddStringToObject(transcription, "model", "gpt-4o-mini-transcribe");
+    cJSON *turn_detect = cJSON_CreateObject();
+    cJSON_AddItemToObject(audio_in, "turn_detection", turn_detect);
+    cJSON_AddStringToObject(turn_detect, "type", "semantic_vad");
+    cJSON_AddStringToObject(turn_detect, "eagerness", "low");
 
     char *json_string = cJSON_Print(root);
     if (json_string) {

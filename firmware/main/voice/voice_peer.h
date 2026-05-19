@@ -21,6 +21,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -90,6 +91,24 @@ int voice_peer_send_text(const char *text);
  * ESP_PEER_ERR_NONE (0) on success.
  */
 int voice_peer_send_dc_json(const char *json);
+
+/*
+ * Send an Opus-encoded audio frame upstream to the peer.
+ *
+ * Wraps esp_peer_send_audio so voice_mic doesn't have to touch the
+ * peer handle directly. The buffer is owned by the caller and must
+ * remain valid until this returns. Returns 0 on success,
+ * ESP_PEER_ERR_WOULD_BLOCK if the send queue is full (voice_mic
+ * should drop the frame and continue), or other negative values
+ * on failure.
+ */
+int voice_peer_send_audio_frame(const uint8_t *buf, int size);
+
+/*
+ * True between successful voice_peer_start and voice_peer_stop.
+ * Used by voice_mic's task loop to know when to stop pumping
+ * samples (so we don't push frames into a torn-down peer). */
+bool voice_peer_is_running(void);
 
 /*
  * True once the peer reached ESP_PEER_STATE_DATA_CHANNEL_OPENED.
