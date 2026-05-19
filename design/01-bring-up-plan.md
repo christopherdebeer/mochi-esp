@@ -297,6 +297,58 @@ peripherals in parallel rather than serially:
   brings up the audio half via the canonical embedded path.
   Architecture lives in `07-voice-architecture.md`.
 
+  **Status (as of 2026-05-19) — bidirectional voice working
+  end-to-end.** Long-press centre starts a session; mochi greets
+  the user with their real persona (fetched from
+  `mochi.val.run/api/voice/realtime-instructions`); user speaks;
+  mochi hears + responds in voice. Substeps:
+  - **M9.a** ✅ codec_board ES8311 init via vendored
+    `WAVESHARE_S3_EPAPER_1_54` board entry.
+  - **M9.b** ✅ vendor `i2c_bsp` retired; all I²C consumers
+    co-exist via `firmware/main/i2c_bus.{cpp,h}`.
+  - **M9.c** ✅ captive portal collects BYO OpenAI key into NVS.
+  - **M9.d** ✅ NVS-loaded BYO key mints an ephemeral
+    Realtime-API token (GA, `/v1/realtime/client_secrets`).
+  - **M9.e** ✅ `esp_peer`-direct glue: signaling pump,
+    main-loop worker, manual DCEP open. Reaches
+    `DATA_CHANNEL_OPENED` + first `session.created` event.
+  - **M9.f.1** ✅ long-press voice trigger; full session config
+    in mint body; Opus playback through ES8311.
+  - **M9.f.1.5** ✅ phase-driven pet expression (curious /
+    comforted / cheerful_wave / neutral); centre-tap-during-
+    session sends a fixed text talk-back over the data channel.
+  - **M9.f.1.6** ✅ idle-cap (60 s silence) + hard-cap (5 min)
+    + remote-disconnect handling; touch-loop polls
+    `voice::stop_requested()` so caps don't deadlock the worker
+    on its own join.
+  - **M9.f.2** ✅ mic capture loop. ES8311 → Opus encode @ VOIP
+    24 kHz/20 ms → `esp_peer_send_audio`. Mint body includes
+    `audio.input` config: PCM 24 kHz format, server-side
+    `gpt-4o-mini-transcribe` STT, `semantic_vad` with
+    `eagerness=low`.
+  - **M9.f.2.1** ✅ half-duplex mic-mute during SPEAKING phase
+    (defence-in-depth against feedback loops without AEC);
+    user + assistant transcripts captured into the diag log.
+  - **M9.g** ✅ persona fetch from
+    `GET /api/voice/realtime-instructions` (re-introduced
+    server-side route in mochi-val for the device path; the
+    browser client retired its server counterpart in the
+    "no keys on server" cleanup wave but the device has no JS
+    runtime so it needs the server build).
+  - **M9.h** ✅ tool-call routing. Async dispatch worker POSTs
+    to `mochi.val.run/api/voice/tool` and feeds the result back
+    to OpenAI as `function_call_output` + `response.create`.
+    All 12 tools route the same way.
+
+  **Remaining for full M9 acceptance.**
+  - Software-reference AEC (the half-duplex mute is a stop-gap;
+    full-duplex barge-in needs AFE_VC fed our I²S output as the
+    reference channel).
+  - 5-min stability soak across the acceptance criteria below.
+  - End-to-end on-hardware tool-call validation (M9.h is wired
+    + builds + the dispatcher worker started OK in test logs;
+    not yet observed firing a real tool against val.run).
+
   **Why this is the shape.** Espressif maintains
   `espressif/esp-webrtc-solution` as a managed component (v1.0 GA),
   and the bundled `openai_demo` solution targets ESP32-S3 talking

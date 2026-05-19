@@ -45,7 +45,11 @@
     voice_diag_log("ERR: " fmt, ##__VA_ARGS__); \
 } while (0)
 
-#define MIC_TASK_STACK_BYTES   (8 * 1024)
+/* Opus encoder state machines + esp_codec_dev_read internals push
+ * the per-frame stack high water mark well past the 8 KB I tried
+ * first (panic on first encode call). 16 KB is the mochi-val
+ * reference value for the equivalent Korvo task. */
+#define MIC_TASK_STACK_BYTES   (16 * 1024)
 #define MIC_TASK_PRIO          5
 
 /* Match the mint's audio.input.format. gpt-realtime wants 24 kHz. */
