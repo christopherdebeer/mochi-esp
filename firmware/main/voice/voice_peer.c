@@ -51,6 +51,7 @@
 #include "voice_diag.h"
 #include "voice_tools.h"
 #include "voice_mic.h"
+#include "voice_aec.h"
 
 #define TAG "voice_peer"
 
@@ -243,9 +244,17 @@ static void open_audio_playback(uint32_t sample_rate, uint8_t channel) {
     s_peer.play_open = true;
     LOGI_DIAG("playback open: %lu Hz, %d ch",
         (unsigned long)sample_rate, channel);
+
+    /* Stand up the software-reference AEC alongside playback. The
+     * module allocates its ref ring here but stays disabled until
+     * voice_aec_set_enabled(true) — see voice_aec.c § "Build gate". */
+    if (!voice_aec_init((int)sample_rate, channel)) {
+        LOGW_DIAG("voice_aec_init failed; mute-only echo defence");
+    }
 }
 
 static void close_audio_playback(void) {
+    voice_aec_deinit();
     if (s_peer.play_open && s_peer.play_dev) {
         esp_codec_dev_close(s_peer.play_dev);
         s_peer.play_open = false;
@@ -760,6 +769,13 @@ static int pc_on_audio_data(esp_peer_audio_frame_t *info, void *ctx) {
         }
         if (out.decoded_size > 0) {
             s_aud_pcm_bytes += out.decoded_size;
+            /* Reference tap for software AEC. The exact PCM about to
+             * hit the speaker is the cleanest reference signal we can
+             * give the canceller — taken here before any codec-side
+             * processing or DMA framing. No-op when voice_aec is
+             * disabled or not inited. */
+            voice_aec_push_ref((const int16_t *)s_peer.pcm_out_buf,
+                (size_t)(out.decoded_size / sizeof(int16_t)));
             int wrc = esp_codec_dev_write(s_peer.play_dev,
                 s_peer.pcm_out_buf, (int)out.decoded_size);
             if (wrc != 0) {

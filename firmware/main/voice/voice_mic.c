@@ -30,6 +30,7 @@
 #include "esp_opus_enc.h"
 #include "esp_peer_types.h"   /* ESP_PEER_ERR_WOULD_BLOCK */
 #include "voice_peer.h"       /* voice_peer_phase() — for half-duplex gate */
+#include "voice_aec.h"
 
 #define TAG "voice_mic"
 
@@ -215,6 +216,14 @@ static void mic_task(void *arg) {
             continue;
         }
         s_pcm_frames++;
+
+        /* Software-reference AEC. When enabled, runs the mic frame
+         * against the ring of decoded speaker PCM that voice_peer's
+         * pc_on_audio_data has been depositing. Returns the cancelled
+         * mic in place; no-op when disabled. The half-duplex mute
+         * below stays as the safety net during AEC bring-up. */
+        voice_aec_process_in_place((int16_t *)s_pcm_buf,
+            (size_t)(s_in_bytes / (int)sizeof(int16_t)));
 
         /* Half-duplex AEC stop-gap: while mochi is speaking — and for
          * a tail window after the last audio frame, while the speaker
