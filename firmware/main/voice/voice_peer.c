@@ -107,15 +107,28 @@ static const char *phase_name(voice_phase_t p) {
 #define VOICE_IDLE_CAP_MS     (60   * 1000)
 #define VOICE_HARD_CAP_MS     (5    * 60 * 1000)
 
-/* Max time after `response.done` to keep mic muted while waiting for
- * `output_audio_buffer.stopped`. The server can take ~10 s to send
- * `buffer.stopped` (it pads its estimate of our codec drain), and we
- * don't want to lock the user out of the conversation for that long.
- * 1500 ms covers the actual I²S DMA + speaker drain on our hardware.
+/* How long to keep the mic muted after the last "loud" audio frame
+ * received from the server. Loud = Opus packet > VOICE_DTX_FRAME_BYTES,
+ * i.e., real voice rather than 3-byte comfort-noise / DTX. This is
+ * the right signal because:
+ *   - response.done fires when the model finishes _generating_, but
+ *     the server keeps streaming audio into our buffer for a while
+ *     after that (and our I²S DMA is still draining). Gating on
+ *     phase = SPEAKING under-shoots.
+ *   - output_audio_buffer.stopped is the server's _estimate_ of when
+ *     we're done playing — it pads heavily (often 10 s late). Gating
+ *     on that over-shoots and locks the user out of the conversation.
+ *   - Last-loud-frame plus a fixed drain window tracks real playback.
  *
- * If `buffer.stopped` arrives sooner, phase flips to READY and we
- * unmute immediately. */
-#define VOICE_RESPONSE_DONE_MUTE_MS  1500
+ * 700 ms ≈ I²S DMA drain (~100 ms typical) + speaker decay + a small
+ * margin. Tunable. */
+#define VOICE_LOUD_DRAIN_MS    700
+
+/* Opus packet size threshold below which we treat a frame as DTX /
+ * comfort noise. The Opus DTX packet is 3 bytes; we add a couple of
+ * bytes of slack in case the server uses slightly larger silence-frame
+ * encodings. Real voice frames at 24 kbps / 20 ms run ~60 B. */
+#define VOICE_DTX_FRAME_BYTES  5
 
 /* Caps the first-event log so we don't dump megabytes if OpenAI
  * sends something unexpected. */
@@ -483,40 +496,24 @@ static int pc_on_data(esp_peer_data_frame_t *frame, void *ctx) {
         LOGI_DIAG("dc event type=%s size=%d", type_buf, body_len);
     }
 
-    /* Phase transitions driven by specific event types.
+    /* Phase transitions driven by specific event types. The mic-mute
+     * deadline is driven by the audio path itself (last loud Opus frame
+     * + drain window — see VOICE_LOUD_DRAIN_MS), not by these events,
+     * because event-driven gating either over- or under-shoots the
+     * actual speaker drain.
      *
-     *   output_audio_buffer.started → SPEAKING (mic muted)
-     *   response.done               → arm tail-mute deadline (covers
-     *                                 codec drain), don't drop phase
-     *                                 yet — speaker is still playing
-     *   output_audio_buffer.stopped → READY (mic unmuted), clear
-     *                                 tail-mute deadline
-     *
-     * The server's `buffer.stopped` arrives ~10 s after `response.done`
-     * (server pads for our codec drain). If we held the mic muted for
-     * that whole window the user would be locked out of the
-     * conversation, so we cap the post-`response.done` mute at
-     * VOICE_RESPONSE_DONE_MUTE_MS via the deadline below. */
+     *   output_audio_buffer.started → SPEAKING (UI hint)
+     *   response.done               → READY (so UI can move on)
+     *   output_audio_buffer.stopped → READY (server's late "done")
+     */
     if (event_type_is(body, body_len, "output_audio_buffer.started")) {
         set_phase(VOICE_PHASE_SPEAKING);
-        atomic_store(&s_peer.tail_mute_until_us, 0LL);
-    } else if (event_type_is(body, body_len, "output_audio_buffer.stopped")) {
+    } else if (event_type_is(body, body_len, "output_audio_buffer.stopped") ||
+               event_type_is(body, body_len, "response.done")) {
         voice_phase_t cur = (voice_phase_t)atomic_load(&s_peer.phase);
         if (cur == VOICE_PHASE_SPEAKING) {
             set_phase(VOICE_PHASE_READY);
         }
-        atomic_store(&s_peer.tail_mute_until_us, 0LL);
-    } else if (event_type_is(body, body_len, "response.done")) {
-        /* Drop phase to READY now (so the UI can move on), but arm a
-         * short tail-mute deadline so the I²S/speaker drain doesn't
-         * leak back into the mic and re-trigger server VAD. */
-        voice_phase_t cur = (voice_phase_t)atomic_load(&s_peer.phase);
-        if (cur == VOICE_PHASE_SPEAKING) {
-            set_phase(VOICE_PHASE_READY);
-        }
-        int64_t deadline_us = esp_timer_get_time()
-            + (int64_t)VOICE_RESPONSE_DONE_MUTE_MS * 1000;
-        atomic_store(&s_peer.tail_mute_until_us, (long long)deadline_us);
     }
 
     /* ── Tool call routing (M9.h) ──
@@ -705,7 +702,16 @@ static int pc_on_audio_data(esp_peer_audio_frame_t *info, void *ctx) {
     }
 
     s_aud_recv_n++;
-    atomic_store(&s_peer.last_audio_us, (long long)esp_timer_get_time());
+    int64_t now_us = esp_timer_get_time();
+    atomic_store(&s_peer.last_audio_us, (long long)now_us);
+    /* Keep the mic muted past the real speaker drain. See
+     * VOICE_LOUD_DRAIN_MS for rationale. Gating on info->size > DTX
+     * threshold means silence frames don't extend the deadline — we
+     * unmute as soon as the server stops sending real voice. */
+    if (info->size > VOICE_DTX_FRAME_BYTES) {
+        atomic_store(&s_peer.tail_mute_until_us,
+            (long long)(now_us + (int64_t)VOICE_LOUD_DRAIN_MS * 1000));
+    }
 
     /* Log the TOC byte of the first few frames — Opus's first byte
      * encodes config (bandwidth + frame size) + channel + frame count.
