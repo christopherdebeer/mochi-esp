@@ -107,14 +107,15 @@ static const char *phase_name(voice_phase_t p) {
 #define VOICE_IDLE_CAP_MS     (60   * 1000)
 #define VOICE_HARD_CAP_MS     (5    * 60 * 1000)
 
-/* How long to keep mic muted after the LAST received audio frame. The
- * codec's I²S DMA buffers + speaker drain time mean output continues
- * for several hundred ms past the last decoded frame; if we unmute too
- * soon, the mic picks up that tail and the server's VAD interprets it
- * as new user speech, interrupting the response we just played. 800 ms
- * is conservative but speaker→mic crosstalk is the dominant failure
- * mode without proper AEC. */
-#define VOICE_TAIL_MUTE_MS    800
+/* Max time after `response.done` to keep mic muted while waiting for
+ * `output_audio_buffer.stopped`. The server can take ~10 s to send
+ * `buffer.stopped` (it pads its estimate of our codec drain), and we
+ * don't want to lock the user out of the conversation for that long.
+ * 1500 ms covers the actual I²S DMA + speaker drain on our hardware.
+ *
+ * If `buffer.stopped` arrives sooner, phase flips to READY and we
+ * unmute immediately. */
+#define VOICE_RESPONSE_DONE_MUTE_MS  1500
 
 /* Caps the first-event log so we don't dump megabytes if OpenAI
  * sends something unexpected. */
@@ -482,23 +483,40 @@ static int pc_on_data(esp_peer_data_frame_t *frame, void *ctx) {
         LOGI_DIAG("dc event type=%s size=%d", type_buf, body_len);
     }
 
-    /* Phase transitions driven by specific event types:
-     *   output_audio_buffer.started → SPEAKING
-     *   output_audio_buffer.stopped → READY
-     *   response.done is also a strong "back to idle between turns"
-     *   signal — covers cases where the buffer.stopped doesn't fire.
-     */
+    /* Phase transitions driven by specific event types.
+     *
+     *   output_audio_buffer.started → SPEAKING (mic muted)
+     *   response.done               → arm tail-mute deadline (covers
+     *                                 codec drain), don't drop phase
+     *                                 yet — speaker is still playing
+     *   output_audio_buffer.stopped → READY (mic unmuted), clear
+     *                                 tail-mute deadline
+     *
+     * The server's `buffer.stopped` arrives ~10 s after `response.done`
+     * (server pads for our codec drain). If we held the mic muted for
+     * that whole window the user would be locked out of the
+     * conversation, so we cap the post-`response.done` mute at
+     * VOICE_RESPONSE_DONE_MUTE_MS via the deadline below. */
     if (event_type_is(body, body_len, "output_audio_buffer.started")) {
         set_phase(VOICE_PHASE_SPEAKING);
-    } else if (event_type_is(body, body_len, "output_audio_buffer.stopped") ||
-               event_type_is(body, body_len, "response.done")) {
-        /* Only step back to READY if we were SPEAKING; a spurious
-         * response.done before any audio shouldn't downgrade phase
-         * (e.g., empty response, error response). */
+        atomic_store(&s_peer.tail_mute_until_us, 0LL);
+    } else if (event_type_is(body, body_len, "output_audio_buffer.stopped")) {
         voice_phase_t cur = (voice_phase_t)atomic_load(&s_peer.phase);
         if (cur == VOICE_PHASE_SPEAKING) {
             set_phase(VOICE_PHASE_READY);
         }
+        atomic_store(&s_peer.tail_mute_until_us, 0LL);
+    } else if (event_type_is(body, body_len, "response.done")) {
+        /* Drop phase to READY now (so the UI can move on), but arm a
+         * short tail-mute deadline so the I²S/speaker drain doesn't
+         * leak back into the mic and re-trigger server VAD. */
+        voice_phase_t cur = (voice_phase_t)atomic_load(&s_peer.phase);
+        if (cur == VOICE_PHASE_SPEAKING) {
+            set_phase(VOICE_PHASE_READY);
+        }
+        int64_t deadline_us = esp_timer_get_time()
+            + (int64_t)VOICE_RESPONSE_DONE_MUTE_MS * 1000;
+        atomic_store(&s_peer.tail_mute_until_us, (long long)deadline_us);
     }
 
     /* ── Tool call routing (M9.h) ──
@@ -687,13 +705,7 @@ static int pc_on_audio_data(esp_peer_audio_frame_t *info, void *ctx) {
     }
 
     s_aud_recv_n++;
-    int64_t now_us = esp_timer_get_time();
-    atomic_store(&s_peer.last_audio_us, (long long)now_us);
-    /* Extend the tail-mute deadline. voice_mic checks this on every
-     * frame; while the deadline is in the future, mic frames are
-     * dropped (same as during phase=SPEAKING). */
-    atomic_store(&s_peer.tail_mute_until_us,
-        (long long)(now_us + (int64_t)VOICE_TAIL_MUTE_MS * 1000));
+    atomic_store(&s_peer.last_audio_us, (long long)esp_timer_get_time());
 
     /* Log the TOC byte of the first few frames — Opus's first byte
      * encodes config (bandwidth + frame size) + channel + frame count.
