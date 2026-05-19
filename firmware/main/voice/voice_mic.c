@@ -28,6 +28,7 @@
 #include "esp_codec_dev.h"
 #include "esp_opus_enc.h"
 #include "esp_peer_types.h"   /* ESP_PEER_ERR_WOULD_BLOCK */
+#include "voice_peer.h"       /* voice_peer_phase() — for half-duplex gate */
 
 #define TAG "voice_mic"
 
@@ -80,6 +81,7 @@ static uint32_t s_send_ok;
 static uint32_t s_send_err;
 static uint32_t s_send_block;
 static uint32_t s_read_err;
+static uint32_t s_muted_frames;   /* frames dropped because mochi was speaking */
 
 static bool open_record(void) {
     s_record_dev = get_record_handle();
@@ -160,6 +162,7 @@ static void mic_task(void *arg) {
     LOGI_DIAG("mic_task started");
     s_pcm_frames = s_enc_ok = s_enc_err = 0;
     s_send_ok = s_send_err = s_send_block = s_read_err = 0;
+    s_muted_frames = 0;
 
     while (atomic_load(&s_running)) {
         /* Bail early if the peer's been torn down — we don't want to
@@ -183,6 +186,23 @@ static void mic_task(void *arg) {
             continue;
         }
         s_pcm_frames++;
+
+        /* Half-duplex AEC stop-gap: while mochi is speaking, the
+         * speaker plays mochi's voice and the ES8311's single mic
+         * picks it up just like the user's voice. Without AEC, the
+         * server would see "mochi said X" → "user said X" → trigger
+         * an interruption / new turn, looping. Defence-in-depth on
+         * top of OpenAI's semantic_vad eagerness=low: just drop our
+         * mic frames while phase=SPEAKING. We still drain the I²S
+         * read above so the DMA buffers don't overrun.
+         *
+         * Cost: mochi can't be interrupted mid-utterance. That's a
+         * UX trade-off worth taking until we have proper software-
+         * reference AEC. */
+        if (voice_peer_phase() == VOICE_PHASE_SPEAKING) {
+            s_muted_frames++;
+            goto loop_tail;
+        }
 
         /* Encode. */
         esp_audio_enc_in_frame_t in = {
@@ -222,10 +242,12 @@ static void mic_task(void *arg) {
             }
         }
 
+    loop_tail:
         if (s_pcm_frames == 1 || (s_pcm_frames % 50) == 0) {
-            voice_diag_log("mic: read=%lu enc_ok=%lu enc_err=%lu "
+            voice_diag_log("mic: read=%lu muted=%lu enc_ok=%lu enc_err=%lu "
                 "snd_ok=%lu snd_blk=%lu snd_err=%lu",
                 (unsigned long)s_pcm_frames,
+                (unsigned long)s_muted_frames,
                 (unsigned long)s_enc_ok,
                 (unsigned long)s_enc_err,
                 (unsigned long)s_send_ok,
@@ -233,8 +255,9 @@ static void mic_task(void *arg) {
                 (unsigned long)s_send_err);
         }
     }
-    LOGI_DIAG("mic_task exit: read=%lu snd_ok=%lu snd_blk=%lu",
+    LOGI_DIAG("mic_task exit: read=%lu muted=%lu snd_ok=%lu snd_blk=%lu",
         (unsigned long)s_pcm_frames,
+        (unsigned long)s_muted_frames,
         (unsigned long)s_send_ok,
         (unsigned long)s_send_block);
     s_task = NULL;

@@ -573,6 +573,63 @@ static int pc_on_data(esp_peer_data_frame_t *frame, void *ctx) {
         cJSON_Delete(root);
     }
 
+    /* Transcript capture: log final user + assistant transcripts into
+     * the diag buffer so post-disconnect dumps show "what mochi heard"
+     * vs "what mochi said." Truncated to 200 chars to fit within the
+     * 4 KB diag cap. Both event types fire ONCE per turn.
+     *
+     *   conversation.item.done with role=user → user's transcribed
+     *     audio. content[].transcript is what STT produced.
+     *   response.output_audio_transcript.done → mochi's full reply
+     *     transcript at $.transcript.
+     */
+    if (strcmp(type_buf, "conversation.item.done") == 0 ||
+        strcmp(type_buf, "response.output_audio_transcript.done") == 0)
+    {
+        cJSON *root = cJSON_Parse(body);
+        if (root) {
+            if (strcmp(type_buf, "response.output_audio_transcript.done") == 0) {
+                cJSON *t = cJSON_GetObjectItemCaseSensitive(root, "transcript");
+                if (cJSON_IsString(t) && t->valuestring) {
+                    voice_diag_log("ASSISTANT: %.200s", t->valuestring);
+                }
+            } else {
+                /* conversation.item.done — only log when role=user.
+                 * Assistant items get logged via the response.* path
+                 * above; doing both would double-log mochi's reply. */
+                cJSON *item = cJSON_GetObjectItemCaseSensitive(root, "item");
+                if (cJSON_IsObject(item)) {
+                    cJSON *role = cJSON_GetObjectItemCaseSensitive(item, "role");
+                    if (cJSON_IsString(role) && role->valuestring &&
+                        strcmp(role->valuestring, "user") == 0) {
+                        cJSON *content = cJSON_GetObjectItemCaseSensitive(item, "content");
+                        if (cJSON_IsArray(content)) {
+                            cJSON *part = NULL;
+                            cJSON_ArrayForEach(part, content) {
+                                /* Audio-input parts carry transcript;
+                                 * text-input parts carry text. */
+                                cJSON *tr = cJSON_GetObjectItemCaseSensitive(
+                                    part, "transcript");
+                                if (cJSON_IsString(tr) && tr->valuestring) {
+                                    voice_diag_log("USER: %.200s", tr->valuestring);
+                                    break;
+                                }
+                                cJSON *tx = cJSON_GetObjectItemCaseSensitive(
+                                    part, "text");
+                                if (cJSON_IsString(tx) && tx->valuestring) {
+                                    voice_diag_log("USER (text): %.200s",
+                                        tx->valuestring);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            cJSON_Delete(root);
+        }
+    }
+
     return 0;
 }
 
