@@ -210,6 +210,18 @@ static int64_t now_ms_mono(void) {
     return esp_timer_get_time() / 1000LL;
 }
 
+/* Snapshot of the dev pet with decay applied up to `now`. The base
+ * struct (s_dev_pet) keeps its boot stats + stats_at; this returns a
+ * by-value copy with stats decayed to the current moment so
+ * project_mood sees realistic input over a long session. */
+static pet_t dev_pet_decayed(int64_t now_ms) {
+    pet_t snap = s_dev_pet;
+    age_t a = compute_age(snap.born_at, now_ms);
+    snap.stats = decay_stats(snap.stats, snap.stats_at,
+                             snap.asleep, a.days, now_ms);
+    return snap;
+}
+
 static void log_chip_info(void) {
     esp_chip_info_t chip;
     esp_chip_info(&chip);
@@ -1043,6 +1055,30 @@ extern "C" void app_main(void) {
         return true;
     };
 
+    /* M11.4 — substrate-driven resting expression. Resolves the
+     * pet's current sprite from project_mood + resolve_sprite over
+     * the decayed dev pet, then renders that. Falls back to
+     * "neutral" if the resolved sprite name doesn't have a cell on
+     * the server (render_with_expression returns false on fetch
+     * fail). The full M11.5 will replace this with a server-supplied
+     * scene contract; for now this is enough to make the substrate
+     * user-visible. */
+    auto render_resting = [&]() -> const char * {
+        int64_t now_ms = now_ms_mono();
+        pet_event_t slice[12];
+        size_t n = event_log_load_recent(slice, 12);
+        pet_t decayed = dev_pet_decayed(now_ms);
+        mood_t m = project_mood(&decayed, slice, n, now_ms);
+        age_t a = compute_age(decayed.born_at, now_ms);
+        sprite_key_t sk = resolve_sprite(&decayed, m, a.stage, now_ms);
+        const char *name = sprite_to_name(sk);
+        if (!name || !render_with_expression(name, false)) {
+            render_with_expression("neutral", false);
+            return "neutral";
+        }
+        return name;
+    };
+
     /*
      * Asleep render — used when the PWR-long-press gesture fires.
      * Same composition pipeline as the wake render, except:
@@ -1252,6 +1288,15 @@ extern "C" void app_main(void) {
     };
     voice::Phase last_voice_phase = voice::Phase::Idle;
 
+    /* M11.4 periodic refresh state. Re-resolve the resting sprite
+     * once a minute when the device is otherwise quiet; only push a
+     * new render to the panel if the resolved name actually changed
+     * since the last frame, so we don't burn e-paper cycles on
+     * unchanged content. */
+    constexpr int64_t SUBSTRATE_REFRESH_US = 60LL * 1000 * 1000;
+    int64_t last_substrate_us = esp_timer_get_time();
+    char last_resting_expr[32] = "neutral";
+
     while (true) {
         touch::Event ev;
         bool got_touch = touch::wait_event(&ev, 1000);
@@ -1341,7 +1386,39 @@ extern "C" void app_main(void) {
             }
         }
 
-        if (!got_touch) continue;
+        if (!got_touch) {
+            /* Idle tick. Once per SUBSTRATE_REFRESH_US, re-project the
+             * resting expression and only render if it changed. Skip
+             * during voice sessions (the phase machine owns the pet
+             * face there) and while the key portal is up (its own
+             * screen is current). */
+            int64_t now_us = esp_timer_get_time();
+            if (!voice::is_active() && !key_portal::active() &&
+                (now_us - last_substrate_us) >= SUBSTRATE_REFRESH_US) {
+                last_substrate_us = now_us;
+                int64_t now_ms = now_ms_mono();
+                pet_event_t slice[12];
+                size_t n = event_log_load_recent(slice, 12);
+                pet_t decayed = dev_pet_decayed(now_ms);
+                mood_t m = project_mood(&decayed, slice, n, now_ms);
+                age_t a = compute_age(decayed.born_at, now_ms);
+                sprite_key_t sk = resolve_sprite(&decayed, m, a.stage, now_ms);
+                const char *name = sprite_to_name(sk);
+                if (name && strcmp(name, last_resting_expr) != 0) {
+                    ESP_LOGI(TAG, "substrate refresh: %s → %s "
+                                  "(stats h%u/f%u/e%u eng=%.2f)",
+                        last_resting_expr, name,
+                        decayed.stats.happiness, decayed.stats.fullness,
+                        decayed.stats.energy,
+                        recent_engagement(slice, n, now_ms));
+                    if (render_with_expression(name, false)) {
+                        snprintf(last_resting_expr, sizeof(last_resting_expr),
+                                 "%s", name);
+                    }
+                }
+            }
+            continue;
+        }
 
         int64_t now_us = esp_timer_get_time();
         if (now_us - last_event_us < DEBOUNCE_US) continue;
@@ -1368,16 +1445,17 @@ extern "C" void app_main(void) {
         {
             pet_event_t slice[12];
             size_t n = event_log_load_recent(slice, 12);
-            mood_t m = project_mood(&s_dev_pet, slice, n, now_ms);
-            age_t a = compute_age(s_dev_pet.born_at, now_ms);
-            sprite_key_t sk = resolve_sprite(&s_dev_pet, m, a.stage, now_ms);
+            pet_t decayed = dev_pet_decayed(now_ms);
+            mood_t m = project_mood(&decayed, slice, n, now_ms);
+            age_t a = compute_age(decayed.born_at, now_ms);
+            sprite_key_t sk = resolve_sprite(&decayed, m, a.stage, now_ms);
             ESP_LOGI(TAG,
                 "pet_state: mood=%s sprite=%s age=%s(%lld) "
                 "stats=h%u/f%u/e%u eng=%.2f n_events=%u",
                 mood_to_name(m), sprite_to_name(sk),
                 age_stage_to_name(a.stage), (long long)a.days,
-                s_dev_pet.stats.happiness, s_dev_pet.stats.fullness,
-                s_dev_pet.stats.energy,
+                decayed.stats.happiness, decayed.stats.fullness,
+                decayed.stats.energy,
                 recent_engagement(slice, n, now_ms),
                 (unsigned)n);
         }
@@ -1489,7 +1567,15 @@ extern "C" void app_main(void) {
          * pet, not a half-finished transition. */
         vTaskDelay(pdMS_TO_TICKS(RESTING_AFTER_TAP_MS));
 
-        /* Settle back to neutral. Partial refresh again. */
-        render_with_expression("neutral", false);
+        /* Settle back to the substrate's current resting expression
+         * — driven by project_mood over the dev pet's decayed stats
+         * + recent events. Falls back to "neutral" inside
+         * render_resting if the projected sprite isn't fetchable.
+         * Cache the chosen name so the periodic-refresh path knows
+         * what's currently on the panel. */
+        const char *resting = render_resting();
+        snprintf(last_resting_expr, sizeof(last_resting_expr),
+                 "%s", resting ? resting : "neutral");
+        last_substrate_us = esp_timer_get_time();
     }
 }

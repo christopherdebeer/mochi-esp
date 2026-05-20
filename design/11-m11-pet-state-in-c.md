@@ -1,8 +1,10 @@
 # 11 — M11 scope: porting pet state to C
 
 **Status:** substrate landed 2026-05-20 (M11+M12 single push).
-M11.5 consumer pending — the M8.5 corner-icon UI still drives
-rendering directly. Numerical-equivalence tests against TS deferred.
+M11.4 follow-up landed same day: decay-on-tick + substrate-driven
+resting expression + 60 s periodic refresh. Full M11.5 (server-
+supplied scene contracts + intent router + compositor refactor)
+still pending. Numerical-equivalence tests against TS deferred.
 **Predecessor:** [01-bring-up-plan.md](./01-bring-up-plan.md) M11.
 **Successor:** [06-scene-contracts.md](./06-scene-contracts.md) (M11.5).
 
@@ -229,6 +231,37 @@ A hardcoded `s_dev_pet` (in `main.cpp`) stands in for M13's snapshot
 pull — `bornAt` 3 days ago, midfield stats, awake, no transient.
 Realistic enough to exercise all branches of `project_mood`.
 
+### M11.4 follow-up
+
+After the substrate landed, three small extensions made it user-
+visible without committing to the full M11.5 scene-contract work:
+
+- **Decay-on-tick** — `dev_pet_decayed(now_ms)` returns a by-value
+  copy of `s_dev_pet` with `decay_stats` applied to the boot stats.
+  Project-time call sites use this snapshot, so `pet_state`
+  log lines show stats falling over a long session.
+- **Substrate-driven resting expression** — the `render_resting`
+  lambda in `main.cpp` resolves a sprite via `project_mood +
+  resolve_sprite` and renders it instead of the hardcoded
+  `"neutral"` previously used after each tap. Falls back to
+  `"neutral"` if the resolved sprite name doesn't have a server-
+  side cell.
+- **Periodic refresh** — the touch loop's idle branch re-projects
+  every 60 s when the device is otherwise quiet (no voice,
+  no key portal). Only re-renders if the resolved sprite name
+  changed since the last frame, so e-paper cycles aren't burned
+  on unchanged content.
+
+This is **NOT** the full M11.5. It deliberately doesn't:
+
+- Take touch zones from a server-supplied scene contract.
+- Refactor the compositor to render multiple objects per scene.
+- Change `mood_to_sprite`'s hardcoded fork to a server-driven
+  lookup table.
+
+Those three are the substantive M11.5 work and will come as a
+separate, larger push.
+
 ### What's deliberately not done yet
 
 - **M13's bidi sync** — events stay device-local; the projection
@@ -238,6 +271,9 @@ Realistic enough to exercise all branches of `project_mood`.
   decision. Validation is "log line on hardware shows expected
   mood for the touch sequence I just made". A future iteration
   can add the fixture-dump script if drift becomes a concern.
+- **Full M11.5** — see above. The substrate is wired up; the
+  scene-contract loader / intent router / compositor refactor
+  has not started.
 
 ## What M11 explicitly does NOT do
 
