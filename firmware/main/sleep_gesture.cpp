@@ -8,6 +8,7 @@
 #include "esp_sleep.h"
 
 #include "board_pins.h"
+#include "epd_ui.h"
 
 namespace sleep_gesture {
 
@@ -16,8 +17,16 @@ static const char *TAG = "sleep_gesture";
 static constexpr int POLL_MS        = 100;
 static constexpr int HOLD_TARGET_MS = 3000;
 
+/* Grace window between "main observes requested()" and "watcher
+ * fires fallback render". Main polls touch events every 1000 ms,
+ * so anything > 1000 ms gives main a full poll cycle to claim the
+ * gesture before the fallback fires. 1500 ms is comfortable. */
+static constexpr int HANDOFF_GRACE_MS = 1500;
+
 static bool s_started = false;
 static volatile bool s_requested = false;
+static volatile bool s_handled = false;
+static epaper_driver_display *s_epd = nullptr;
 
 static bool pwr_held_alone() {
     /* Both PWR and BOOT are active-low (pull-up to 3.3V, pressed
@@ -51,6 +60,20 @@ static bool pwr_held_alone() {
     while (true) { vTaskDelay(portMAX_DELAY); }
 }
 
+/* Fallback "Asleep" screen rendered by the watcher itself when no
+ * one claims the gesture within HANDOFF_GRACE_MS. Used during
+ * provisioning, pair-wait, and any halt-loop in main — all the
+ * paths where the rich pet-sprite render isn't available because
+ * main never reaches its polling loop. */
+static void render_fallback(void) {
+    if (!s_epd) return;
+    epd_ui::clear(s_epd);
+    epd_ui::draw_text_centered(s_epd,  60, 2, "Asleep");
+    epd_ui::draw_text_centered(s_epd, 110, 1, "PWR to wake");
+    s_epd->EPD_Init();
+    s_epd->EPD_Display();
+}
+
 static void task(void *) {
     int held_ms = 0;
     int last_logged = -1;
@@ -71,11 +94,32 @@ static void task(void *) {
             }
 
             if (held_ms >= HOLD_TARGET_MS && !s_requested) {
-                ESP_LOGI(TAG, "PWR hold committed — main task will sleep");
+                ESP_LOGI(TAG, "PWR hold committed — handing off to main");
                 s_requested = true;
-                /* Don't sleep here; main does that after rendering.
-                 * Keep polling so we can re-fire if main misses
-                 * (it shouldn't — sleep is one-shot per boot). */
+
+                /* Hand-off window. Main's touch loop polls every
+                 * ~1000 ms; if it's there it'll see requested(),
+                 * call mark_handled(), and run the rich render
+                 * before committing. If we don't see mark_handled
+                 * within HANDOFF_GRACE_MS, main isn't around
+                 * (provisioning, pair-wait, halt loop) — fire the
+                 * fallback ourselves so the gesture reaches every
+                 * screen, not just the main one. */
+                int waited = 0;
+                while (waited < HANDOFF_GRACE_MS && !s_handled) {
+                    vTaskDelay(pdMS_TO_TICKS(POLL_MS));
+                    waited += POLL_MS;
+                }
+                if (s_handled) {
+                    /* Main owns the commit. Park forever — the
+                     * SoC is about to deep-sleep and this task
+                     * dies with it. */
+                    while (true) vTaskDelay(portMAX_DELAY);
+                }
+                ESP_LOGI(TAG, "no handler claimed gesture in %d ms — fallback",
+                    HANDOFF_GRACE_MS);
+                render_fallback();
+                commit_sleep();
             }
         } else {
             if (held_ms > 0 && held_ms >= 500) {
@@ -88,9 +132,14 @@ static void task(void *) {
     }
 }
 
-void start(void) {
+void mark_handled(void) {
+    s_handled = true;
+}
+
+void start(epaper_driver_display *epd) {
     if (s_started) return;
     s_started = true;
+    s_epd = epd;
     xTaskCreatePinnedToCore(task, "sleep_gesture",
         4096, nullptr, 2, nullptr, 1);
     ESP_LOGI(TAG, "watching for PWR 3 s hold");
