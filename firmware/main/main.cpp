@@ -295,10 +295,15 @@ extern "C" void app_main(void) {
     factory_reset::start(epd);
 
     /* Sleep watchdog. Like factory_reset but only fires on PWR
-     * alone (BOOT must not be held). Sets a flag main polls in the
-     * touch loop; we render the asleep screen ourselves so it has
-     * the full set of buffers in scope. */
-    sleep_gesture::start();
+     * alone (BOOT must not be held). Two paths:
+     *  - Rich: main's touch loop polls requested(), claims via
+     *    mark_handled(), then renders the pet's `sleeping` cell
+     *    over the current scene before commit_sleep().
+     *  - Fallback: if main is blocked (provisioning, pair-wait,
+     *    a halt loop), the watcher renders a generic "Asleep"
+     *    screen itself and commits — so the gesture is reachable
+     *    from every screen. We pass the epd here for that path. */
+    sleep_gesture::start(epd);
 
     /* NVS first; cred lookup decides which branch we take. */
     nvs_creds_init();
@@ -1164,9 +1169,11 @@ extern "C" void app_main(void) {
         /* Sleep gesture takes priority over touch. The wait_event
          * 1-second timeout means we check this at least once per
          * second even with no taps. When the long-press fires we
-         * render the asleep frame, then commit_sleep() — never
-         * returns. */
+         * claim it (so the watcher's fallback render doesn't race
+         * us), render the rich asleep frame, then commit_sleep()
+         * — never returns. */
         if (sleep_gesture::requested()) {
+            sleep_gesture::mark_handled();
             render_asleep();
             sleep_gesture::commit_sleep();
         }
