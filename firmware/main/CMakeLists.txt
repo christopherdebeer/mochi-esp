@@ -44,10 +44,12 @@ idf_component_register(
         "../vendor/waveshare-eink/epaper_driver_bsp.cpp"
         "../vendor/waveshare-eink/i2c_bsp.cpp"
         "../vendor/waveshare-eink/ft6336_bsp.cpp"
+        "../vendor/qrcodegen/qrcodegen.c"
     INCLUDE_DIRS
         "."
         "voice"
         "../vendor/waveshare-eink"
+        "../vendor/qrcodegen"
     EMBED_FILES
         "assets/splash.bin"
     REQUIRES

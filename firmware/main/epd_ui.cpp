@@ -1,14 +1,26 @@
 #include "epd_ui.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "board_pins.h"
 #include "font8x8.h"
+
+extern "C" {
+#include "qrcodegen.h"
+}
 
 namespace epd_ui {
 
 static constexpr int W = MOCHI_EPD_WIDTH;
 static constexpr int H = MOCHI_EPD_HEIGHT;
+
+/* maxVersion for QR encoding. V5 = 37×37 modules holds 106 bytes at
+ * ECC Low / 84 at ECC Medium — enough for both a WIFI: URI (~32
+ * chars) and our pair-device URL with embedded code (~52 chars).
+ * Bumping further wastes ~75 bytes of scratch per call without
+ * adding useful headroom; both payloads are bounded. */
+static constexpr int QR_MAX_VERSION = 5;
 
 void clear(epaper_driver_display *epd) {
     epd->EPD_Clear();
@@ -130,15 +142,124 @@ void overlay_boot_version(epaper_driver_display *epd, const char *version) {
     }
 }
 
+int draw_qr(epaper_driver_display *epd, int ox, int oy, int scale,
+            const char *text) {
+    if (!text || scale < 1) return 0;
+
+    const size_t buf_len = qrcodegen_BUFFER_LEN_FOR_VERSION(QR_MAX_VERSION);
+    uint8_t *qrcode = (uint8_t *)malloc(buf_len);
+    uint8_t *tmp    = (uint8_t *)malloc(buf_len);
+    if (!qrcode || !tmp) { free(qrcode); free(tmp); return 0; }
+
+    /* boostEcl=false so the version stays predictable given the
+     * payload — we sized our layout against the minimum version that
+     * fits the input, not whatever the encoder upsells us to. */
+    bool ok = qrcodegen_encodeText(
+        text, tmp, qrcode,
+        qrcodegen_Ecc_LOW,
+        qrcodegen_VERSION_MIN, QR_MAX_VERSION,
+        qrcodegen_Mask_AUTO, /*boostEcl=*/false);
+
+    int rendered = 0;
+    if (ok) {
+        int size = qrcodegen_getSize(qrcode);
+        int px   = size * scale;
+        if (ox >= 0 && oy >= 0 && ox + px <= W && oy + px <= H) {
+            for (int my = 0; my < size; my++) {
+                for (int mx = 0; mx < size; mx++) {
+                    if (!qrcodegen_getModule(qrcode, mx, my)) continue;
+                    int x0 = ox + mx * scale;
+                    int y0 = oy + my * scale;
+                    for (int dy = 0; dy < scale; dy++) {
+                        for (int dx = 0; dx < scale; dx++) {
+                            epd->EPD_DrawColorPixel(x0 + dx, y0 + dy,
+                                                    DRIVER_COLOR_BLACK);
+                        }
+                    }
+                }
+            }
+            rendered = px;
+        }
+    }
+
+    free(qrcode);
+    free(tmp);
+    return rendered;
+}
+
+int draw_qr_centered(epaper_driver_display *epd, int top_y,
+                     int target_px, const char *text) {
+    if (!text) return 0;
+
+    /* Probe-encode once to learn the chosen version → module count,
+     * pick the largest scale that fits target_px, then draw. */
+    const size_t buf_len = qrcodegen_BUFFER_LEN_FOR_VERSION(QR_MAX_VERSION);
+    uint8_t *qrcode = (uint8_t *)malloc(buf_len);
+    uint8_t *tmp    = (uint8_t *)malloc(buf_len);
+    if (!qrcode || !tmp) { free(qrcode); free(tmp); return 0; }
+
+    bool ok = qrcodegen_encodeText(
+        text, tmp, qrcode,
+        qrcodegen_Ecc_LOW,
+        qrcodegen_VERSION_MIN, QR_MAX_VERSION,
+        qrcodegen_Mask_AUTO, /*boostEcl=*/false);
+
+    int rendered = 0;
+    if (ok) {
+        int size = qrcodegen_getSize(qrcode);
+        int scale = target_px / size;
+        if (scale >= 1) {
+            int px = size * scale;
+            int ox = (W - px) / 2;
+            if (ox < 0) ox = 0;
+            for (int my = 0; my < size; my++) {
+                for (int mx = 0; mx < size; mx++) {
+                    if (!qrcodegen_getModule(qrcode, mx, my)) continue;
+                    int x0 = ox + mx * scale;
+                    int y0 = top_y + my * scale;
+                    if (y0 + scale > H) continue;
+                    for (int dy = 0; dy < scale; dy++) {
+                        for (int dx = 0; dx < scale; dx++) {
+                            epd->EPD_DrawColorPixel(x0 + dx, y0 + dy,
+                                                    DRIVER_COLOR_BLACK);
+                        }
+                    }
+                }
+            }
+            rendered = px;
+        }
+    }
+
+    free(qrcode);
+    free(tmp);
+    return rendered;
+}
+
 void render_prov_idle(epaper_driver_display *epd, const char *ssid) {
     clear(epd);
-    draw_text_centered(epd, 12, 2, "Hi! I'm Mochi.");
-    draw_text_centered(epd, 44, 1, "Join this WiFi");
-    draw_text_centered(epd, 60, 1, "from your phone:");
-    draw_text_centered(epd, 92, 2, ssid);
-    draw_text_centered(epd, 132, 1, "Then follow the");
-    draw_text_centered(epd, 148, 1, "captive portal.");
-    draw_text_centered(epd, 180, 1, "192.168.4.1");
+    draw_text_centered(epd, 4, 1, "Scan to join WiFi");
+
+    /* WIFI: URI for "join this open network" — iOS Camera and modern
+     * Android scanners recognise this scheme natively. T:nopass since
+     * the SoftAP runs open (the captive portal is the next gate). */
+    char uri[64];
+    snprintf(uri, sizeof(uri), "WIFI:T:nopass;S:%s;P:;H:false;;", ssid);
+
+    /* Target a 132 px box at y=20 — leaves ~30 px on either side as
+     * implicit quiet zone, and frees the bottom 48 px for the manual
+     * fallback. V2 (25 modules) at scale 4 = 100 px, well inside. */
+    int qr_px = draw_qr_centered(epd, 20, 132, uri);
+    int below_y = qr_px > 0 ? 20 + qr_px + 8 : 100;
+
+    if (qr_px == 0) {
+        /* Encoder failure path — fall back to the pre-QR text-only
+         * shape so the device is still usable. */
+        draw_text_centered(epd, 60, 2, "Hi! I'm Mochi.");
+        below_y = 100;
+    }
+
+    draw_text_centered(epd, below_y,     1, "Or join manually:");
+    draw_text_centered(epd, below_y + 16, 2, ssid);
 }
 
 void render_prov_connecting(epaper_driver_display *epd) {
@@ -207,16 +328,31 @@ void overlay_fetch_status(epaper_driver_display *epd, uint32_t elapsed_ms) {
 
 void render_pair_prompt(epaper_driver_display *epd, const char *code) {
     clear(epd);
-    draw_text_centered(epd, 12, 2, "Pair me!");
-    draw_text_centered(epd, 48, 1, "Visit on your phone:");
-    draw_text_centered(epd, 68, 1, "mochi.val.run");
-    draw_text_centered(epd, 84, 1, "/pair-device");
-    draw_text_centered(epd, 116, 1, "Enter this code:");
-    /* Code at scale 2 = 16-pixel-tall block. The MOCHI- prefix +
-     * 4 random chars = 10 chars * 16px = 160px wide, fits with
-     * 20px margin either side. */
-    draw_text_centered(epd, 144, 2, code);
-    draw_text_centered(epd, 180, 1, "(case insensitive)");
+    draw_text_centered(epd, 4, 1, "Scan to pair me");
+
+    /* Deep link with the code pre-baked so the phone form only needs
+     * name+PIN. mochi.val.run/pair-device reads ?code= and pre-fills
+     * the code field (see backend/device-pair.ts). The URL is 50–52
+     * chars depending on the code; encodes to QR V4 (33 modules) at
+     * ECC Low. */
+    char url[96];
+    snprintf(url, sizeof(url),
+             "https://mochi.val.run/pair-device?code=%s", code);
+
+    int qr_px = draw_qr_centered(epd, 18, 105, url);
+    int below_y = qr_px > 0 ? 18 + qr_px + 6 : 18;
+
+    if (qr_px == 0) {
+        /* Encoder failure path — keep the pre-QR text-only flow. */
+        draw_text_centered(epd, 18, 2, "Pair me!");
+        below_y = 60;
+    }
+
+    draw_text_centered(epd, below_y,      1, "Or visit on your phone:");
+    draw_text_centered(epd, below_y + 16, 1, "mochi.val.run/pair-device");
+    /* Code at scale 2 = 16-pixel-tall block. MOCHI- + 4 = 10 chars *
+     * 16 px = 160 px wide, fits with 20 px margin either side. */
+    draw_text_centered(epd, below_y + 38, 2, code);
 }
 
 void render_pair_success(epaper_driver_display *epd, const char *pet_name) {

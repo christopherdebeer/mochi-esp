@@ -176,7 +176,21 @@ void ota_task(void *) {
         }
 
         const char *running = ota_update::current_version();
-        if (strcmp(remote_version, running) == 0) {
+        /* Normalise both sides before comparing.
+         *
+         * Running version comes from esp_app_get_description()->version,
+         * which defaults to `git describe --tags --dirty`. On a clean
+         * tagged build that's "v0.0.3"; on the commit *after* a tag it's
+         * "v0.0.3-2-g3b284ff". The manifest version comes from the CI
+         * workflow's ${TAG#v} strip, so it's "0.0.3".
+         *
+         * Strip a leading 'v' from running, and treat any '-' suffix as
+         * a dev-build marker (always considered different from the
+         * manifest's clean release version, so devices on dirty builds
+         * upgrade to the clean tag). */
+        const char *running_norm = (running[0] == 'v') ? running + 1 : running;
+        const char *dash = strchr(running_norm, '-');
+        if (dash == nullptr && strcmp(remote_version, running_norm) == 0) {
             ESP_LOGI(TAG, "version unchanged (%s); sleeping", running);
             vTaskDelay(pdMS_TO_TICKS(OTA_CHECK_INTERVAL_MS));
             continue;
