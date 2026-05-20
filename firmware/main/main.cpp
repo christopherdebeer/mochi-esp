@@ -69,6 +69,7 @@ extern "C" {
 #include "event_log.h"
 #include "time_sync.h"
 }
+#include "pet_sync.h"
 
 /*
  * Endpoints for the on-device compositor. The scene is fetched once
@@ -210,12 +211,16 @@ static int64_t now_ms_wall(void) {
     return time_sync_now_ms();
 }
 
-/* Snapshot of the dev pet with decay applied up to `now`. The base
- * struct (s_dev_pet) keeps its boot stats + stats_at; this returns a
- * by-value copy with stats decayed to the current moment so
- * project_mood sees realistic input over a long session. */
-static pet_t dev_pet_decayed(int64_t now_ms) {
-    pet_t snap = s_dev_pet;
+/* Returns a decayed snapshot of whatever we currently know about the
+ * pet, preferring pet_sync's authoritative server snapshot when
+ * available and falling back to the M11 hardcoded dev pet otherwise.
+ * `now` runs decay forward from the snapshot's stats_at — same shape
+ * as the TS code does it. */
+static pet_t current_pet_decayed(int64_t now_ms) {
+    pet_t snap;
+    if (!pet_sync_get_snapshot(&snap)) {
+        snap = s_dev_pet;
+    }
     age_t a = compute_age(snap.born_at, now_ms);
     snap.stats = decay_stats(snap.stats, snap.stats_at,
                              snap.asleep, a.days, now_ms);
@@ -1090,7 +1095,7 @@ extern "C" void app_main(void) {
         int64_t now_ms = now_ms_wall();
         pet_event_t slice[12];
         size_t n = event_log_load_recent(slice, 12);
-        pet_t decayed = dev_pet_decayed(now_ms);
+        pet_t decayed = current_pet_decayed(now_ms);
         mood_t m = project_mood(&decayed, slice, n, now_ms);
         age_t a = compute_age(decayed.born_at, now_ms);
         sprite_key_t sk = resolve_sprite(&decayed, m, a.stage, now_ms);
@@ -1263,9 +1268,26 @@ extern "C" void app_main(void) {
         }
     };
 
-    /* Initialise the M11 dev pet snapshot now that we have a wall-
-     * clock-ish anchor. M13 will replace this with a server pull. */
-    init_dev_pet(now_ms_wall());
+    /* M13a — pull the real pet snapshot from the server. If it
+     * succeeds, pet_sync internally caches the result and
+     * pet_sync_get_snapshot below will return it. If it fails (no
+     * pairing, network down, server 5xx) we fall back to the M11
+     * hardcoded dev pet so the substrate keeps demoing.
+     *
+     * The pull must come AFTER time_sync_init so X-Pet-Id auth +
+     * TLS cert validation work; both need real wall time. */
+    {
+        pet_t snapshot;
+        pet_event_t evs[12];
+        size_t n = 0;
+        if (!pet_sync_pull_now(&snapshot, evs,
+                               sizeof(evs)/sizeof(evs[0]), &n)) {
+            ESP_LOGW(TAG, "state pull failed; using hardcoded dev pet");
+            init_dev_pet(now_ms_wall());
+        }
+    }
+    /* Spin up the push worker + periodic-resync task. Idempotent. */
+    pet_sync_start();
 
     touch::init();
     int64_t last_event_us = 0;
@@ -1422,7 +1444,7 @@ extern "C" void app_main(void) {
                 int64_t now_ms = now_ms_wall();
                 pet_event_t slice[12];
                 size_t n = event_log_load_recent(slice, 12);
-                pet_t decayed = dev_pet_decayed(now_ms);
+                pet_t decayed = current_pet_decayed(now_ms);
                 mood_t m = project_mood(&decayed, slice, n, now_ms);
                 age_t a = compute_age(decayed.born_at, now_ms);
                 sprite_key_t sk = resolve_sprite(&decayed, m, a.stage, now_ms);
@@ -1462,13 +1484,31 @@ extern "C" void app_main(void) {
         event_kind_t kind = zone_to_event(z);
         int64_t now_ms = now_ms_wall();
         if (kind != EVENT_NONE) {
+            /* M12 local log — kept as the source for engagement
+             * projection until the next /api/state pull lands.
+             * After M13 the projection draws from the union of the
+             * server slice + local-not-yet-pushed events; for now
+             * the local log is the simpler input. */
             event_log_append(kind, now_ms);
+            /* M13b — enqueue for /api/mutate POST. The push worker
+             * drains this asynchronously so touch handling stays
+             * responsive even on a slow TLS handshake. The mutate
+             * response refreshes pet_sync's snapshot, so the next
+             * projection sees server-canonical stats. */
+            pet_sync_enqueue(kind, now_ms);
+            /* Bump the in-memory snapshot's last_interaction_at
+             * immediately so loneliness resets without waiting for
+             * the round-trip. The mutate response will overwrite
+             * with the authoritative value shortly. */
+            pet_sync_touch(now_ms);
+            /* Keep the dev-pet fallback in sync too, so projection
+             * is consistent if the server sync drops out mid-session. */
             s_dev_pet.last_interaction_at = now_ms;
         }
         {
             pet_event_t slice[12];
             size_t n = event_log_load_recent(slice, 12);
-            pet_t decayed = dev_pet_decayed(now_ms);
+            pet_t decayed = current_pet_decayed(now_ms);
             mood_t m = project_mood(&decayed, slice, n, now_ms);
             age_t a = compute_age(decayed.born_at, now_ms);
             sprite_key_t sk = resolve_sprite(&decayed, m, a.stage, now_ms);
@@ -1551,8 +1591,11 @@ extern "C" void app_main(void) {
                      * strongest engagement signal in shared/engagement.ts.
                      * Single-event-per-session for now; M13's bidi
                      * sync may want finer-grained per-turn entries. */
-                    event_log_append(EVENT_TALKED, now_ms_wall());
-                    s_dev_pet.last_interaction_at = now_ms_wall();
+                    int64_t talked_at = now_ms_wall();
+                    event_log_append(EVENT_TALKED, talked_at);
+                    pet_sync_enqueue(EVENT_TALKED, talked_at);
+                    pet_sync_touch(talked_at);
+                    s_dev_pet.last_interaction_at = talked_at;
                     /* Drain pending touch events that piled up while
                      * start_session was blocked on the mint round-trip
                      * (~2.4 s). Without this, the still-held finger
