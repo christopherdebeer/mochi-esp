@@ -1072,15 +1072,28 @@ voice_phase_t voice_peer_phase(void) {
 }
 
 bool voice_peer_mic_should_mute(void) {
-    /* AEC active → mute steps aside. The whole point of M9.f.3 is
-     * to get barge-in back, and the half-duplex mute as tuned was
-     * over-muting (cutting the user off during the speaker drain
-     * tail and any DTX-comfort-noise window). When AEC is engaged
-     * the canceller is responsible for echo; mute is only the
-     * fallback for when voice_aec_init / aec_create has failed. */
-    if (voice_aec_is_enabled()) {
-        return false;
-    }
+    /* Belt-and-braces: AEC handles long-tail echo while the user is
+     * actively talking, tail-mute handles the brief silence right
+     * after mochi finishes a turn. They're complementary, not
+     * redundant.
+     *
+     * Earlier we short-circuited mute to `false` whenever AEC was
+     * enabled, but a hardware test (2026-05-20 dump showed
+     * `fail=500 skip=1001 under=144480` from the AEC counters) made
+     * it clear the canceller is intermittently failing — half the
+     * frames go through unfiltered. With no tail-mute, the speaker's
+     * last few hundred ms loops into the mic and the server's VAD
+     * fires `input_audio_buffer.speech_started` 2 ms after every
+     * `response.done`, self-interrupting every turn.
+     *
+     * Letting tail-mute fire even when AEC is up:
+     *   - doesn't hurt barge-in: the tail window only covers the
+     *     ~700 ms after mochi's last loud frame, which is when the
+     *     user wouldn't be naturally interrupting yet anyway.
+     *   - covers AEC's intermittent fail/skip cases on the same
+     *     timescale as the speaker drain.
+     *   - keeps the SPEAKING-phase mute as the strong gate during
+     *     mochi's actual utterance. */
     if ((voice_phase_t)atomic_load(&s_peer.phase) == VOICE_PHASE_SPEAKING) {
         return true;
     }
