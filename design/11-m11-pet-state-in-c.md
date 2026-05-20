@@ -1,6 +1,8 @@
 # 11 — M11 scope: porting pet state to C
 
-**Status:** scoping, 2026-05-20. Pre-implementation review.
+**Status:** substrate landed 2026-05-20 (M11+M12 single push).
+M11.5 consumer pending — the M8.5 corner-icon UI still drives
+rendering directly. Numerical-equivalence tests against TS deferred.
 **Predecessor:** [01-bring-up-plan.md](./01-bring-up-plan.md) M11.
 **Successor:** [06-scene-contracts.md](./06-scene-contracts.md) (M11.5).
 
@@ -195,6 +197,47 @@ explicit cell — so M11 lands without breaking M8.5.
 Total: ~15 hours of focused work. Comparable to M8 (SHTC3) in
 scope, simpler in surprise budget (all pure functions, no
 peripherals).
+
+## Implementation notes (2026-05-20)
+
+Shipped together with M12 in a single coordinated push, per the
+"interleaved single push" decision. Concrete shape:
+
+- `pet_state.h` — substrate types: `pet_stats_t`, `mood_t`,
+  `sprite_key_t`, `age_stage_t`, `age_t`, `event_kind_t`,
+  `pet_event_t`, `transient_mood_t`, `pet_t`. C99 enums + plain
+  PODs; no statics, no allocations.
+- `decay.{h,c}` — `age_multiplier`, `decay_stats`, `compute_age`.
+  Values match `shared/decay.ts` constants verbatim.
+- `engagement.{h,c}` — `recent_engagement` + `ENGAGEMENT_FLOOR`.
+  Weight table indexed by `event_kind_t`.
+- `mood.{h,c}` — `project_mood`, `resolve_sprite`, `mood_to_sprite`,
+  `mood_to_name`, `sprite_to_name`, `mood_hint`, plus `event_kind_*_name`
+  helpers for diag logging and the eventual M13 wire format.
+- `event_log.{h,cpp}` — LittleFS-backed ring buffer, fixed-size
+  16 B records, 1024 capacity, single-mutex append. Mounts on the
+  same `storage` partition as the sprite cache.
+
+Wired into `main.cpp`: every touch event lands in the log via
+`event_log_append`, the dev pet's `last_interaction_at` is bumped,
+and `project_mood + resolve_sprite` runs on the resulting slice.
+The projected mood + sprite are logged alongside the existing
+"touch (...) zone=N expr=..." line so we can validate the pipeline
+on hardware before M11.5 actually consumes it.
+
+A hardcoded `s_dev_pet` (in `main.cpp`) stands in for M13's snapshot
+pull — `bornAt` 3 days ago, midfield stats, awake, no transient.
+Realistic enough to exercise all branches of `project_mood`.
+
+### What's deliberately not done yet
+
+- **M13's bidi sync** — events stay device-local; the projection
+  consumes the local slice only. No POST to `/api/events`.
+- **Server snapshot pull** — `s_dev_pet` is hardcoded.
+- **Numerical-equivalence tests** — skipped per the implementation
+  decision. Validation is "log line on hardware shows expected
+  mood for the touch sequence I just made". A future iteration
+  can add the fixture-dump script if drift becomes a concern.
 
 ## What M11 explicitly does NOT do
 

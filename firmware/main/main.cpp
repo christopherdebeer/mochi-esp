@@ -61,6 +61,13 @@ extern "C" {
 #include "sprite_cache.h"
 #include "ota_update.h"
 #include "key_portal.h"
+extern "C" {
+#include "pet_state.h"
+#include "decay.h"
+#include "engagement.h"
+#include "mood.h"
+#include "event_log.h"
+}
 
 /*
  * Endpoints for the on-device compositor. The scene is fetched once
@@ -158,6 +165,50 @@ static constexpr int SCENE_TOP_Y = STATUS_BAR_H;     /* icons + pet
                                                         live below this */
 
 static const char *TAG = "mochi";
+
+/* ─── M11/M12 substrate dev snapshot ──────────────────────────────
+ *
+ * Until M13's snapshot pull lands, the device has no real pet to
+ * project mood from. We use a hardcoded development pet here so the
+ * decay → engagement → mood pipeline has realistic input on
+ * hardware. Stats start a touch below "fresh" so all branches of
+ * project_mood are reachable with a few minutes of poking:
+ *
+ *   - happiness=72, fullness=58, energy=63 (above the soft floors,
+ *     so an unattended pet projects as content/curious initially)
+ *   - born_at = ~3 days before boot (age stage = "young", multiplier
+ *     ≈ 3.2× — needy enough to hit soft floors quickly)
+ *   - last_interaction_at = boot time, so loneliness only fires
+ *     after the age-scaled threshold (young: 24h / 3.2 ≈ 7.5h)
+ *
+ * stats_at = boot time means decay accumulates from that point.
+ * After ~30 min of unattended runtime the device transitions
+ * naturally through curious → hungry / tired and we can see
+ * project_mood return different values. */
+static pet_t s_dev_pet;
+
+static void init_dev_pet(int64_t now_ms) {
+    s_dev_pet.born_at             = now_ms - (3LL * 24 * 60 * 60 * 1000);
+    s_dev_pet.stats_at            = now_ms;
+    s_dev_pet.last_interaction_at = now_ms;
+    s_dev_pet.stats.happiness     = 72;
+    s_dev_pet.stats.fullness      = 58;
+    s_dev_pet.stats.energy        = 63;
+    s_dev_pet.asleep              = false;
+    s_dev_pet.transient.sprite    = SPRITE_NONE;
+    s_dev_pet.transient.until     = 0;
+}
+
+/* The substrate wants "ms since epoch" but for on-device-only
+ * projection we only care about relative ages. esp_timer is a
+ * monotonic boot-relative clock in microseconds — divide and use
+ * that. M13's snapshot-pull will need real epoch ms (the server's
+ * timestamps), and we'll switch to <time.h>'s `time()` × 1000 then;
+ * for now this keeps decay/engagement self-consistent without
+ * requiring an RTC ↔ ms-since-epoch shim. */
+static int64_t now_ms_mono(void) {
+    return esp_timer_get_time() / 1000LL;
+}
 
 static void log_chip_info(void) {
     esp_chip_info_t chip;
@@ -531,6 +582,10 @@ extern "C" void app_main(void) {
      * Idempotent — no-op if no session ran. */
     if (cache_ok) {
         voice_diag_dump_last();
+        /* M12 — bring up the on-device event log. Same partition,
+         * separate file (/lfs/events.bin). engagement.c reads the
+         * recent slice on every render via event_log_load_recent. */
+        event_log_init();
     }
 
     if (cache_ok) {
@@ -1134,6 +1189,25 @@ extern "C" void app_main(void) {
         }
     };
 
+    /* Same map as zone_to_expr, but in event-kind terms. Touch zones
+     * are care actions; the centre is just attention so it's a
+     * generic "tapped". Used to feed M12's event log on each tap so
+     * engagement.c has real input to project mood from. */
+    auto zone_to_event = [](Zone z) -> event_kind_t {
+        switch (z) {
+            case Zone::CornerTL: return EVENT_COMFORTED;
+            case Zone::CornerTR: return EVENT_CHEERED;
+            case Zone::CornerBL: return EVENT_FED;
+            case Zone::CornerBR: return EVENT_PLAYED;
+            case Zone::Center:   return EVENT_TAPPED;
+            default:             return EVENT_NONE;
+        }
+    };
+
+    /* Initialise the M11 dev pet snapshot now that we have a wall-
+     * clock-ish anchor. M13 will replace this with a server pull. */
+    init_dev_pet(now_ms_mono());
+
     touch::init();
     int64_t last_event_us = 0;
     constexpr int64_t DEBOUNCE_US = 200 * 1000;
@@ -1280,6 +1354,34 @@ extern "C" void app_main(void) {
             expr ? expr : "(gutter)");
         if (!expr) continue;
 
+        /* M11/M12: persist the touch as an event and refresh the dev
+         * pet's last_interaction_at so the lonely threshold resets.
+         * Then project mood + sprite over the recent slice and log
+         * what we'd render IF M11.5 was wired up (it isn't yet —
+         * the M8.5 corner-icon UI keeps using `expr` directly). */
+        event_kind_t kind = zone_to_event(z);
+        int64_t now_ms = now_ms_mono();
+        if (kind != EVENT_NONE) {
+            event_log_append(kind, now_ms);
+            s_dev_pet.last_interaction_at = now_ms;
+        }
+        {
+            pet_event_t slice[12];
+            size_t n = event_log_load_recent(slice, 12);
+            mood_t m = project_mood(&s_dev_pet, slice, n, now_ms);
+            age_t a = compute_age(s_dev_pet.born_at, now_ms);
+            sprite_key_t sk = resolve_sprite(&s_dev_pet, m, a.stage, now_ms);
+            ESP_LOGI(TAG,
+                "pet_state: mood=%s sprite=%s age=%s(%lld) "
+                "stats=h%u/f%u/e%u eng=%.2f n_events=%u",
+                mood_to_name(m), sprite_to_name(sk),
+                age_stage_to_name(a.stage), (long long)a.days,
+                s_dev_pet.stats.happiness, s_dev_pet.stats.fullness,
+                s_dev_pet.stats.energy,
+                recent_engagement(slice, n, now_ms),
+                (unsigned)n);
+        }
+
         /* Voice trigger: long-press of the centre-attention zone
          * starts a session; tap-anywhere while a session is running
          * stops it. Same gesture as design/07-voice-architecture.md
@@ -1344,6 +1446,12 @@ extern "C" void app_main(void) {
                 render_with_expression("curious", false);
                 last_voice_phase = voice::Phase::Connecting;
                 if (voice::start_session() == 0) {
+                    /* Log the voice turn as a "talked" event — the
+                     * strongest engagement signal in shared/engagement.ts.
+                     * Single-event-per-session for now; M13's bidi
+                     * sync may want finer-grained per-turn entries. */
+                    event_log_append(EVENT_TALKED, now_ms_mono());
+                    s_dev_pet.last_interaction_at = now_ms_mono();
                     /* Drain pending touch events that piled up while
                      * start_session was blocked on the mint round-trip
                      * (~2.4 s). Without this, the still-held finger
