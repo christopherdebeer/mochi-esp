@@ -90,6 +90,46 @@ void render_boot_splash(epaper_driver_display *epd) {
     epd->EPD_LoadBuffer((uint8_t *)splash_bin_start, len);
 }
 
+/* Stamp on-bits only, in the requested colour. Off-bits leave the
+ * existing framebuffer pixel alone — used by overlay_boot_version
+ * so the splash artwork shows through the gaps between glyphs. */
+static void blit_glyph_overlay(epaper_driver_display *epd, char c,
+                               int ox, int oy, int scale,
+                               COLOR_IMAGE colour) {
+    const uint8_t *g = font8x8_glyph(c);
+    for (int row = 0; row < 8; row++) {
+        uint8_t bits = g[row];
+        for (int col = 0; col < 8; col++) {
+            if (!((bits >> col) & 1)) continue;
+            for (int dy = 0; dy < scale; dy++) {
+                for (int dx = 0; dx < scale; dx++) {
+                    int x = ox + col * scale + dx;
+                    int y = oy + row * scale + dy;
+                    if (x < 0 || y < 0 || x >= W || y >= H) continue;
+                    epd->EPD_DrawColorPixel(x, y, colour);
+                }
+            }
+        }
+    }
+}
+
+void overlay_boot_version(epaper_driver_display *epd, const char *version) {
+    if (!version || !*version) return;
+    /* 30% from the top: 200 * 0.30 = 60. Glyphs are 8 px tall at
+     * scale=1, so y=60 puts the text vertically centred-ish on that
+     * line. */
+    constexpr int y = 60;
+    int len = static_cast<int>(strlen(version));
+    int total = len * 8;
+    int x = (W - total) / 2;
+    if (x < 0) x = 0;
+    for (const char *p = version; *p; p++) {
+        if (x + 8 > W) break;
+        blit_glyph_overlay(epd, *p, x, y, 1, DRIVER_COLOR_WHITE);
+        x += 8;
+    }
+}
+
 void render_prov_idle(epaper_driver_display *epd, const char *ssid) {
     clear(epd);
     draw_text_centered(epd, 12, 2, "Hi! I'm Mochi.");

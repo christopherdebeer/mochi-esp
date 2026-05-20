@@ -278,8 +278,12 @@ extern "C" void app_main(void) {
         MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT, lcd_cfg);
 
     /* Boot splash — full refresh so the partial-refresh "previous
-     * image" buffer is seeded before any later partial calls. */
+     * image" buffer is seeded before any later partial calls. The
+     * version overlay stamps small white text 30% from the top so
+     * the running firmware version is visible at every cold boot
+     * without USB. */
     epd_ui::render_boot_splash(epd);
+    epd_ui::overlay_boot_version(epd, ota_update::current_version());
     epd->EPD_Init();
     epd->EPD_Display();
     epd->EPD_DisplayPartBaseImage();

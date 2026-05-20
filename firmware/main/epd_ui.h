@@ -39,6 +39,14 @@ void render_prov_failed(epaper_driver_display *epd);
 void render_online(epaper_driver_display *epd, const char *ip_str);
 void render_boot_splash(epaper_driver_display *epd);
 
+/* Overlay short white text (small, scale=1) horizontally centred at
+ * 30% from the top of the panel. Designed to stamp the firmware
+ * version on top of the boot splash without redrawing the splash —
+ * call after render_boot_splash but before EPD_Display. White glyph
+ * pixels read against dark splash artwork; the surrounding off-bits
+ * of each glyph are left as-is. */
+void overlay_boot_version(epaper_driver_display *epd, const char *version);
+
 /* M4 — sprite fetch prompts. */
 void render_prompt_fetch(epaper_driver_display *epd, const char *ip_str);
 void render_fetching(epaper_driver_display *epd);
