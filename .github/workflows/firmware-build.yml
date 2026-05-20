@@ -26,6 +26,12 @@ concurrency:
 permissions:
   contents: read
 
+# Opt into Node.js 24 for JavaScript-based actions (checkout, cache,
+# upload-artifact). Node 20 is deprecated; this silences the warning
+# now and matches the runtime that becomes the default on 2026-06-02.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
