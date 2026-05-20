@@ -252,3 +252,36 @@ bool nvs_creds_get_prov_on_boot(void) {
     nvs_close(h);
     return (err == ESP_OK) && (v != 0);
 }
+
+/* --- timezone --- */
+static const char *KEY_TZ = "tz";
+
+bool nvs_creds_set_tz(const char *tz) {
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return false;
+    esp_err_t err;
+    if (tz && tz[0]) {
+        err = nvs_set_str(h, KEY_TZ, tz);
+    } else {
+        err = nvs_erase_key(h, KEY_TZ);
+        if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
+    }
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    return err == ESP_OK;
+}
+
+bool nvs_creds_get_tz(char *out, size_t out_len) {
+    if (!out || out_len == 0) return false;
+    out[0] = '\0';
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) return true;
+    size_t want = out_len;
+    esp_err_t err = nvs_get_str(h, KEY_TZ, out, &want);
+    nvs_close(h);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        out[0] = '\0';
+        return true;
+    }
+    return err == ESP_OK;
+}

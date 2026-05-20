@@ -8,6 +8,7 @@
 #include "esp_sntp.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "nvs_creds.h"
 
 static const char *TAG = "time_sync";
 
@@ -39,6 +40,19 @@ static void on_sync(struct timeval *tv) {
 
 bool time_sync_init(void) {
     if (s_synced) return true;
+
+    /* Pick the TZ in priority order:
+     *   1. runtime override (time_sync_set_tz before init)
+     *   2. NVS-stored value from the captive portal
+     *   3. DEFAULT_TZ as a last resort.
+     * Once we read NVS we keep that string in s_tz so subsequent
+     * apply_tz calls hit the same value. */
+    if (!s_tz) {
+        char nvs_tz[MOCHI_TZ_MAX] = {0};
+        if (nvs_creds_get_tz(nvs_tz, sizeof(nvs_tz)) && nvs_tz[0]) {
+            s_tz = strdup(nvs_tz);
+        }
+    }
     apply_tz(s_tz ? s_tz : DEFAULT_TZ);
 
     /* esp_sntp from ESP-IDF — polls pool.ntp.org by default. */
@@ -85,6 +99,10 @@ void time_sync_set_tz(const char *tz) {
     free(s_tz);
     s_tz = copy;
     apply_tz(s_tz);
+    /* Persist so subsequent boots use the same value without
+     * needing the user to re-pick. Failure here is non-fatal —
+     * the runtime change still takes effect for this session. */
+    (void)nvs_creds_set_tz(s_tz);
 }
 
 int64_t time_sync_now_ms(void) {

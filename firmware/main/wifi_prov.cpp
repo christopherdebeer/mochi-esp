@@ -19,6 +19,7 @@
 #include "esp_http_server.h"
 
 #include "epd_ui.h"
+#include "nvs_creds.h"
 
 namespace wifi_prov {
 
@@ -222,6 +223,17 @@ static const char PORTAL_HTML[] =
     "<label for=key>OpenAI API key</label>"
     "<input id=key name=key type=password maxlength=256 "
     "placeholder='sk-…' autocomplete=off spellcheck=false>"
+    "<label for=tz>Timezone</label>"
+    "<select id=tz name=tz>"
+    "<option value='GMT0BST,M3.5.0/1,M10.5.0' selected>UK (London)</option>"
+    "<option value='CET-1CEST,M3.5.0,M10.5.0/3'>Central Europe (Paris/Berlin)</option>"
+    "<option value='EET-2EEST,M3.5.0/3,M10.5.0/4'>Eastern Europe (Athens/Helsinki)</option>"
+    "<option value='EST5EDT,M3.2.0,M11.1.0'>US Eastern (NYC)</option>"
+    "<option value='CST6CDT,M3.2.0,M11.1.0'>US Central (Chicago)</option>"
+    "<option value='MST7MDT,M3.2.0,M11.1.0'>US Mountain (Denver)</option>"
+    "<option value='PST8PDT,M3.2.0,M11.1.0'>US Pacific (LA/SF)</option>"
+    "<option value='UTC0'>UTC (no DST)</option>"
+    "</select>"
     "<button type=submit>Connect</button>"
     "</form></body></html>";
 
@@ -254,6 +266,16 @@ static esp_err_t handler_portal_post(httpd_req_t *req) {
     }
     form_get(body, "pass", pass, sizeof(pass));   /* optional */
     form_get(body, "key",  key,  sizeof(key));    /* optional, surfaces at first voice session */
+
+    /* Capture the timezone selection. Optional: if the field isn't
+     * in the body (older browsers, hand-crafted POST), we leave NVS
+     * untouched and time_sync falls back to its compiled default. */
+    char tz[MOCHI_TZ_MAX] = {};
+    form_get(body, "tz", tz, sizeof(tz));
+    if (tz[0]) {
+        nvs_creds_set_tz(tz);
+        ESP_LOGI(TAG, "portal: tz='%s' persisted", tz);
+    }
 
     strncpy(g.pending_creds.ssid, ssid, sizeof(g.pending_creds.ssid));
     strncpy(g.pending_creds.password, pass, sizeof(g.pending_creds.password));

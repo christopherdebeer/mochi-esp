@@ -10,6 +10,11 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* Length caps from 802.11 + ESP-IDF wifi config struct. SSIDs are
  * 32 bytes, passphrases up to 64 (WPA2 max is 63 + NUL). */
@@ -61,3 +66,15 @@ bool nvs_creds_clear(void);
  * without bringing up the STA stack first. */
 bool nvs_creds_set_prov_on_boot(bool flag);
 bool nvs_creds_get_prov_on_boot(void);
+
+/* User-selected POSIX timezone string (e.g. "GMT0BST,M3.5.0/1,M10.5.0").
+ * Set at provisioning time via the captive portal; read at boot by
+ * time_sync. Returns true and writes "" into `out` if no value
+ * is stored. */
+#define MOCHI_TZ_MAX 48
+bool nvs_creds_set_tz(const char *tz);
+bool nvs_creds_get_tz(char *out, size_t out_len);
+
+#ifdef __cplusplus
+}  /* extern "C" */
+#endif
