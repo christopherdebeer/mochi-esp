@@ -81,6 +81,12 @@ bool fetch_manifest(const char *url,
     cfg.timeout_ms = 15000;
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
     cfg.disable_auto_redirect = false;
+    /* GitHub serves chunky headers (CSP, cookies) on the redirect leg —
+     * default 512 B buffer overflows with "HTTP_CLIENT: Out of buffer"
+     * before the Location header even parses. 4 KB rx + 1 KB tx is
+     * enough for both legs of github.com → objects.githubusercontent.com. */
+    cfg.buffer_size = 4096;
+    cfg.buffer_size_tx = 1024;
 
     esp_http_client_handle_t cli = esp_http_client_init(&cfg);
     if (!cli) {
@@ -140,6 +146,9 @@ bool perform_update(const char *bin_url) {
     http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
     http_cfg.timeout_ms = 60000;
     http_cfg.keep_alive_enable = true;
+    /* See manifest fetch for why these are bumped. */
+    http_cfg.buffer_size = 4096;
+    http_cfg.buffer_size_tx = 1024;
     /* GitHub releases redirect to objects.githubusercontent.com; the
      * default 10 redirects is plenty. */
 
