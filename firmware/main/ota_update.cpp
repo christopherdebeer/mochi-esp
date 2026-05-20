@@ -125,6 +125,31 @@ bool fetch_manifest(const char *url,
     return true;
 }
 
+/* Parse "MAJOR.MINOR.PATCH" prefix into three ints. Returns true on
+ * success. Trailing characters after the third number are ignored
+ * (e.g. "0.0.6" → 0,0,6; "0.0.6-2-gabc" → 0,0,6). */
+static bool parse_semver(const char *s, int *maj, int *min, int *pat) {
+    if (!s) return false;
+    if (*s == 'v') s++;
+    return sscanf(s, "%d.%d.%d", maj, min, pat) == 3;
+}
+
+/* Compare two version strings via semver triplet. Returns:
+ *    < 0  if a is older than b
+ *    == 0 if equal
+ *    > 0  if a is newer than b
+ * Falls back to strcmp on either side failing to parse. */
+static int compare_versions(const char *a, const char *b) {
+    int amaj = 0, amin = 0, apat = 0;
+    int bmaj = 0, bmin = 0, bpat = 0;
+    bool aok = parse_semver(a, &amaj, &amin, &apat);
+    bool bok = parse_semver(b, &bmaj, &bmin, &bpat);
+    if (!aok || !bok) return strcmp(a ? a : "", b ? b : "");
+    if (amaj != bmaj) return amaj - bmaj;
+    if (amin != bmin) return amin - bmin;
+    return apat - bpat;
+}
+
 /* esp_https_ota client config callback — invoked by the OTA helper
  * for each underlying HTTP request (manifest follow-redirects from
  * github.com → objects.githubusercontent.com). We need the cert
@@ -185,7 +210,7 @@ void ota_task(void *) {
         }
 
         const char *running = ota_update::current_version();
-        /* Normalise both sides before comparing.
+        /* Compare versions semver-numerically rather than via strcmp.
          *
          * Running version comes from esp_app_get_description()->version,
          * which defaults to `git describe --tags --dirty`. On a clean
@@ -193,14 +218,22 @@ void ota_task(void *) {
          * "v0.0.3-2-g3b284ff". The manifest version comes from the CI
          * workflow's ${TAG#v} strip, so it's "0.0.3".
          *
-         * Strip a leading 'v' from running, and treat any '-' suffix as
-         * a dev-build marker (always considered different from the
-         * manifest's clean release version, so devices on dirty builds
-         * upgrade to the clean tag). */
-        const char *running_norm = (running[0] == 'v') ? running + 1 : running;
-        const char *dash = strchr(running_norm, '-');
-        if (dash == nullptr && strcmp(remote_version, running_norm) == 0) {
-            ESP_LOGI(TAG, "version unchanged (%s); sleeping", running);
+         * Two cases we want to suppress upgrade for:
+         *   1. running == remote — already on the latest tag.
+         *   2. running > remote  — hand-flashed dev build with a higher
+         *      semver than the latest published release. Without this
+         *      check, OTA would happily downgrade us. Bites local
+         *      testing of unpublished work.
+         *
+         * Only "running < remote" actually triggers an upgrade. The
+         * dev-build trailer ("-N-gSHA") is ignored by parse_semver,
+         * so a "v0.0.3-2-gXYZ" build is treated as identical-version
+         * to "0.0.3" and stays put — that's correct, the user is
+         * testing local work past the tag. */
+        int cmp = compare_versions(running, remote_version);
+        if (cmp >= 0) {
+            ESP_LOGI(TAG, "no upgrade: running=%s remote=%s (cmp=%d); sleeping",
+                running, remote_version, cmp);
             vTaskDelay(pdMS_TO_TICKS(OTA_CHECK_INTERVAL_MS));
             continue;
         }
