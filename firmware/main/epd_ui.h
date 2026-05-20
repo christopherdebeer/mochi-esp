@@ -62,6 +62,34 @@ void overlay_fetch_status(epaper_driver_display *epd, uint32_t elapsed_ms);
  * marks like corner-tap feedback. */
 void draw_dot(epaper_driver_display *epd, int cx, int cy, int size);
 
+/* Encode `text` as a QR Code and draw it with the top-left corner at
+ * (ox, oy), each module rendered as `scale × scale` pixels in
+ * DRIVER_COLOR_BLACK against the existing (assumed-white)
+ * framebuffer. Returns the pixel width of the rendered code (i.e.
+ * module-count × scale) on success, or 0 on failure (encoder error
+ * or won't fit inside the panel).
+ *
+ * The quiet zone is the caller's responsibility — leave at least
+ * 4 × scale white pixels of margin around the requested rectangle
+ * before painting any non-white pixel into it. Internally this
+ * heap-allocates two qrcodegen scratch buffers of
+ * BUFFER_LEN_FOR_VERSION(MAX) each (~600 bytes total) for the
+ * duration of the call.
+ *
+ * Uses the slow EPD_DrawColorPixel path. A V4 (33-module) QR at
+ * scale 3 is ~10k pixel writes — comparable to a long text line. */
+int draw_qr(epaper_driver_display *epd, int ox, int oy, int scale,
+            const char *text);
+
+/* Encode + draw a QR centered horizontally at vertical pixel `top_y`,
+ * automatically picking the largest module-scale that lets the code
+ * (no quiet zone) fit inside `target_px` pixels on a side. Returns
+ * the rendered pixel width, or 0 on failure. Use this when you know
+ * the box the QR has to live in but want the encoder to pick the
+ * version. */
+int draw_qr_centered(epaper_driver_display *epd, int top_y,
+                     int target_px, const char *text);
+
 /* M5 — pairing screens. */
 void render_pair_prompt(epaper_driver_display *epd, const char *code);
 void render_pair_success(epaper_driver_display *epd, const char *pet_name);
