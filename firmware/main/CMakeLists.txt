@@ -36,6 +36,7 @@ idf_component_register(
         "engagement.c"
         "mood.c"
         "event_log.c"
+        "time_sync.c"
         "voice.cpp"
         "voice/voice_https.c"
         "voice/openai_signaling.c"

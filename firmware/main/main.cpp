@@ -67,6 +67,7 @@ extern "C" {
 #include "engagement.h"
 #include "mood.h"
 #include "event_log.h"
+#include "time_sync.h"
 }
 
 /*
@@ -199,15 +200,14 @@ static void init_dev_pet(int64_t now_ms) {
     s_dev_pet.transient.until     = 0;
 }
 
-/* The substrate wants "ms since epoch" but for on-device-only
- * projection we only care about relative ages. esp_timer is a
- * monotonic boot-relative clock in microseconds — divide and use
- * that. M13's snapshot-pull will need real epoch ms (the server's
- * timestamps), and we'll switch to <time.h>'s `time()` × 1000 then;
- * for now this keeps decay/engagement self-consistent without
- * requiring an RTC ↔ ms-since-epoch shim. */
-static int64_t now_ms_mono(void) {
-    return esp_timer_get_time() / 1000LL;
+/* Wall-clock ms since epoch — what the server uses for its
+ * timestamps. Routed through time_sync.c so device + server agree on
+ * "now" once SNTP has run. Pre-sync this returns whatever the kernel
+ * thinks the time is (typically near-zero). Substrate projection
+ * tolerates that — we just won't have meaningful decay until the
+ * first sync lands. */
+static int64_t now_ms_wall(void) {
+    return time_sync_now_ms();
 }
 
 /* Snapshot of the dev pet with decay applied up to `now`. The base
@@ -475,6 +475,16 @@ extern "C" void app_main(void) {
     ota_update::mark_valid_if_pending();
     ESP_LOGI(TAG, "running firmware version: %s", ota_update::current_version());
     ota_update::start_background_task(MOCHI_OTA_MANIFEST_URL);
+
+    /*
+     * Wall-clock sync. Substrate decay/engagement/mood projection
+     * uses ms-since-epoch timestamps that must agree with the
+     * server's `Date.now()`. Without this, ageDays/lastInteractionAt
+     * comparisons drift by whatever offset the kernel happens to
+     * have. Block briefly waiting for the first SNTP sync; if it
+     * doesn't land in 5s the pet still works but its sense of time
+     * is approximate until a later resync. */
+    time_sync_init();
 
     /*
      * One-shot environmental + RTC readout before the touch loop
@@ -908,10 +918,23 @@ extern "C" void app_main(void) {
          * other two pieces are.
          */
         char time_str[8] = "--:--";
-        mochi_datetime now = {};
-        if (rtc_get(&now)) {
-            snprintf(time_str, sizeof(time_str), "%02u:%02u",
-                now.hour, now.minute);
+        if (time_sync_synced()) {
+            /* Local time from <time.h> — applies the TZ string set
+             * by time_sync_init/set_tz. The PCF85063 RTC is still
+             * around (read at boot for cold-start signage) but for
+             * the status bar we trust SNTP-synced wall time once
+             * it's available. */
+            time_t now_t = time(NULL);
+            struct tm tm_now;
+            localtime_r(&now_t, &tm_now);
+            snprintf(time_str, sizeof(time_str), "%02d:%02d",
+                tm_now.tm_hour, tm_now.tm_min);
+        } else {
+            mochi_datetime now = {};
+            if (rtc_get(&now)) {
+                snprintf(time_str, sizeof(time_str), "%02u:%02u",
+                    now.hour, now.minute);
+            }
         }
 
         char batt_str[8] = "--%";
@@ -1064,7 +1087,7 @@ extern "C" void app_main(void) {
      * scene contract; for now this is enough to make the substrate
      * user-visible. */
     auto render_resting = [&]() -> const char * {
-        int64_t now_ms = now_ms_mono();
+        int64_t now_ms = now_ms_wall();
         pet_event_t slice[12];
         size_t n = event_log_load_recent(slice, 12);
         pet_t decayed = dev_pet_decayed(now_ms);
@@ -1242,7 +1265,7 @@ extern "C" void app_main(void) {
 
     /* Initialise the M11 dev pet snapshot now that we have a wall-
      * clock-ish anchor. M13 will replace this with a server pull. */
-    init_dev_pet(now_ms_mono());
+    init_dev_pet(now_ms_wall());
 
     touch::init();
     int64_t last_event_us = 0;
@@ -1396,7 +1419,7 @@ extern "C" void app_main(void) {
             if (!voice::is_active() && !key_portal::active() &&
                 (now_us - last_substrate_us) >= SUBSTRATE_REFRESH_US) {
                 last_substrate_us = now_us;
-                int64_t now_ms = now_ms_mono();
+                int64_t now_ms = now_ms_wall();
                 pet_event_t slice[12];
                 size_t n = event_log_load_recent(slice, 12);
                 pet_t decayed = dev_pet_decayed(now_ms);
@@ -1437,7 +1460,7 @@ extern "C" void app_main(void) {
          * what we'd render IF M11.5 was wired up (it isn't yet —
          * the M8.5 corner-icon UI keeps using `expr` directly). */
         event_kind_t kind = zone_to_event(z);
-        int64_t now_ms = now_ms_mono();
+        int64_t now_ms = now_ms_wall();
         if (kind != EVENT_NONE) {
             event_log_append(kind, now_ms);
             s_dev_pet.last_interaction_at = now_ms;
@@ -1528,8 +1551,8 @@ extern "C" void app_main(void) {
                      * strongest engagement signal in shared/engagement.ts.
                      * Single-event-per-session for now; M13's bidi
                      * sync may want finer-grained per-turn entries. */
-                    event_log_append(EVENT_TALKED, now_ms_mono());
-                    s_dev_pet.last_interaction_at = now_ms_mono();
+                    event_log_append(EVENT_TALKED, now_ms_wall());
+                    s_dev_pet.last_interaction_at = now_ms_wall();
                     /* Drain pending touch events that piled up while
                      * start_session was blocked on the mint round-trip
                      * (~2.4 s). Without this, the still-held finger
