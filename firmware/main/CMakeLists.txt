@@ -35,6 +35,7 @@ idf_component_register(
         "decay.c"
         "engagement.c"
         "mood.c"
+        "thought.cpp"
         "event_log.c"
         "time_sync.c"
         "pet_sync.cpp"
