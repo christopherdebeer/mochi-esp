@@ -44,6 +44,17 @@ jobs:
         # the runner user, which trips git's safe.directory check.
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
+      # Reuse the same cache the build-check workflow populates.
+      # Keyed on dependencies.lock + idf_component.yml so any
+      # registry change forces a fresh fetch.
+      - name: Cache managed_components
+        uses: actions/cache@v4
+        with:
+          path: firmware/managed_components
+          key: managed-components-v5.3-${{ hashFiles('firmware/dependencies.lock', 'firmware/main/idf_component.yml') }}
+          restore-keys: |
+            managed-components-v5.3-
+
       - name: Build firmware
         working-directory: firmware
         shell: bash

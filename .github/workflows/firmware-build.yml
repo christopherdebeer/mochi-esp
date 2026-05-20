@@ -1,0 +1,92 @@
+# Build the eink-pet firmware on every push to main + every PR, so we
+# catch ESP-IDF / component breakage before tagging a release.
+#
+# This is the *build check*. The release workflow
+# (.github/workflows/firmware-release.yml) handles tag-driven
+# publishing to GitHub Releases.
+#
+# Pinned IDF: release-v5.3, matching firmware/README.md and the
+# release workflow. Bump the container tag in both files in lockstep.
+name: firmware-build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel an in-progress build only on PR pushes — main builds always
+# run to completion so we get the full history of "did this commit
+# break the build?" without races deleting the answer.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:release-v5.3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # esp_app_get_description()'s version field defaults to
+          # `git describe`, which needs tag history present.
+          fetch-depth: 0
+
+      - name: Mark workspace safe
+        # The container runs as root but the checkout is owned by
+        # the runner user; without this, git refuses to operate.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # Cache the managed_components fetch. The key is the hash of
+      # dependencies.lock + idf_component.yml — if either changes,
+      # we redownload from the component registry. Hits on this
+      # cache save ~60-90 s per build.
+      - name: Cache managed_components
+        uses: actions/cache@v4
+        with:
+          path: firmware/managed_components
+          key: managed-components-v5.3-${{ hashFiles('firmware/dependencies.lock', 'firmware/main/idf_component.yml') }}
+          restore-keys: |
+            managed-components-v5.3-
+
+      - name: Build firmware
+        working-directory: firmware
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          idf.py set-target esp32s3
+          idf.py build
+
+      - name: Size summary
+        working-directory: firmware
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          idf.py size > size.txt
+          {
+            echo "## idf.py size"
+            echo
+            echo '```'
+            cat size.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Upload eink-pet.bin from every build (main + PR) so anyone
+      # can grab a PR's built binary for hand-testing without a
+      # local toolchain. Default 90-day retention is fine.
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: eink-pet-${{ github.sha }}
+          path: |
+            firmware/build/eink-pet.bin
+            firmware/build/bootloader/bootloader.bin
+            firmware/build/partition_table/partition-table.bin
+          if-no-files-found: error

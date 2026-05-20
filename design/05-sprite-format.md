@@ -250,11 +250,11 @@ the downsample-erode of fine line work).
 The boot splash is the device's first frame on every cold boot,
 before WiFi, before NVS read. It must work offline. The pipeline:
 
-1. **Build-time fetch.** `firmware/scripts/refresh-splash.sh`
-   pulls `/devsprite/splash-v1/boot` into
-   `firmware/main/assets/splash.bin`. Falls back to
-   `/devsprite/test` if no artwork uploaded yet (placeholder for
-   first-time builds).
+1. **Committed asset.** `firmware/main/assets/splash.bin` is
+   checked in to the repo. `firmware/scripts/refresh-splash.sh`
+   refreshes it from `/devsprite/splash-v1/boot` (with
+   `/devsprite/test` as a fallback for early development); the
+   resulting diff is committed alongside other changes.
 2. **CMake embed.** `EMBED_FILES "assets/splash.bin"` in
    `firmware/main/CMakeLists.txt` bundles the 5000 bytes into
    firmware via the linker's `_binary_splash_bin_start` symbol.
@@ -263,10 +263,10 @@ before WiFi, before NVS read. It must work offline. The pipeline:
    work, no font path. Boot is faster + the splash artwork is
    data-driven.
 
-The build-time bundled splash is the **brand-themed default**, no
-pet specifics. It's deliberately not regenerated per-build (only
-when `refresh-splash.sh` is explicitly run), so the firmware
-image is reproducible without network access.
+The bundled splash is the **brand-themed default**, no pet
+specifics. Builds (CI and local) are hermetic — no network call
+during `idf.py build` — so the firmware image is reproducible
+from a clean clone with no live mochi.val.run dependency.
 
 ### Pet-context dispatch via Pet-Id header
 
