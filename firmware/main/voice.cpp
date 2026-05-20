@@ -86,6 +86,31 @@ static bool fetch_persona(const char *pet_id, char *out, size_t cap) {
     return true;
 }
 
+/* Fetch the per-pet tool spec array from mochi.val.run. The body is
+ * a JSON array we hand straight through to openai_signaling.c, which
+ * cJSON_Parse's it at mint time and attaches to session.tools.
+ *
+ * Returns true if `out` contains a JSON array string. Failure is
+ * non-fatal — session falls back to no tools (model has nothing to
+ * call), same as a pre-tools build. */
+static bool fetch_tools(const char *pet_id, char *out, size_t cap) {
+    if (!pet_id || !*pet_id || !out || cap < 64) return false;
+
+    char header[80];
+    snprintf(header, sizeof(header), "X-Pet-Id: %s", pet_id);
+    char *headers[] = { header, nullptr };
+
+    fetch_ctx fc = { out, cap, false };
+    char url[] = "https://mochi.val.run/api/voice/tools";
+    int rc = https_get(url, headers, persona_body, &fc);
+    if (rc != 0 || !fc.got) {
+        ESP_LOGW(TAG, "tools fetch failed (rc=%d, got=%d)", rc, fc.got);
+        return false;
+    }
+    ESP_LOGI(TAG, "tools fetched: %u bytes", (unsigned)strlen(out));
+    return true;
+}
+
 bool init(void) {
     if (s_inited) return true;
 
@@ -166,12 +191,18 @@ int start_session(void) {
      * happen on every exit path.
      */
     constexpr size_t PERSONA_BUF_BYTES = 4096;
+    /* Tools array is currently ~7-8 KB (12 specs × ~600 B each).
+     * 16 KB gives headroom if the canonical list grows or if a pet's
+     * dynamic place / costume enums add description bytes. */
+    constexpr size_t TOOLS_BUF_BYTES = 16384;
     char *openai_key = (char *)heap_caps_calloc(
         1, MOCHI_OPENAI_KEY_MAX + 1, MALLOC_CAP_SPIRAM);
     char *persona_buf = (char *)heap_caps_calloc(
         1, PERSONA_BUF_BYTES, MALLOC_CAP_SPIRAM);
+    char *tools_buf = (char *)heap_caps_calloc(
+        1, TOOLS_BUF_BYTES, MALLOC_CAP_SPIRAM);
     int rc = -1;
-    if (!openai_key || !persona_buf) {
+    if (!openai_key || !persona_buf || !tools_buf) {
         ESP_LOGE(TAG, "PSRAM alloc failed for session buffers");
         goto cleanup;
     }
@@ -193,6 +224,7 @@ int start_session(void) {
      * to /api/voice/tool. */
     {
         const char *instructions = FALLBACK_INSTRUCTIONS;
+        const char *tools_json = nullptr;
         if (s_have_pair) {
             struct mochi_pair_creds pair = {};
             if (pair_creds_load(&pair)) {
@@ -200,12 +232,21 @@ int start_session(void) {
                 if (fetch_persona(pair.pet_id, persona_buf, PERSONA_BUF_BYTES)) {
                     instructions = persona_buf;
                 }
+                /* Tool spec — canonical shared/voice-tools-spec.ts
+                 * lives on the server. Failure is non-fatal: the
+                 * model just won't have anything to call this
+                 * session (sleep/wake/care unreachable until next
+                 * mint). */
+                if (fetch_tools(pair.pet_id, tools_buf, TOOLS_BUF_BYTES)) {
+                    tools_json = tools_buf;
+                }
             }
         }
 
-        ESP_LOGI(TAG, "starting voice session (instructions: %s)…",
-            instructions == persona_buf ? "fetched" : "fallback");
-        rc = voice_peer_start(openai_key, instructions);
+        ESP_LOGI(TAG, "starting voice session (instructions: %s, tools: %s)…",
+            instructions == persona_buf ? "fetched" : "fallback",
+            tools_json ? "fetched" : "none");
+        rc = voice_peer_start(openai_key, instructions, tools_json);
         if (rc != 0) {
             ESP_LOGE(TAG, "voice_peer_start rc=%d", rc);
             goto cleanup;
@@ -222,6 +263,10 @@ cleanup:
     if (persona_buf) {
         memset(persona_buf, 0, PERSONA_BUF_BYTES);
         free(persona_buf);
+    }
+    if (tools_buf) {
+        memset(tools_buf, 0, TOOLS_BUF_BYTES);
+        free(tools_buf);
     }
     return rc;
 }

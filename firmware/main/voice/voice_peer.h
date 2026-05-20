@@ -51,7 +51,8 @@ typedef enum {
  * Calling voice_peer_start while a session is already running
  * returns -1; call voice_peer_stop first.
  */
-int  voice_peer_start(const char *openai_key, const char *instructions);
+int  voice_peer_start(const char *openai_key, const char *instructions,
+                      const char *tools_json);
 
 /* Current conversation phase. Safe to call from any task. */
 voice_phase_t voice_peer_phase(void);

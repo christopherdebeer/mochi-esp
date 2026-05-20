@@ -47,6 +47,13 @@ typedef struct {
     char *token;
     char *voice;
     char *instructions;
+    /* Optional JSON array of tool specs in OpenAI realtime function-
+     * tool shape, e.g. '[{"type":"function","name":"settle_to_sleep",
+     * "description":"...","parameters":{...}}, ...]'. Pass NULL or
+     * empty to skip — mint will omit the tools field and the model
+     * has nothing to call. Parsed once at mint via cJSON; caller
+     * may free after voice_peer_start returns. */
+    char *tools_json;
 } openai_signaling_cfg_t;
 
 /*

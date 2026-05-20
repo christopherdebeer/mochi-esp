@@ -164,6 +164,11 @@ typedef struct {
      * and any reconnect. Both wiped + freed on stop. */
     char                       *key_copy;
     char                       *instructions_copy;
+    /* Optional JSON tools array string handed to the signaling impl
+     * via openai_cfg.tools_json. Same lifetime semantics as
+     * instructions_copy. NULL when tools fetch failed or wasn't
+     * attempted. */
+    char                       *tools_copy;
 
     /* Audio-out plumbing. Opens lazily on pc_on_audio_info. */
     void                       *opus_dec;       /* esp_opus_dec handle */
@@ -948,7 +953,8 @@ static void worker_task(void *arg) {
 
 /* ─── public API ──────────────────────────────────────────────── */
 
-int voice_peer_start(const char *openai_key, const char *instructions) {
+int voice_peer_start(const char *openai_key, const char *instructions,
+                     const char *tools_json) {
     if (atomic_load(&s_peer.running)) {
         ESP_LOGW(TAG, "already running");
         return -1;
@@ -985,6 +991,18 @@ int voice_peer_start(const char *openai_key, const char *instructions) {
         }
     }
 
+    /* tools_json is optional too. Empty/NULL → mint without tools
+     * and the model has nothing to call (the M9.e baseline). */
+    s_peer.tools_copy = NULL;
+    if (tools_json && *tools_json) {
+        s_peer.tools_copy = strdup(tools_json);
+        /* Non-fatal on alloc fail — we just lose tool calls this
+         * session, instructions still flow through. */
+        if (!s_peer.tools_copy) {
+            LOGW_DIAG("tools strdup failed; mint will skip tools");
+        }
+    }
+
     atomic_store(&s_peer.running, true);
     atomic_store(&s_peer.dc_opened, false);
     atomic_store(&s_peer.first_event_seen, false);
@@ -1007,6 +1025,7 @@ int voice_peer_start(const char *openai_key, const char *instructions) {
         ESP_LOGE(TAG, "xTaskCreate failed");
         free(s_peer.key_copy); s_peer.key_copy = NULL;
         free(s_peer.instructions_copy); s_peer.instructions_copy = NULL;
+        free(s_peer.tools_copy); s_peer.tools_copy = NULL;
         atomic_store(&s_peer.running, false);
         return -1;
     }
@@ -1015,6 +1034,7 @@ int voice_peer_start(const char *openai_key, const char *instructions) {
     openai_cfg.token = s_peer.key_copy;
     openai_cfg.voice = NULL;  /* defaults to alloy */
     openai_cfg.instructions = s_peer.instructions_copy;
+    openai_cfg.tools_json = s_peer.tools_copy;
 
     esp_peer_signaling_cfg_t sig_cfg = {};
     sig_cfg.on_ice_info = sig_on_ice_info;
@@ -1032,6 +1052,7 @@ int voice_peer_start(const char *openai_key, const char *instructions) {
         atomic_store(&s_peer.running, false);
         free(s_peer.key_copy); s_peer.key_copy = NULL;
         free(s_peer.instructions_copy); s_peer.instructions_copy = NULL;
+        free(s_peer.tools_copy); s_peer.tools_copy = NULL;
         return -1;
     }
 
@@ -1214,6 +1235,10 @@ void voice_peer_stop(void) {
     if (s_peer.instructions_copy) {
         free(s_peer.instructions_copy);
         s_peer.instructions_copy = NULL;
+    }
+    if (s_peer.tools_copy) {
+        free(s_peer.tools_copy);
+        s_peer.tools_copy = NULL;
     }
 
     s_peer.dc_stream_known = false;

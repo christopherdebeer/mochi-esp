@@ -134,7 +134,7 @@ static void session_answer(http_resp_t *resp, void *ctx)
  * turn_detection, and the OpenAI-Safety-Identifier header derived
  * from the pet_id.
  */
-static void get_ephemeral_token(openai_signaling_t *sig, char *token, char *voice, char *instructions)
+static void get_ephemeral_token(openai_signaling_t *sig, char *token, char *voice, char *instructions, char *tools_json)
 {
     char content_type[32] = "Content-Type: application/json";
     int len = strlen("Authorization: Bearer ") + strlen(token) + 1;
@@ -195,6 +195,23 @@ static void get_ephemeral_token(openai_signaling_t *sig, char *token, char *voic
     cJSON_AddStringToObject(turn_detect, "type", "semantic_vad");
     cJSON_AddStringToObject(turn_detect, "eagerness", "low");
 
+    /* Tool specs — fetched per-pet from /api/voice/tools and parsed
+     * here as a pre-formed JSON array. We attach the array directly
+     * (cJSON_AddItemToObject takes ownership) and emit
+     * tool_choice:"auto" so the model can call any of them. The
+     * canonical list lives at shared/voice-tools-spec.ts; the device
+     * never needs to know what's in it, only how to forward calls
+     * via /api/voice/tool (handled in voice_tools.c). */
+    if (tools_json && *tools_json) {
+        cJSON *tools = cJSON_Parse(tools_json);
+        if (tools && cJSON_IsArray(tools)) {
+            cJSON_AddItemToObject(session, "tools", tools);
+            cJSON_AddStringToObject(session, "tool_choice", "auto");
+        } else if (tools) {
+            cJSON_Delete(tools);
+        }
+    }
+
     char *json_string = cJSON_Print(root);
     if (json_string) {
         https_post(OPENAI_REALTIME_MINT_URL, header, json_string, session_answer, sig);
@@ -219,7 +236,8 @@ static int openai_signaling_start(esp_peer_signaling_cfg_t *cfg, esp_peer_signal
         sig,
         openai_cfg->token,
         openai_cfg->voice ? openai_cfg->voice : "marin",
-        openai_cfg->instructions);
+        openai_cfg->instructions,
+        openai_cfg->tools_json);
     if (sig->ephemeral_token == NULL) {
         ESP_LOGE(TAG, "ephemeral token not minted");
         free(sig);
