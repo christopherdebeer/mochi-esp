@@ -383,4 +383,26 @@ void draw_dot(epaper_driver_display *epd, int cx, int cy, int size) {
     }
 }
 
+void render_key_portal(epaper_driver_display *epd,
+                       const char *ip_str,
+                       const char *url) {
+    clear(epd);
+    draw_text_centered(epd, 4, 1, "Set OpenAI key");
+
+    /* The URL is short (~24 chars: "http://192.168.1.255/"), so the
+     * encoder picks V1 or V2. 105 px target with margins gives a
+     * crisp readable code from a phone held a few inches away. */
+    int qr_px = draw_qr_centered(epd, 18, 105, url);
+    int below_y = qr_px > 0 ? 18 + qr_px + 6 : 30;
+
+    if (qr_px == 0) {
+        /* Encoder failure path — fall back to typed URL. */
+        draw_text_centered(epd, 30, 1, "Open on phone:");
+    }
+
+    draw_text_centered(epd, below_y,      1, "or open on phone:");
+    draw_text_centered(epd, below_y + 16, 1, ip_str);
+    draw_text_centered(epd, 184,          1, "Tap to dismiss");
+}
+
 }  /* namespace epd_ui */

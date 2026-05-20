@@ -56,4 +56,14 @@ void mark_handled(void);
  * they want visible during sleep. */
 [[noreturn]] void commit_sleep(void);
 
+/* Triple-tap PWR — three press-release cycles inside a short window
+ * with no hold long enough to be the sleep gesture. Used by main as
+ * the manual trigger for the key_portal recovery flow when the user
+ * wants to replace an already-set OpenAI key.
+ *
+ * Returns true once after each detected triple-tap. Caller should
+ * read in a polling fashion; the flag self-clears on read so the
+ * next triple-tap is independent. */
+bool triple_tap_consume(void);
+
 }  /* namespace sleep_gesture */

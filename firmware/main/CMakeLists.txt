@@ -31,6 +31,7 @@ idf_component_register(
         "sleep_gesture.cpp"
         "sprite_cache.cpp"
         "ota_update.cpp"
+        "key_portal.cpp"
         "voice.cpp"
         "voice/voice_https.c"
         "voice/openai_signaling.c"

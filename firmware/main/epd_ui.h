@@ -95,4 +95,12 @@ void render_pair_prompt(epaper_driver_display *epd, const char *code);
 void render_pair_success(epaper_driver_display *epd, const char *pet_name);
 void render_pair_failed(epaper_driver_display *epd);
 
+/* Key-portal recovery screen — QR encoding the URL the user should
+ * visit on their phone, with the IP printed below as a fallback for
+ * scanners that aren't handy. ip_str is "192.168.x.y", url is
+ * "http://192.168.x.y/". Caller picks full or partial refresh. */
+void render_key_portal(epaper_driver_display *epd,
+                       const char *ip_str,
+                       const char *url);
+
 }  /* namespace epd_ui */

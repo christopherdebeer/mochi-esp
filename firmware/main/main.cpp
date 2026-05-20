@@ -60,6 +60,7 @@ extern "C" {
 }
 #include "sprite_cache.h"
 #include "ota_update.h"
+#include "key_portal.h"
 
 /*
  * Endpoints for the on-device compositor. The scene is fetched once
@@ -1137,6 +1138,21 @@ extern "C" void app_main(void) {
     int64_t last_event_us = 0;
     constexpr int64_t DEBOUNCE_US = 200 * 1000;
 
+    /* Auto-trigger key portal if NVS has no OpenAI key. The user
+     * landed here either by skipping the optional key field during
+     * provisioning, or by an OTA from a build where it was set on a
+     * different NVS layout. Either way, we'd rather drop them
+     * straight into the recovery UX than make them discover the
+     * triple-tap gesture by reading source. */
+    {
+        char probe[MOCHI_OPENAI_KEY_MAX + 1] = {};
+        if (!openai_key_load(probe, sizeof(probe))) {
+            ESP_LOGI(TAG, "no openai key on boot — opening key portal");
+            key_portal::start(epd);
+        }
+        memset(probe, 0, sizeof(probe));
+    }
+
     /*
      * Phase-driven expression for active voice sessions. The user
      * sees the pet's current expression and infers session state
@@ -1176,6 +1192,32 @@ extern "C" void app_main(void) {
             sleep_gesture::mark_handled();
             render_asleep();
             sleep_gesture::commit_sleep();
+        }
+
+        /* Manual key-portal trigger: triple-tap PWR. Distinct from
+         * the long-hold sleep gesture and the 10s factory-reset
+         * gesture. Used to replace an already-set key. */
+        if (sleep_gesture::triple_tap_consume() && !voice::is_active()) {
+            ESP_LOGI(TAG, "triple-tap → opening key portal");
+            key_portal::start(epd);
+        }
+
+        /* Drive the portal's idle / post-submit auto-stop. */
+        key_portal::tick();
+
+        /* While the portal is active any touch dismisses it and
+         * forces a redraw of the pet via the normal flow on the
+         * next iteration. Long-press for voice is suppressed so the
+         * QR + key-entry surface stays intact. */
+        if (key_portal::active()) {
+            if (got_touch) {
+                ESP_LOGI(TAG, "touch while portal active → dismissing");
+                key_portal::stop();
+                /* Fall through and let the standard render path
+                 * draw the pet on the next tick. */
+                render_with_expression("neutral", false);
+            }
+            continue;
         }
 
         /*
