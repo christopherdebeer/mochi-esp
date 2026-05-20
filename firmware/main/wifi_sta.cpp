@@ -196,6 +196,28 @@ bool connect_any(char *ip_str, size_t ip_len,
         }
     }
 
+    /* Scan-walk found no match (or the matches all failed to join).
+     * Blind-try the MRU credential before bailing: Apple Personal
+     * Hotspot stops beaconing when no client is connected — the exact
+     * state we land in after a post-provisioning reboot — so the SSID
+     * never appears in the scan, but esp_wifi_connect's directed probe
+     * will still find it. Only the MRU is worth the extra 15s; trying
+     * every stored cred blind would balloon the bail-to-prov path. */
+    if (!(tried & 1u)) {
+        struct mochi_wifi_creds c = {};
+        if (nvs_creds_load_at(0, &c)) {
+            ESP_LOGI(TAG, "blind try MRU (not in scan): '%s'", c.ssid);
+            if (try_one(&c, ip_str, ip_len, 15000)) {
+                if (out_ssid && out_ssid_len > 0) {
+                    strncpy(out_ssid, c.ssid, out_ssid_len - 1);
+                    out_ssid[out_ssid_len - 1] = 0;
+                }
+                return true;
+            }
+            ESP_LOGW(TAG, "blind MRU join failed");
+        }
+    }
+
     ESP_LOGW(TAG, "connect_any: no stored network reachable");
     return false;
 }
