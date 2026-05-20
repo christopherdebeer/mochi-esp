@@ -26,6 +26,13 @@ on:
 permissions:
   contents: write
 
+# Opt into Node.js 24 for JavaScript-based actions (checkout, cache,
+# softprops/action-gh-release). Node 20 is deprecated; this silences
+# the warning now and matches the runtime that becomes the default
+# on 2026-06-02.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -43,6 +50,17 @@ jobs:
         # The container runs as root but the checkout is owned by
         # the runner user, which trips git's safe.directory check.
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # Reuse the same cache the build-check workflow populates.
+      # Keyed on dependencies.lock + idf_component.yml so any
+      # registry change forces a fresh fetch.
+      - name: Cache managed_components
+        uses: actions/cache@v4
+        with:
+          path: firmware/managed_components
+          key: managed-components-v5.3-${{ hashFiles('firmware/dependencies.lock', 'firmware/main/idf_component.yml') }}
+          restore-keys: |
+            managed-components-v5.3-
 
       - name: Build firmware
         working-directory: firmware

@@ -1,5 +1,7 @@
 # eink-pet
 
+[![firmware build](https://github.com/christopherdebeer/mochi-esp/actions/workflows/firmware-build.yml/badge.svg?branch=main)](https://github.com/christopherdebeer/mochi-esp/actions/workflows/firmware-build.yml)
+
 A hardware embodiment of [Mochi](https://mochi.val.run) — a virtual pet that
 runs on a small e-paper device, talks via the OpenAI Realtime API over WiFi,
 and works in airplane mode for everything except voice.

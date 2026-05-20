@@ -1,23 +1,20 @@
 #!/usr/bin/env bash
 #
-# Fetch the boot splash from mochi.val.run and write it to
-# firmware/main/assets/splash.bin so CMake can EMBED_FILES it.
+# Refresh the bundled boot splash from mochi.val.run.
 #
-# Run this:
-#   - Once after cloning, before the first `idf.py build`
-#   - Whenever the splash-v1 artwork changes server-side
-#
-# The output is intentionally NOT committed — it's a generated build
-# artifact, ~5 KB of packed 1-bit pixels regenerable from a known URL.
+# firmware/main/assets/splash.bin is COMMITTED to the repo so that
+# CI builds (and clean clones) are hermetic — no network call during
+# `idf.py build`. Run this script whenever the splash-v1 artwork
+# changes server-side and commit the resulting diff alongside any
+# other changes in the PR.
 #
 # Falls back to /devsprite/test (96×96 fox + caption, ~5 KB) if
 # /devsprite/splash-v1/boot 404s — e.g. before any artwork has been
-# uploaded to mochi's sheets admin. Lets first-time builds work even
-# without the splash artwork existing yet.
+# uploaded to mochi's sheets admin.
 #
 # No Pet-Id header sent — this is the brand-themed bundled default.
-# Per-pet splash variants (planned, server-side dispatch) will require
-# the OTA refresh path, not this build-time fetch.
+# Per-pet splash variants (planned, server-side dispatch) will use
+# the runtime fetch path, not this build-time bundle.
 
 set -euo pipefail
 
