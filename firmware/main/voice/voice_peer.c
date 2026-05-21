@@ -39,6 +39,7 @@
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"   /* xTaskCreateWithCaps for PSRAM stacks */
 #include "cJSON.h"
 
 #include "esp_peer.h"
@@ -236,7 +237,14 @@ static void open_audio_playback(uint32_t sample_rate, uint8_t channel) {
         LOGE_DIAG("esp_opus_dec_open failed");
         return;
     }
-    s_peer.pcm_out_buf = malloc(OPUS_PCM_OUT_BYTES);
+    /* PSRAM, not internal RAM. The decode→write loop hits this
+     * buffer 50× per second per Opus frame and PSRAM access is
+     * ~3× slower than internal — but the cost is dominated by
+     * the I²S DMA write, not the buffer touch. The 8 KB freed
+     * from internal heap is what lets the SDP exchange's TLS
+     * context allocate; observed v0.0.12 hardware repro. */
+    s_peer.pcm_out_buf = (uint8_t *)heap_caps_malloc(
+        OPUS_PCM_OUT_BYTES, MALLOC_CAP_SPIRAM);
     if (!s_peer.pcm_out_buf) {
         LOGE_DIAG("pcm_out_buf alloc failed");
         esp_opus_dec_close(s_peer.opus_dec);
@@ -965,7 +973,9 @@ static void worker_task(void *arg) {
     }
     ESP_LOGI(TAG, "worker_task exiting");
     s_peer.worker = NULL;
-    vTaskDelete(NULL);
+    /* Created via xTaskCreateWithCaps(MALLOC_CAP_SPIRAM); the
+     * matching delete must free the PSRAM stack. */
+    vTaskDeleteWithCaps(NULL);
 }
 
 /* ─── public API ──────────────────────────────────────────────── */
@@ -1035,9 +1045,14 @@ int voice_peer_start(const char *openai_key, const char *instructions,
     s_aud_recv_n = s_aud_dec_ok = s_aud_dec_err = 0;
     s_aud_write_err = s_aud_pcm_bytes = 0;
 
-    BaseType_t ok = xTaskCreate(
+    /* Worker stack from PSRAM, not internal RAM. mbedTLS DTLS +
+     * the SDP exchange's TLS context together push internal heap
+     * close to the limit; the worker's 12 KB stack used to land in
+     * internal RAM and was the last straw that made the second
+     * api.openai.com TLS handshake fail with -0x7F00 on hardware. */
+    BaseType_t ok = xTaskCreateWithCaps(
         worker_task, "voice_peer", WORKER_STACK_BYTES,
-        NULL, WORKER_PRIO, &s_peer.worker);
+        NULL, WORKER_PRIO, &s_peer.worker, MALLOC_CAP_SPIRAM);
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "xTaskCreate failed");
         free(s_peer.key_copy); s_peer.key_copy = NULL;
