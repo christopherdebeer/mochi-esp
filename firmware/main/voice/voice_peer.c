@@ -36,6 +36,7 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "cJSON.h"
@@ -192,6 +193,22 @@ typedef struct {
 } voice_peer_t;
 
 static voice_peer_t s_peer;  /* zero-initialised at .bss */
+
+/* PSRAM-backed strdup for the strings handed to the signaling impl
+ * (key, instructions, tools_json). They're consumed once during the
+ * synchronous mint and SDP exchange, so the slower PSRAM access is
+ * irrelevant — but keeping them out of internal RAM matters because
+ * the mint's mbedtls TLS context needs ~16-24 KB of internal heap
+ * and tools_json alone is ~9 KB. Without this, voice_peer_start
+ * fails with MBEDTLS_ERR_SSL_ALLOC_FAILED on the first POST. */
+static char *psram_strdup(const char *s) {
+    if (!s) return NULL;
+    size_t n = strlen(s) + 1;
+    char *p = (char *)heap_caps_malloc(n, MALLOC_CAP_SPIRAM);
+    if (!p) return NULL;
+    memcpy(p, s, n);
+    return p;
+}
 
 static void set_phase(voice_phase_t next) {
     voice_phase_t prev = (voice_phase_t)atomic_exchange(&s_peer.phase, next);
@@ -975,7 +992,7 @@ int voice_peer_start(const char *openai_key, const char *instructions,
      * call from every session start. */
     voice_tools_init();
 
-    s_peer.key_copy = strdup(openai_key);
+    s_peer.key_copy = psram_strdup(openai_key);
     if (!s_peer.key_copy) return -1;
 
     /* instructions is optional; NULL means OpenAI fills in its
@@ -983,7 +1000,7 @@ int voice_peer_start(const char *openai_key, const char *instructions,
      * test path passes a one-line greeting. */
     s_peer.instructions_copy = NULL;
     if (instructions && *instructions) {
-        s_peer.instructions_copy = strdup(instructions);
+        s_peer.instructions_copy = psram_strdup(instructions);
         if (!s_peer.instructions_copy) {
             free(s_peer.key_copy);
             s_peer.key_copy = NULL;
@@ -995,7 +1012,7 @@ int voice_peer_start(const char *openai_key, const char *instructions,
      * and the model has nothing to call (the M9.e baseline). */
     s_peer.tools_copy = NULL;
     if (tools_json && *tools_json) {
-        s_peer.tools_copy = strdup(tools_json);
+        s_peer.tools_copy = psram_strdup(tools_json);
         /* Non-fatal on alloc fail — we just lose tool calls this
          * session, instructions still flow through. */
         if (!s_peer.tools_copy) {
