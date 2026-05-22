@@ -279,8 +279,80 @@ function applyEffect(imgData, effect, threshold, invert) {
   return out;
 }
 
+// Per-pixel opacity (1 = opaque, 0 = transparent) for a mochi-esp
+// cell, shared between the preview path and the binary export. Returns
+// null when masking is disabled (every pixel opaque) so callers can
+// take the cheaper non-masked branch.
+function buildOpacityBuffer(imgData, { maskSource, chromaHex, chromaTol, paperStroke }) {
+  if (!maskSource || maskSource === 'none') return null;
+  const { width: w, height: h, data: src } = imgData;
+  const N = w * h;
+
+  let chromaR = 0, chromaG = 0, chromaB = 0, chromaOK = false;
+  if (maskSource === 'chroma' && typeof chromaHex === 'string') {
+    const m = chromaHex.replace('#', '').match(/^([0-9a-fA-F]{6})$/);
+    if (m) {
+      const v = parseInt(m[1], 16);
+      chromaR = (v >> 16) & 0xff;
+      chromaG = (v >>  8) & 0xff;
+      chromaB =  v        & 0xff;
+      chromaOK = true;
+    }
+  }
+  const tol = Math.max(0, Math.min(255, chromaTol | 0));
+
+  const opaque = new Uint8Array(N);
+  for (let i = 0; i < N; i++) {
+    if (maskSource === 'alpha') {
+      opaque[i] = src[i * 4 + 3] >= 128 ? 1 : 0;
+    } else if (maskSource === 'white') {
+      const r = src[i * 4], g = src[i * 4 + 1], b = src[i * 4 + 2];
+      opaque[i] = (r > 240 && g > 240 && b > 240) ? 0 : 1;
+    } else if (maskSource === 'chroma' && chromaOK) {
+      const r = src[i * 4], g = src[i * 4 + 1], b = src[i * 4 + 2];
+      const dr = Math.abs(r - chromaR);
+      const dg = Math.abs(g - chromaG);
+      const db = Math.abs(b - chromaB);
+      const d = dr > dg ? (dr > db ? dr : db) : (dg > db ? dg : db);
+      opaque[i] = d <= tol ? 0 : 1;
+    } else {
+      opaque[i] = 1;
+    }
+  }
+
+  // Optional 1-px paper stroke: every transparent pixel touching an
+  // opaque 8-neighbour becomes opaque. Cell-bounded; mirrors
+  // packCellMochi exactly so the preview matches the export.
+  if (paperStroke) {
+    const grow = new Uint8Array(N);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (opaque[i]) continue;
+        let touch = false;
+        for (let dy = -1; dy <= 1 && !touch; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            const nx = x + dx, ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+            if (opaque[ny * w + nx]) { touch = true; break; }
+          }
+        }
+        if (touch) grow[i] = 1;
+      }
+    }
+    for (let i = 0; i < N; i++) if (grow[i]) opaque[i] = 1;
+  }
+
+  return opaque;
+}
+
 // Renders a preview ImageData reflecting both effect and target format.
-function convertPreview(imgData, format, threshold, invert, effect) {
+// `mask` (optional) is a per-pixel opacity buffer from
+// buildOpacityBuffer; transparent pixels render with alpha=0 so the
+// page's checker background reads through, mirroring the mochi-esp
+// device's two-plane composite.
+function convertPreview(imgData, format, threshold, invert, effect, mask) {
   const { width: w, height: h, data: src } = imgData;
   const out = new ImageData(w, h);
   const dst = out.data;
@@ -291,7 +363,8 @@ function convertPreview(imgData, format, threshold, invert, effect) {
     const bin = applyEffect(imgData, effect, threshold, invert);
     for (let i = 0; i < w * h; i++) {
       const v = bin[i];
-      dst[i * 4] = v; dst[i * 4 + 1] = v; dst[i * 4 + 2] = v; dst[i * 4 + 3] = 255;
+      dst[i * 4] = v; dst[i * 4 + 1] = v; dst[i * 4 + 2] = v;
+      dst[i * 4 + 3] = (mask && !mask[i]) ? 0 : 255;
     }
     return out;
   }
@@ -312,7 +385,7 @@ function convertPreview(imgData, format, threshold, invert, effect) {
       dst[i * 4 + 1] = (g6 << 2) | (g6 >> 4);
       dst[i * 4 + 2] = (b5 << 3) | (b5 >> 2);
     }
-    dst[i * 4 + 3] = 255;
+    dst[i * 4 + 3] = (mask && !mask[i]) ? 0 : 255;
   }
   return out;
 }
@@ -407,51 +480,26 @@ function inkDarkBuffer(imgData, threshold, invert, effect) {
 
 // Encode one cell to the device 2-plane format. Returns Uint8Array
 // (8-byte header + ink plane + mask plane).
-function packCellMochi(imgData, { threshold, invert, effect, maskSource, paperStroke }) {
-  const w = imgData.width, h = imgData.height, src = imgData.data;
+function packCellMochi(imgData, { threshold, invert, effect, maskSource, paperStroke, chromaHex, chromaTol }) {
+  const w = imgData.width, h = imgData.height;
   const N = w * h;
   const rowBytes = (w + 7) >> 3;
   const planeBytes = rowBytes * h;
 
   const isInk = inkDarkBuffer(imgData, threshold, invert, effect);
 
-  // Opacity per pixel: 1 = opaque, 0 = transparent.
-  const opaque = new Uint8Array(N);
-  for (let i = 0; i < N; i++) {
-    if (maskSource === 'alpha') {
-      opaque[i] = src[i * 4 + 3] >= 128 ? 1 : 0;
-    } else if (maskSource === 'white') {
-      // Near-white in the ORIGINAL image reads as background.
-      const r = src[i * 4], g = src[i * 4 + 1], b = src[i * 4 + 2];
-      opaque[i] = (r > 240 && g > 240 && b > 240) ? 0 : 1;
-    } else {
-      opaque[i] = 1; // 'none' — everything opaque
-    }
-  }
-
-  // Paper stroke: every transparent pixel with an opaque 8-neighbour
-  // becomes opaque paper (mask=0, ink=paper). Mirrors the server's
-  // STROKE step (design/05 § "Paper stroke"); clipped at cell bounds.
-  if (paperStroke) {
-    const grow = new Uint8Array(N);
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const i = y * w + x;
-        if (opaque[i]) continue;
-        let touch = false;
-        for (let dy = -1; dy <= 1 && !touch; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            if (dx === 0 && dy === 0) continue;
-            const nx = x + dx, ny = y + dy;
-            if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
-            if (opaque[ny * w + nx]) { touch = true; break; }
-          }
-        }
-        if (touch) grow[i] = 1;
-      }
-    }
+  // Opacity per pixel: 1 = opaque, 0 = transparent. We compute the
+  // pre-stroke buffer first so we can identify stroke pixels (those
+  // newly opaque after the grow) and stamp them as paper in the ink
+  // plane — that's what gives the halo around the silhouette.
+  const baseBuf  = buildOpacityBuffer(imgData, { maskSource, chromaHex, chromaTol, paperStroke: false });
+  const finalBuf = paperStroke
+    ? buildOpacityBuffer(imgData, { maskSource, chromaHex, chromaTol, paperStroke: true })
+    : baseBuf;
+  const opaque = finalBuf || new Uint8Array(N).fill(1);
+  if (paperStroke && baseBuf && finalBuf) {
     for (let i = 0; i < N; i++) {
-      if (grow[i]) { opaque[i] = 1; isInk[i] = 0; } // opaque paper ring
+      if (finalBuf[i] && !baseBuf[i]) isInk[i] = 0;
     }
   }
 
@@ -501,6 +549,9 @@ function buildSheetCanvas(sprites, format, threshold, invert, effect, opts = {})
     drawBorders = true,
     drawIndices = false,
     bg = '#ffffff',
+    masks = null,           // optional per-sprite opacity buffers (mochi only)
+    checker = false,        // when true, paint a checker behind cells so
+                            // transparent pixels are obvious
   } = opts;
   const sw = sprites[0].width, sh = sprites[0].height;
   const N = sprites.length;
@@ -514,18 +565,37 @@ function buildSheetCanvas(sprites, format, threshold, invert, effect, opts = {})
   canvas.height = H;
   const ctx = canvas.getContext('2d');
   ctx.imageSmoothingEnabled = false;
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, W, H);
 
-  // Pass 1: pixel data. putImageData writes raw pixels (no compositing) — fine
-  // because every processed sprite has alpha=255 throughout.
+  if (checker) {
+    // 8-px checker matching the preview thumbnails' page styling.
+    const block = 8;
+    for (let y = 0; y < H; y += block) {
+      for (let x = 0; x < W; x += block) {
+        ctx.fillStyle = (((x / block) + (y / block)) & 1) ? '#27272a' : '#18181b';
+        ctx.fillRect(x, y, block, block);
+      }
+    }
+  } else {
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // Pass 1: pixel data. drawImage respects alpha so masked sprites
+  // composite onto the checker; we route through a 1-cell scratch
+  // canvas so putImageData → drawImage keeps things cheap.
+  const scratch = document.createElement('canvas');
+  scratch.width = sw; scratch.height = sh;
+  const sctx = scratch.getContext('2d');
   for (let i = 0; i < N; i++) {
     const col = i % ncols;
     const row = Math.floor(i / ncols);
     const x = padding + col * (sw + gap);
     const y = padding + row * (sh + gap);
-    const processed = convertPreview(sprites[i], format, threshold, invert, effect);
-    ctx.putImageData(processed, x, y);
+    const processed = convertPreview(sprites[i], format, threshold, invert, effect,
+                                     masks ? masks[i] : null);
+    sctx.clearRect(0, 0, sw, sh);
+    sctx.putImageData(processed, 0, 0);
+    ctx.drawImage(scratch, x, y);
   }
 
   // Pass 2: cell borders. Makes empty/all-white sprites visually distinguishable.
@@ -1028,26 +1098,45 @@ function App() {
 
   const [cols, setCols] = useState(4);
   const [rows, setRows] = useState(4);
-  const [marginTop, setMarginTop] = useState(0);
-  const [marginRight, setMarginRight] = useState(0);
-  const [marginBottom, setMarginBottom] = useState(0);
-  const [marginLeft, setMarginLeft] = useState(0);
-  const [hGutter, setHGutter] = useState(0);
-  const [vGutter, setVGutter] = useState(0);
+  const [marginTop, setMarginTop] = useState(5);
+  const [marginRight, setMarginRight] = useState(5);
+  const [marginBottom, setMarginBottom] = useState(5);
+  const [marginLeft, setMarginLeft] = useState(5);
+  const [hGutter, setHGutter] = useState(5);
+  const [vGutter, setVGutter] = useState(5);
 
   // Target: 'sprt' = generic ESP32/Arduino pack; 'mochi' = mochi-esp
   // native build-time pack (MPK1, device 2-plane cells). See
   // design/13-build-time-asset-packs.md.
-  const [target, setTarget] = useState('sprt');
+  const [target, setTarget] = useState('mochi');
+  // Preset: bulk-applies a known-good config for a given mochi-esp
+  // pack flavour. 'scene' = 200×200 background pack with named tap
+  // zones; 'pet' = 96×96 expression pack on a magenta sheet; 'ui' =
+  // 32×32 chrome glyphs (icons, status). Picked once when starting
+  // a new export — fine to tweak afterwards.
+  const [preset, setPreset] = useState('scene');
   // mochi-esp mask source: where transparency comes from.
-  const [maskSource, setMaskSource] = useState('alpha'); // 'alpha' | 'white' | 'none'
-  const [paperStroke, setPaperStroke] = useState(true);  // 1px paper halo (matches server STROKE)
+  const [maskSource, setMaskSource] = useState('alpha'); // 'alpha' | 'white' | 'chroma' | 'none'
+  const [paperStroke, setPaperStroke] = useState(false);  // 1px paper halo (matches server STROKE)
+  // Chroma key for 'chroma' maskSource: any pixel within chromaTol of
+  // chromaHex (Chebyshev distance per channel) reads as background.
+  // Useful for pet sprites exported on a flat coloured cell border
+  // (e.g. magenta #ff00ff sheets) — neither alpha nor near-white
+  // catch them.
+  const [chromaHex, setChromaHex] = useState('#ff00ff');
+  const [chromaTol, setChromaTol] = useState(24);
+  // When true, sheet + thumbnail previews honour the mask plane:
+  // transparent pixels render with alpha=0 so the page's checker
+  // shows through. Off by default — masked sprites on a white sheet
+  // can be hard to count, but the toggle is what makes a chroma key
+  // selection legible. Doesn't affect the binary export.
+  const [showAlpha, setShowAlpha] = useState(true);
 
-  const [outSize, setOutSize] = useState(32);
-  const [format, setFormat] = useState('rgb565');
-  const [threshold, setThreshold] = useState(140);
+  const [outSize, setOutSize] = useState(200);
+  const [format, setFormat] = useState('1bpp');
+  const [threshold, setThreshold] = useState(79);
   const [invert, setInvert] = useState(false);
-  const [smoothing, setSmoothing] = useState(true);
+  const [smoothing, setSmoothing] = useState(false);
   const [labelMaxLen, setLabelMaxLen] = useState(16);
 
   // mochi-esp cells are always 200px tall at most; force a sensible
@@ -1055,12 +1144,12 @@ function App() {
   const isMochi = target === 'mochi';
 
   // Effect: 'none' | 'fs' | 'atkinson' | 'bayer4' | 'bayer8' | 'screen'
-  const [effectKind, setEffectKind] = useState('none');
+  const [effectKind, setEffectKind] = useState('screen');
   const [serpentine, setSerpentine] = useState(true);   // for error-diffusion
   const [bayerStrength, setBayerStrength] = useState(80); // 0..100 → 0..1
-  const [screenAngle, setScreenAngle] = useState(45);
-  const [screenSpacing, setScreenSpacing] = useState(4);
-  const [screenContrast, setScreenContrast] = useState(70); // 0..100 → 0..1
+  const [screenAngle, setScreenAngle] = useState(139);
+  const [screenSpacing, setScreenSpacing] = useState(2);
+  const [screenContrast, setScreenContrast] = useState(38); // 0..100 → 0..1
 
   const effect = useMemo(() => ({
     kind: effectKind,
@@ -1105,6 +1194,123 @@ function App() {
       fits,
     };
   }, [imgEl, cols, rows, marginTop, marginRight, marginBottom, marginLeft, hGutter, vGutter]);
+
+  // ── Presets ────────────────────────────────────────────────────────
+  //
+  // Bulk-apply a known-good config for a given mochi-esp pack
+  // flavour. Each preset is the full set of knobs we'd otherwise have
+  // to set by hand — output size, transparency mode, dithering,
+  // threshold, default labels.
+  //
+  // Labels: a baseline list that's used to seed label slots up to
+  // layout.count. Extra grid cells beyond the list fall back to
+  // `sprite_NN`. Keep these in lock-step with the firmware: pet
+  // names mirror SPRITE_NAMES in main/mood.c; ui names mirror the
+  // status-bar icon set.
+  const PRESETS = {
+    scene: {
+      label: 'scene (200×200, MPK1)',
+      target: 'mochi',
+      outSize: 200,
+      maskSource: 'none',         // backgrounds are fully opaque
+      paperStroke: false,
+      effectKind: 'screen',       // screen-tone reads well at scene scale
+      threshold: 79,
+      smoothing: false,
+      labels: [],                 // scene labels are author-named per-pack
+    },
+    pet: {
+      label: 'pet (96×96, MPK1)',
+      target: 'mochi',
+      outSize: 96,
+      // Sheet/grid for the canonical 18-cell pet export. 6×3 with a
+      // wide margin-bottom (70) accounts for the export tool's
+      // signature line; horizontal gutter 15 separates cells; vertical
+      // gutter 6 is enough to bleed the chroma border between rows.
+      cols: 6, rows: 3,
+      marginTop: 60, marginRight: 60, marginBottom: 70, marginLeft: 60,
+      hGutter: 15, vGutter: 6,
+      // Pet sheets ship on a flat green chroma — green is far enough
+      // from neutral pet line work that the per-channel Chebyshev
+      // distance stays uncontaminated by the line-screen halftone
+      // effect (which only modulates the ink plane, not the mask).
+      maskSource: 'chroma',
+      chromaHex: '#03f805',
+      chromaTol: 24,
+      paperStroke: true,          // halo to keep pet distinct from scene ink
+      effectKind: 'screen',
+      screenAngle: 139,
+      screenSpacing: 2,
+      screenContrast: 61,
+      threshold: 105,
+      smoothing: true,
+      // Canonical pet-v1 cell layout — see the guide SVG served by
+      // mochi.val.run (6×3, row-major). Names line up with
+      // SPRITE_NAMES in firmware/main/mood.c so mpk_find resolves
+      // each expression directly.
+      labels: [
+        // row 0
+        'neutral', 'happy',  'blushing', 'excited',  'playful',   'cheerful_wave',
+        // row 1
+        'hungry',  'eating', 'tired',    'sleeping', 'waking_up', 'comforted',
+        // row 2
+        'sad',     'lonely', 'curious',  'thinking', 'surprised', 'goodbye',
+      ],
+    },
+    ui: {
+      label: 'ui chrome (32×32, MPK1)',
+      target: 'mochi',
+      outSize: 32,
+      maskSource: 'chroma',
+      chromaHex: '#03f805',
+      chromaTol: 24,
+      paperStroke: false,
+      effectKind: 'none',
+      threshold: 128,
+      smoothing: false,
+      // Common chrome glyphs — extend as the device's UI vocabulary
+      // grows. Names line up with the existing care-icon set.
+      labels: [
+        'food', 'heart', 'ball', 'sparkle',
+        'battery', 'wifi', 'voice', 'home',
+      ],
+    },
+  };
+  const applyPreset = useCallback((key) => {
+    const p = PRESETS[key];
+    if (!p) return;
+    setPreset(key);
+    if (p.target)        setTarget(p.target);
+    if (p.outSize)       setOutSize(p.outSize);
+    if (p.maskSource)    setMaskSource(p.maskSource);
+    if (p.chromaHex)     setChromaHex(p.chromaHex);
+    if (p.chromaTol != null) setChromaTol(p.chromaTol);
+    if (p.paperStroke != null) setPaperStroke(p.paperStroke);
+    if (p.effectKind)    setEffectKind(p.effectKind);
+    if (p.screenAngle != null)    setScreenAngle(p.screenAngle);
+    if (p.screenSpacing != null)  setScreenSpacing(p.screenSpacing);
+    if (p.screenContrast != null) setScreenContrast(p.screenContrast);
+    if (p.threshold != null) setThreshold(p.threshold);
+    if (p.smoothing != null) setSmoothing(p.smoothing);
+    if (p.cols != null)      setCols(p.cols);
+    if (p.rows != null)      setRows(p.rows);
+    if (p.marginTop != null)    setMarginTop(p.marginTop);
+    if (p.marginRight != null)  setMarginRight(p.marginRight);
+    if (p.marginBottom != null) setMarginBottom(p.marginBottom);
+    if (p.marginLeft != null)   setMarginLeft(p.marginLeft);
+    if (p.hGutter != null)      setHGutter(p.hGutter);
+    if (p.vGutter != null)      setVGutter(p.vGutter);
+    if (Array.isArray(p.labels)) {
+      // Seed labels for known slots; leave extras as sprite_NN. We
+      // intentionally overwrite existing labels here so flipping
+      // presets gives consistent output without manual cleanup.
+      setLabels((prev) => {
+        const n = Math.max(prev.length, p.labels.length);
+        return Array.from({ length: n }, (_, i) =>
+          p.labels[i] ?? `sprite_${String(i).padStart(2, '0')}`);
+      });
+    }
+  }, []);
 
   // keep labels array in sync with grid count
   useEffect(() => {
@@ -1227,9 +1433,17 @@ function App() {
   // would be misleading here).
   const previewFormat = isMochi ? '1bpp' : format;
 
+  // Per-sprite opacity buffers for the mochi target. Recomputed
+  // whenever the chroma / paper-stroke knobs change so the previews
+  // reflect the export.
+  const previewMasks = useMemo(() => {
+    if (!isMochi || !showAlpha) return null;
+    return sprites.map((s) => buildOpacityBuffer(s, { maskSource, chromaHex, chromaTol, paperStroke }));
+  }, [isMochi, showAlpha, sprites, maskSource, chromaHex, chromaTol, paperStroke]);
+
   const previewURLs = useMemo(
-    () => sprites.map((s) => imageDataToURL(convertPreview(s, previewFormat, threshold, invert, effect))),
-    [sprites, previewFormat, threshold, invert, effect]
+    () => sprites.map((s, i) => imageDataToURL(convertPreview(s, previewFormat, threshold, invert, effect, previewMasks ? previewMasks[i] : null))),
+    [sprites, previewFormat, threshold, invert, effect, previewMasks]
   );
 
   const { pixelBytes, perEntry, totalBytes } = useMemo(() => {
@@ -1270,7 +1484,7 @@ function App() {
         const n = Math.min(lb.length, labelMaxLen);
         for (let j = 0; j < n; j++) buf[off + j] = lb[j];
         off += labelMaxLen;
-        const cell = packCellMochi(sprites[i], { threshold, invert, effect, maskSource, paperStroke });
+        const cell = packCellMochi(sprites[i], { threshold, invert, effect, maskSource, paperStroke, chromaHex, chromaTol });
         buf.set(cell, off);
         off += pixelBytes;             // == 8 + 2*planeBytes
       }
@@ -1300,7 +1514,7 @@ function App() {
       off += pixelBytes;
     }
     return buf;
-  }, [isMochi, sprites, labels, format, outSize, labelMaxLen, threshold, invert, effect, maskSource, paperStroke, pixelBytes, totalBytes]);
+  }, [isMochi, sprites, labels, format, outSize, labelMaxLen, threshold, invert, effect, maskSource, paperStroke, chromaHex, chromaTol, pixelBytes, totalBytes]);
 
   const handleDownload = useCallback(() => {
     const buf = buildBinary();
@@ -1329,9 +1543,10 @@ function App() {
     if (!sprites.length) return null;
     const canvas = buildSheetCanvas(sprites, previewFormat, threshold, invert, effect, {
       cols: effectiveSheetCols, hits, drawHits: true, drawIndices: showIndices,
+      masks: previewMasks, checker: !!previewMasks,
     });
     return canvas ? canvas.toDataURL('image/png') : null;
-  }, [sprites, previewFormat, threshold, invert, effect, hits, effectiveSheetCols, showIndices]);
+  }, [sprites, previewFormat, threshold, invert, effect, hits, effectiveSheetCols, showIndices, previewMasks]);
 
   const handleDownloadSheet = useCallback(() => {
     if (!sprites.length) return;
@@ -1659,6 +1874,17 @@ function App() {
 
         {/* 04 output */}
         <Card num="04" title="OUTPUT">
+          <Row label="preset" hint="bulk-apply config + label seeds">
+            <Chips
+              value={preset}
+              onChange={applyPreset}
+              options={[
+                { value: 'scene', label: 'scene 200²' },
+                { value: 'pet',   label: 'pet 96²' },
+                { value: 'ui',    label: 'ui 32²' },
+              ]}
+            />
+          </Row>
           <Row label="target" hint="pack flavor">
             <Chips
               value={target}
@@ -1707,13 +1933,38 @@ function App() {
                   value={maskSource}
                   onChange={setMaskSource}
                   options={[
-                    { value: 'alpha', label: 'alpha channel' },
-                    { value: 'white', label: 'white = clear' },
-                    { value: 'none',  label: 'all opaque' },
+                    { value: 'alpha',  label: 'alpha channel' },
+                    { value: 'white',  label: 'white = clear' },
+                    { value: 'chroma', label: 'pick colour' },
+                    { value: 'none',   label: 'all opaque' },
                   ]}
                 />
               </Row>
+              {maskSource === 'chroma' && (
+                <Row label="chroma key" hint="pixels within tol of this colour read as background">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="color"
+                      value={chromaHex}
+                      onChange={(e) => setChromaHex(e.target.value)}
+                      className="w-9 h-9 bg-transparent border border-zinc-700 rounded cursor-pointer"
+                      aria-label="chroma colour"
+                    />
+                    <input
+                      type="text"
+                      value={chromaHex}
+                      onChange={(e) => setChromaHex(e.target.value)}
+                      className="w-24 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm text-teal-300 outline-none font-mono"
+                      maxLength={7}
+                      spellCheck={false}
+                    />
+                    <span className="text-xs text-zinc-500">tol</span>
+                    <Slider value={chromaTol} onChange={setChromaTol} min={0} max={128} />
+                  </div>
+                </Row>
+              )}
               <Toggle value={paperStroke} onChange={setPaperStroke} label="paper stroke (1px halo)" />
+              <Toggle value={showAlpha} onChange={setShowAlpha} label="show transparency in preview" />
             </>
           )}
 
