@@ -13,6 +13,11 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* The web prototype uses pet_ids of the form pet_XXXXXXXX-NNN — see
  * c15r/mochi:backend/identity.ts. 64 bytes is plenty. */
@@ -27,3 +32,7 @@ struct mochi_pair_creds {
 bool pair_creds_load(struct mochi_pair_creds *out);
 bool pair_creds_save(const struct mochi_pair_creds *creds);
 bool pair_creds_clear(void);
+
+#ifdef __cplusplus
+}
+#endif

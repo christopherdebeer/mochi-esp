@@ -20,6 +20,11 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 bool sprite_fetch(const char *url, uint8_t *out, size_t expected_len,
                   uint32_t *elapsed_ms);
@@ -70,3 +75,7 @@ bool sprite_fetch_cell(const char *url,
  * locally-stored bytes are still valid.
  */
 bool sprite_fetch_head_etag(const char *url, char *out, size_t out_cap);
+
+#ifdef __cplusplus
+}
+#endif

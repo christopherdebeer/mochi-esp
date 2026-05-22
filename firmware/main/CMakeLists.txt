@@ -87,6 +87,7 @@ idf_component_register(
         esp_https_ota
         espressif__esp_peer
         espressif__esp-sr
+        mbedtls
         log
 )
 

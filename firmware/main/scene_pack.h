@@ -37,6 +37,14 @@ extern "C" {
  * Returns true if the pack opened cleanly. */
 bool scene_pack_init(void);
 
+/* Swap the active scene pack to a caller-provided MPK1 blob — e.g. a
+ * freshly imagined place fetched into PSRAM (design/16). The bytes must
+ * OUTLIVE the swap: pass a heap/PSRAM buffer that is never freed, not a
+ * stack buffer. Validates the envelope; on success replaces the active
+ * pack, resets the current index to 0, and returns true. The previously
+ * active pack (embedded or cached) is forgotten until the next reboot. */
+bool scene_pack_load_bytes(const uint8_t *mpk);
+
 /* Number of scenes in the pack. Returns 0 before init. */
 uint16_t scene_pack_count(void);
 

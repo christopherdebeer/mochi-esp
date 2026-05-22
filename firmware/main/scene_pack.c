@@ -47,6 +47,23 @@ bool scene_pack_init(void) {
     return true;
 }
 
+bool scene_pack_load_bytes(const uint8_t *mpk) {
+    if (!mpk) return false;
+    mpk_t pack;
+    int rc = mpk_open(mpk, &pack);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "scene_pack_load_bytes: mpk_open rc=%d", rc);
+        return false;
+    }
+    s_pack    = pack;
+    s_open    = true;
+    s_current = 0;
+    ESP_LOGI(TAG, "scene_pack: swapped to %ux%u %u cells (fmt=%u) — imagined",
+        (unsigned)s_pack.cell_w, (unsigned)s_pack.cell_h,
+        (unsigned)s_pack.count, (unsigned)s_pack.format);
+    return true;
+}
+
 uint16_t scene_pack_count(void) {
     return s_open ? s_pack.count : 0;
 }
