@@ -30,6 +30,7 @@ idf_component_register(
         "battery.cpp"
         "sleep_gesture.cpp"
         "sprite_cache.cpp"
+        "pack_cache.cpp"
         "ota_update.cpp"
         "key_portal.cpp"
         "decay.c"

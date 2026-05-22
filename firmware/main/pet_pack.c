@@ -5,6 +5,7 @@
 #include "esp_log.h"
 
 #include "mochi_pack.h"
+#include "pack_cache.h"
 
 static const char *TAG = "pet_pack";
 
@@ -20,7 +21,11 @@ static bool  s_open;
 
 bool pet_pack_init(void) {
     if (s_open) return true;
-    int rc = mpk_open(_binary_pet_a_mpk_start, &s_pack);
+    /* "Sync at boot": prefer the server pack (substrate-authored) over
+     * the cached copy over the embedded baseline. pet_a.mpk is the
+     * pet-v1 sheet. See pack_cache.h / design/15. */
+    const uint8_t *bytes = pack_cache_active("pet-v1", _binary_pet_a_mpk_start);
+    int rc = mpk_open(bytes, &s_pack);
     if (rc != 0) {
         ESP_LOGE(TAG, "mpk_open rc=%d", rc);
         return false;

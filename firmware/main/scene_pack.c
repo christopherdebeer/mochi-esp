@@ -5,6 +5,7 @@
 #include "esp_log.h"
 
 #include "mochi_pack.h"
+#include "pack_cache.h"
 #include "pet_state.h"      /* event_kind_t */
 #include "scenes_a_meta.h"
 
@@ -23,7 +24,12 @@ static uint16_t  s_current;
 
 bool scene_pack_init(void) {
     if (s_open) return true;
-    int rc = mpk_open(_binary_scenes_a_mpk_start, &s_pack);
+    /* "Sync at boot": prefer the server pack (substrate-authored) over
+     * the cached copy over the embedded baseline. scenes_a.mpk is the
+     * scene-bundle-a sheet. See pack_cache.h / design/15. */
+    const uint8_t *bytes =
+        pack_cache_active("scene-bundle-a", _binary_scenes_a_mpk_start);
+    int rc = mpk_open(bytes, &s_pack);
     if (rc != 0) {
         ESP_LOGE(TAG, "mpk_open rc=%d", rc);
         return false;
