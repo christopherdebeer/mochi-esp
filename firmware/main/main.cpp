@@ -66,6 +66,7 @@ extern "C" {
 #include "decay.h"
 #include "engagement.h"
 #include "mood.h"
+#include "thought.h"
 #include "event_log.h"
 #include "time_sync.h"
 }
@@ -199,6 +200,38 @@ static void init_dev_pet(int64_t now_ms) {
     s_dev_pet.asleep              = false;
     s_dev_pet.transient.sprite    = SPRITE_NONE;
     s_dev_pet.transient.until     = 0;
+}
+
+/* ─── M11.5a — thought-bubble subsystem ───────────────────────────
+ *
+ * See design/12-thought-bubble.md. Single bubble at a time for M1;
+ * the renderer + touch dispatch read s_active_thought + s_thought_hit
+ * directly. Suppression is local to this translation unit — a
+ * 30 s window after a bubble tap so the same need can't immediately
+ * re-fire before the substrate confirms the action server-side. */
+static pet_thought_t      s_active_thought = {};
+static thought_hit_rect_t s_thought_hit    = {};
+static bool               s_thought_active = false;
+static constexpr int64_t  THOUGHT_SUPPRESS_MS = 30LL * 1000;
+static int64_t            s_thought_suppress_until_ms = 0;
+
+/* Resolve a thought's action into the immediate transient
+ * expression we render during the post-tap 5 s hold. Mirrors the
+ * web side's TRANSIENT_FOR_KIND map; "slept" doesn't have a
+ * transient sprite there, so we use "sleeping" here to give the kid
+ * visible feedback while the substrate round-trip lands. */
+static const char *thought_action_to_expr(const pet_thought_t *t) {
+    if (!t || t->action_kind != THOUGHT_ACTION_CARE_EVENT) return nullptr;
+    switch (t->action_event) {
+        case EVENT_SLEPT:     return "sleeping";
+        case EVENT_FED:       return "eating";
+        case EVENT_PLAYED:    return "excited";
+        case EVENT_COMFORTED: return "comforted";
+        case EVENT_CHEERED:   return "cheerful_wave";
+        case EVENT_HUGGED:    return "blushing";
+        case EVENT_WOKE:      return "waking_up";
+        default:              return nullptr;
+    }
 }
 
 /* Wall-clock ms since epoch — what the server uses for its
@@ -1009,7 +1042,8 @@ extern "C" void app_main(void) {
     };
 
     auto render_with_expression = [&](const char *expr,
-                                      bool full_refresh) -> bool {
+                                      bool full_refresh,
+                                      const pet_thought_t *thought) -> bool {
         /*
          * Cache-first pet cell load. Two suffixes per expression
          * (ink + mask). If both hit, no network. If either misses
@@ -1065,6 +1099,17 @@ extern "C" void app_main(void) {
             PET_CELL_W, PET_CELL_H, PET_DX, PET_DY);
         render_chrome();
 
+        /* M11.5a — thought bubble on top of chrome. Centered above
+         * the pet, between the TL/TR care icons. The hit rect is
+         * cached in module-scope state so the touch classify path
+         * can read it on the next tap. NULL thought = no bubble (the
+         * usual case for action-tap renders and voice-phase
+         * transitions). */
+        if (thought) {
+            thought_render(composite, MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
+                           thought, &s_thought_hit);
+        }
+
         epd->EPD_LoadBuffer(composite, FB_LEN);
         if (full_refresh) {
             epd->EPD_Init();
@@ -1099,9 +1144,25 @@ extern "C" void app_main(void) {
         mood_t m = project_mood(&decayed, slice, n, now_ms);
         age_t a = compute_age(decayed.born_at, now_ms);
         sprite_key_t sk = resolve_sprite(&decayed, m, a.stage, now_ms);
+
+        /* M11.5a — compute the active thought for this render. The
+         * suppression window keeps the same need from re-firing
+         * locally before the substrate confirms; outside the
+         * window, the predicate chain in thought_generate is the
+         * only gate. */
+        const pet_thought_t *thought_ptr = nullptr;
+        if (now_ms >= s_thought_suppress_until_ms &&
+            thought_generate(&decayed, now_ms, &s_active_thought)) {
+            s_thought_active = true;
+            thought_ptr = &s_active_thought;
+        } else {
+            s_thought_active = false;
+            memset(&s_active_thought, 0, sizeof(s_active_thought));
+        }
+
         const char *name = sprite_to_name(sk);
-        if (!name || !render_with_expression(name, false)) {
-            render_with_expression("neutral", false);
+        if (!name || !render_with_expression(name, false, thought_ptr)) {
+            render_with_expression("neutral", false, thought_ptr);
             return "neutral";
         }
         return name;
@@ -1196,7 +1257,7 @@ extern "C" void app_main(void) {
     /* Initial render: pet on scene, neutral. Full refresh seeds the
      * partial-refresh "previous frame" so subsequent taps are
      * flicker-free. */
-    if (!render_with_expression("neutral", true)) {
+    if (!render_with_expression("neutral", true, nullptr)) {
         ESP_LOGE(TAG, "initial neutral render failed; halting");
         while (true) vTaskDelay(pdMS_TO_TICKS(60000));
     }
@@ -1224,8 +1285,19 @@ extern "C" void app_main(void) {
      * register) plus a centre zone for "attention". The status bar
      * itself is non-interactive; its y range is excluded.
      */
-    enum class Zone : uint8_t { CornerTL, CornerTR, CornerBL, CornerBR, Center, None };
+    /* Thought zone is checked first so a tap inside the bubble
+     * always wins over any overlapping corner/center geometry.
+     * Today the bubble sits between TL/TR icons with no overlap,
+     * but future layouts (or a larger hit pad) might cross the
+     * gap — fail closed: bubble first. */
+    enum class Zone : uint8_t {
+        Thought, CornerTL, CornerTR, CornerBL, CornerBR, Center, None
+    };
     auto classify = [&](uint16_t x, uint16_t y) -> Zone {
+        if (s_thought_active &&
+            thought_hit_contains(&s_thought_hit, (int)x, (int)y)) {
+            return Zone::Thought;
+        }
         constexpr int PAD = 6;  /* enlarge each icon hit-rect by 6px on every side */
         for (int i = 0; i < 4; i++) {
             const int x0 = icon_pos_x[i] - PAD;
@@ -1233,7 +1305,9 @@ extern "C" void app_main(void) {
             const int x1 = icon_pos_x[i] + (int)ICON_W + PAD;
             const int y1 = icon_pos_y[i] + (int)ICON_H + PAD;
             if ((int)x >= x0 && (int)x < x1 && (int)y >= y0 && (int)y < y1) {
-                return (Zone)i;   /* enum order matches icon order: TL TR BL BR */
+                /* Icon index 0..3 maps to CornerTL..CornerBR; offset
+                 * by +1 since Zone::Thought slid them down a slot. */
+                return (Zone)(i + 1);
             }
         }
         /* Centre: a square in the middle of the panel, away from icons.
@@ -1249,6 +1323,11 @@ extern "C" void app_main(void) {
             case Zone::CornerBL: return "eating";          /* bowl icon */
             case Zone::CornerBR: return "excited";         /* ball icon */
             case Zone::Center:   return "curious";         /* attention */
+            /* Thought: resolved per-tap from s_active_thought; the
+             * static zone→expr map can't know which action this
+             * bubble carries. The dispatch path below uses
+             * thought_action_to_expr instead. */
+            case Zone::Thought:
             default:             return nullptr;
         }
     };
@@ -1256,7 +1335,11 @@ extern "C" void app_main(void) {
     /* Same map as zone_to_expr, but in event-kind terms. Touch zones
      * are care actions; the centre is just attention so it's a
      * generic "tapped". Used to feed M12's event log on each tap so
-     * engagement.c has real input to project mood from. */
+     * engagement.c has real input to project mood from.
+     *
+     * Zone::Thought returns EVENT_NONE here for the same reason as
+     * zone_to_expr — the dispatch path reads the kind directly from
+     * s_active_thought.action_event. */
     auto zone_to_event = [](Zone z) -> event_kind_t {
         switch (z) {
             case Zone::CornerTL: return EVENT_COMFORTED;
@@ -1264,6 +1347,7 @@ extern "C" void app_main(void) {
             case Zone::CornerBL: return EVENT_FED;
             case Zone::CornerBR: return EVENT_PLAYED;
             case Zone::Center:   return EVENT_TAPPED;
+            case Zone::Thought:
             default:             return EVENT_NONE;
         }
     };
@@ -1379,7 +1463,7 @@ extern "C" void app_main(void) {
                 key_portal::stop();
                 /* Fall through and let the standard render path
                  * draw the pet on the next tick. */
-                render_with_expression("neutral", false);
+                render_with_expression("neutral", false, nullptr);
             }
             continue;
         }
@@ -1410,7 +1494,7 @@ extern "C" void app_main(void) {
         if (voice::stop_requested()) {
             ESP_LOGI(TAG, "voice auto-stop requested → stopping");
             voice::stop_session();
-            render_with_expression("neutral", false);
+            render_with_expression("neutral", false, nullptr);
             last_voice_phase = voice::Phase::Idle;
         }
 
@@ -1425,7 +1509,7 @@ extern "C" void app_main(void) {
                 const char *e = phase_expr(cur);
                 if (e) {
                     ESP_LOGI(TAG, "voice phase → %d, render %s", (int)cur, e);
-                    render_with_expression(e, false);
+                    render_with_expression(e, false, nullptr);
                 }
                 last_voice_phase = cur;
             }
@@ -1433,10 +1517,11 @@ extern "C" void app_main(void) {
 
         if (!got_touch) {
             /* Idle tick. Once per SUBSTRATE_REFRESH_US, re-project the
-             * resting expression and only render if it changed. Skip
-             * during voice sessions (the phase machine owns the pet
-             * face there) and while the key portal is up (its own
-             * screen is current). */
+             * resting expression and re-evaluate the active thought.
+             * Re-render only if either changed. Skip during voice
+             * sessions (the phase machine owns the pet face there)
+             * and while the key portal is up (its own screen is
+             * current). */
             int64_t now_us = esp_timer_get_time();
             if (!voice::is_active() && !key_portal::active() &&
                 (now_us - last_substrate_us) >= SUBSTRATE_REFRESH_US) {
@@ -1449,16 +1534,44 @@ extern "C" void app_main(void) {
                 age_t a = compute_age(decayed.born_at, now_ms);
                 sprite_key_t sk = resolve_sprite(&decayed, m, a.stage, now_ms);
                 const char *name = sprite_to_name(sk);
-                if (name && strcmp(name, last_resting_expr) != 0) {
+
+                /* Re-evaluate the thought. A change of state (bubble
+                 * appeared, disappeared, or its action_event swapped)
+                 * triggers a re-render even if the resting sprite is
+                 * unchanged — the kid shouldn't have to wait for the
+                 * next sprite transition to see a fresh need. */
+                pet_thought_t candidate = {};
+                const bool gen_ok =
+                    now_ms >= s_thought_suppress_until_ms &&
+                    thought_generate(&decayed, now_ms, &candidate);
+                const bool thought_changed =
+                    gen_ok != s_thought_active ||
+                    (gen_ok &&
+                     (candidate.action_event != s_active_thought.action_event ||
+                      candidate.action_kind  != s_active_thought.action_kind));
+
+                const bool sprite_changed =
+                    name && strcmp(name, last_resting_expr) != 0;
+
+                if (sprite_changed || thought_changed) {
+                    s_thought_active = gen_ok;
+                    if (gen_ok) {
+                        s_active_thought = candidate;
+                    } else {
+                        memset(&s_active_thought, 0, sizeof(s_active_thought));
+                    }
+                    const char *render_name = name ? name : last_resting_expr;
                     ESP_LOGI(TAG, "substrate refresh: %s → %s "
-                                  "(stats h%u/f%u/e%u eng=%.2f)",
-                        last_resting_expr, name,
+                                  "(stats h%u/f%u/e%u eng=%.2f) thought=%s",
+                        last_resting_expr, render_name,
                         decayed.stats.happiness, decayed.stats.fullness,
                         decayed.stats.energy,
-                        recent_engagement(slice, n, now_ms));
-                    if (render_with_expression(name, false)) {
+                        recent_engagement(slice, n, now_ms),
+                        s_thought_active ? s_active_thought.line1 : "(none)");
+                    if (render_with_expression(render_name, false,
+                            s_thought_active ? &s_active_thought : nullptr)) {
                         snprintf(last_resting_expr, sizeof(last_resting_expr),
-                                 "%s", name);
+                                 "%s", render_name);
                     }
                 }
             }
@@ -1470,7 +1583,16 @@ extern "C" void app_main(void) {
         last_event_us = now_us;
 
         Zone z = classify(ev.x, ev.y);
-        const char *expr = zone_to_expr(z);
+        /* Thought-bubble taps resolve expr + kind dynamically from
+         * the active thought's payload — the static zone→expr /
+         * zone→event maps can't know which action this particular
+         * bubble carries (today: SLEPT; tomorrow: FED, talk_seed,
+         * etc. — see design/12-thought-bubble.md). */
+        const pet_thought_t *tapped_thought =
+            (z == Zone::Thought && s_thought_active) ? &s_active_thought : nullptr;
+        const char *expr = tapped_thought
+            ? thought_action_to_expr(tapped_thought)
+            : zone_to_expr(z);
         ESP_LOGI(TAG, "touch (%u,%u) zone=%u expr=%s",
             (unsigned)ev.x, (unsigned)ev.y, (unsigned)z,
             expr ? expr : "(gutter)");
@@ -1480,8 +1602,13 @@ extern "C" void app_main(void) {
          * pet's last_interaction_at so the lonely threshold resets.
          * Then project mood + sprite over the recent slice and log
          * what we'd render IF M11.5 was wired up (it isn't yet —
-         * the M8.5 corner-icon UI keeps using `expr` directly). */
-        event_kind_t kind = zone_to_event(z);
+         * the M8.5 corner-icon UI keeps using `expr` directly).
+         *
+         * For thought-bubble taps the kind comes from the bubble's
+         * action_event rather than the static zone map. */
+        event_kind_t kind = tapped_thought
+            ? tapped_thought->action_event
+            : zone_to_event(z);
         int64_t now_ms = now_ms_wall();
         if (kind != EVENT_NONE) {
             /* M12 local log — kept as the source for engagement
@@ -1554,7 +1681,7 @@ extern "C" void app_main(void) {
             voice::stop_session();
             /* Render neutral immediately so the user sees the
              * "session over" state. */
-            render_with_expression("neutral", false);
+            render_with_expression("neutral", false, nullptr);
             last_voice_phase = voice::Phase::Idle;
             continue;
         } else if (z == Zone::Center && voice::is_ready()) {
@@ -1584,7 +1711,7 @@ extern "C" void app_main(void) {
                  * Once the session enters CONNECTING, phase_expr maps
                  * it to 'curious' too, so the next tick of the touch
                  * loop won't re-render. */
-                render_with_expression("curious", false);
+                render_with_expression("curious", false, nullptr);
                 last_voice_phase = voice::Phase::Connecting;
                 if (voice::start_session() == 0) {
                     /* Log the voice turn as a "talked" event — the
@@ -1624,9 +1751,25 @@ extern "C" void app_main(void) {
             }
         }
 
+        /* Thought-bubble tap: suppress further bubble renders for
+         * THOUGHT_SUPPRESS_MS so the same need can't re-surface
+         * locally before the substrate confirms. Clear the active
+         * thought so the subsequent post-hold render_resting() sees
+         * a clean slate (it will re-evaluate the predicate against
+         * the updated substrate snapshot). */
+        if (z == Zone::Thought) {
+            s_thought_suppress_until_ms = now_ms + THOUGHT_SUPPRESS_MS;
+            s_thought_active = false;
+            memset(&s_active_thought, 0, sizeof(s_active_thought));
+        }
+
         /* Render the action expression via partial refresh — fast
-         * cadence, no flicker. */
-        if (!render_with_expression(expr, false)) continue;
+         * cadence, no flicker. The bubble is deliberately NOT drawn
+         * on action-tap renders — the kid just acted on it, so the
+         * 5 s response hold should be uncluttered. The next
+         * render_resting() (after the hold) will recompute the
+         * thought from fresh state. */
+        if (!render_with_expression(expr, false, nullptr)) continue;
 
         /* Hold the expression for ~5 s. We block here rather than
          * scheduling a timer so the next touch event sees a quiet
