@@ -23,32 +23,28 @@
   <main class="mx-auto max-w-3xl p-3 sm:p-4 pb-20 space-y-4">
 
     <p class="text-[11px] text-zinc-500 leading-relaxed pt-1">
-      Client-side utilities for preparing device assets. Everything runs in your browser —
-      no upload, no server, no install.
+      The device-sprite pipeline is consolidated into one studio — authoring · preview ·
+      zones · MPK1 export — backed by the Mochi substrate and the single canonical encoder.
     </p>
 
-    <a href="sprite-forge.html" class="group block border border-zinc-800 bg-zinc-900/40 p-4 hover:border-teal-300/50 transition-colors">
+    <a href="https://c15r--d29d552455f511f1b031ee650bb23af1.web.val.run/" class="group block border border-zinc-800 bg-zinc-900/40 p-4 hover:border-teal-300/50 transition-colors">
       <div class="flex items-center justify-between">
-        <h2 class="pixel text-[13px] text-teal-300">SPRITE·FORGE</h2>
-        <span class="text-zinc-600 group-hover:text-teal-300 transition-colors">→</span>
+        <h2 class="pixel text-[13px] text-teal-300">DEVICE SPRITE STUDIO</h2>
+        <span class="text-zinc-600 group-hover:text-teal-300 transition-colors">↗</span>
       </div>
       <p class="text-[11px] text-zinc-400 leading-relaxed mt-2">
-        Slice a sprite sheet into a grid, resample each cell, and pack to a single
-        <code class="text-teal-300/80">.bin</code> with a drop-in C reader and authored
-        per-sprite tap rectangles. Halftone / dither effects (Floyd–Steinberg, Atkinson,
-        Bayer, line-screen) for 1-bit panels.
+        Author device sprites end to end: create substrate sheets, preview cells, draw tap
+        zones with typed actions (event / nav / talk-seed), tune the per-type line-screen,
+        and export MPK1 packs — all on the same <code class="text-teal-300/80">encode.ts</code> /
+        <code class="text-teal-300/80">mpk.ts</code> the firmware reads. Cells stream from
+        <code class="text-teal-300/80">mochi.val.run/devsprite</code>; sheets + zones persist
+        in substrate.
       </p>
       <div class="text-[10px] text-zinc-500 leading-relaxed mt-3 pt-3 border-t border-zinc-800/60">
-        Two targets:
-        <span class="text-teal-300/80">generic (SPRT)</span> — 1bpp / gray8 / rgb565 single-plane
-        packs for any ESP32 / Arduino project; and
-        <span class="text-teal-300/80">mochi-esp (MPK1)</span> — the device-native build-time
-        pack: <code>bit 0 = ink</code> two-plane cells (ink + mask) byte-identical to a
-        <code>/devsprite/cell</code> response, so a bundled cell drops straight into the
-        on-device compositor. Tap zones export as a build-time scene contract. See
-        <a href="https://github.com/christopherdebeer/mochi-esp/blob/main/design/13-build-time-asset-packs.md" class="text-teal-300/80 hover:underline underline-offset-2">design/13</a>
-        +
-        <a href="https://github.com/christopherdebeer/mochi-esp/blob/main/design/05-sprite-format.md" class="text-teal-300/80 hover:underline underline-offset-2">design/05</a>.
+        Supersedes the old <span class="text-zinc-400">SPRITE·FORGE</span> tool (now a redirect). See
+        <a href="https://github.com/christopherdebeer/mochi-esp/blob/main/design/15-device-sprite-consolidation.md" class="text-teal-300/80 hover:underline underline-offset-2">design/15</a>,
+        <a href="https://github.com/christopherdebeer/mochi-esp/blob/main/design/13-build-time-asset-packs.md" class="text-teal-300/80 hover:underline underline-offset-2">13</a>,
+        <a href="https://github.com/christopherdebeer/mochi-esp/blob/main/design/14-mpk1-edges-and-actions.md" class="text-teal-300/80 hover:underline underline-offset-2">14</a>.
       </div>
     </a>
 
