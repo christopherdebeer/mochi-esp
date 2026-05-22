@@ -1,6 +1,12 @@
 # 14 — MPK1 edges + per-zone actions (sketch)
 
-**Status:** sketch, 2026-05-22. Pre-implementation. Triggered by the
+**Status:** sketch, 2026-05-22. Update 2026-05-22: the `format=1` reader
+(`mochi_pack.h` — format guard + entry-offset directory +
+`mpk_zone_count`/`mpk_zone_get`/`mpk_zone_hit` + talk_seed label table),
+the val producer (`c15r/mochi-device` `packMpkV1`), and host + validator
+conformance have all landed and pass. SPRITE·FORGE authoring of zones and
+consumer rewiring (deleting the name→action `strcmp` switch) remain.
+Triggered by the
 first real consumer of an MPK1 pack landing
 ([13-build-time-asset-packs.md](./13-build-time-asset-packs.md)) and
 hitting the obvious next gap: zone names alone don't carry intent.

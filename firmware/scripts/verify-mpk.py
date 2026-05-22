@@ -23,9 +23,9 @@ Format (format byte 0 — cells only; design/13-build-time-asset-packs.md):
   cell_bytes  = 8 + (has_mask ? 2 : 1) * plane_bytes
   stride      = label_len + cell_bytes
 
-format byte 1 (zones + typed actions, design/14) is variable-stride and
-not yet supported by mochi_pack.h; this validator flags it rather than
-guessing its layout.
+format byte 1 (zones + typed actions, design/14) is variable-stride: a
+u32 LE entry-offset directory, per-entry zone trailers (24 B each), and a
+pack-global talk_seed label table. Validated by _validate_fmt1 below.
 
 Usage:
     verify-mpk.py [pack.mpk ...]      # defaults to firmware/main/assets/*.mpk
@@ -36,6 +36,77 @@ import glob
 import os
 import struct
 import sys
+
+
+def _validate_fmt1(path, d, cell_w, cell_h, count, label_len, has_mask) -> list[str]:
+    """Validate a format=1 pack (directory + per-entry zones + label table)."""
+    errs: list[str] = []
+    plane_bytes = ((cell_w + 7) // 8) * cell_h
+    cell_bytes = 8 + (2 if has_mask else 1) * plane_bytes
+    if 16 + count * 4 > len(d):
+        return ["directory runs past EOF"]
+    offsets = [struct.unpack_from("<I", d, 16 + i * 4)[0] for i in range(count)]
+
+    labels: list[str] = []
+    zone_total = 0
+    for i, off in enumerate(offsets):
+        if off + label_len + cell_bytes + 1 > len(d):
+            errs.append(f"entry {i} runs past EOF")
+            continue
+        labels.append(d[off:off + label_len].split(b"\x00", 1)[0].decode("utf-8", "replace"))
+        w, h, cf = struct.unpack_from(">HHB", d, off + label_len)
+        if w != cell_w or h != cell_h or (cf & 1) != has_mask:
+            errs.append(f"entry {i} ({labels[-1]!r}): cell header {w}x{h}/mask{cf & 1} "
+                        f"!= envelope {cell_w}x{cell_h}/mask{has_mask}")
+        zc = d[off + label_len + cell_bytes]
+        if zc > 15:
+            errs.append(f"entry {i}: zone_count {zc} > 15")
+        zone_total += zc
+        zbase = off + label_len + cell_bytes + 1
+        for z in range(zc):
+            zp = zbase + z * 24
+            if zp + 24 > len(d):
+                errs.append(f"entry {i} zone {z} runs past EOF")
+                break
+            kind = d[zp + 8]
+            if kind > 4:
+                errs.append(f"entry {i} zone {z}: action_kind {kind} > 4")
+
+    # label table sits just past the last entry.
+    n_labels = 0
+    if count and not errs:
+        last = offsets[-1]
+        lzc = d[last + label_len + cell_bytes]
+        lt = last + label_len + cell_bytes + 1 + lzc * 24
+        if lt + 2 > len(d):
+            errs.append("label table runs past EOF")
+        else:
+            n_labels = struct.unpack_from("<H", d, lt)[0]
+            lt += 2
+            for _ in range(n_labels):
+                if lt >= len(d):
+                    errs.append("label table truncated")
+                    break
+                lt += 1 + d[lt]
+            if lt != len(d):
+                errs.append(f"trailing bytes after label table (end {lt} != {len(d)})")
+        # talk_seed label_idx must be in range
+        for i, off in enumerate(offsets):
+            zbase = off + label_len + cell_bytes + 1
+            for z in range(d[off + label_len + cell_bytes]):
+                zp = zbase + z * 24
+                if d[zp + 8] == 4:  # talk_seed
+                    li = struct.unpack_from("<H", d, zp + 10)[0]
+                    if li != 0xFFFF and li >= n_labels:
+                        errs.append(f"entry {i} zone {z}: talk_seed label_idx {li} >= {n_labels}")
+
+    status = "OK" if not errs else "FAIL"
+    print(f"  {os.path.basename(path)}: {status} — format=1 {cell_w}x{cell_h}, "
+          f"{count} cells, {zone_total} zones, {n_labels} seeds, "
+          f"label_len={label_len}, mask={has_mask}, {len(d)} bytes")
+    if labels:
+        print(f"    labels: {', '.join(labels)}")
+    return errs
 
 
 def validate(path: str) -> list[str]:
@@ -56,10 +127,10 @@ def validate(path: str) -> list[str]:
     label_len, flags = d[12], d[13]
     has_mask = flags & 1
 
+    if fmt == 1:
+        return _validate_fmt1(path, d, cell_w, cell_h, count, label_len, has_mask)
     if fmt != 0:
-        print(f"  {os.path.basename(path)}: format={fmt} — skipped "
-              f"(mochi_pack.h supports format 0 only; see design/14)")
-        return []
+        return [f"unsupported format {fmt}"]
 
     plane_bytes = ((cell_w + 7) // 8) * cell_h
     cell_bytes = 8 + (2 if has_mask else 1) * plane_bytes
