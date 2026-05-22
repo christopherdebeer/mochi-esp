@@ -21,6 +21,7 @@
 #include "voice_tools.h"
 #include "voice_https.h"
 #include "voice_peer.h"
+#include "imagine.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -211,7 +212,50 @@ static void worker_task(void *arg) {
             (unsigned)(req->args_json ? strlen(req->args_json) : 0));
 
         tool_result_t result = { .ok = false, .message = NULL, .reason = NULL };
-        bool ok = dispatch_to_valrun(req, &result);
+
+        /* Locally-handled tools intercept here before reaching the
+         * val.run dispatch. They're tools whose effect is on-device
+         * (e.g. "imagine_place" kicks off scene generation). The
+         * model-facing reply still flows through the same
+         * function_call_output path so the conversational shape is
+         * uniform. See design/15-on-device-imagine.md. */
+        bool intercepted = false;
+        if (strcmp(req->name, "imagine_place") == 0) {
+            /* Args follow shared/voice-tools-spec.ts: { name, vibe,
+             * revising? }. We translate `revising` (a place name)
+             * into `from_place_id` later — the v0 stub doesn't
+             * care since it doesn't actually call the queue
+             * endpoint yet. */
+            imagine_req_t ireq = {0};
+            cJSON *args = req->args_json ? cJSON_Parse(req->args_json) : NULL;
+            if (args) {
+                const cJSON *name_j = cJSON_GetObjectItemCaseSensitive(args, "name");
+                const cJSON *vibe_j = cJSON_GetObjectItemCaseSensitive(args, "vibe");
+                const cJSON *rev_j  = cJSON_GetObjectItemCaseSensitive(args, "revising");
+                if (cJSON_IsString(name_j)) {
+                    strncpy(ireq.seed_name, name_j->valuestring, sizeof(ireq.seed_name) - 1);
+                }
+                if (cJSON_IsString(vibe_j)) {
+                    strncpy(ireq.seed_vibe, vibe_j->valuestring, sizeof(ireq.seed_vibe) - 1);
+                }
+                if (cJSON_IsString(rev_j)) {
+                    strncpy(ireq.from_place_id, rev_j->valuestring, sizeof(ireq.from_place_id) - 1);
+                }
+                cJSON_Delete(args);
+            }
+            if (ireq.seed_name[0] && ireq.seed_vibe[0] && imagine_start(&ireq)) {
+                result.ok = true;
+                result.message = strdup("painting now — give me a minute");
+            } else {
+                result.reason = strdup(
+                    ireq.seed_name[0] && ireq.seed_vibe[0]
+                        ? "I can't paint right now — too busy"
+                        : "I need both a name and a vibe");
+            }
+            intercepted = true;
+        }
+
+        bool ok = intercepted ? true : dispatch_to_valrun(req, &result);
         if (!ok && !result.reason) {
             /* Network / val.run failure — fabricate a model-friendly
              * reason so the model can react gracefully. */
