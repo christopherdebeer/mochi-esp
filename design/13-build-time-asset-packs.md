@@ -200,3 +200,6 @@ This reshapes the contract roadmap in four concrete ways:
   the unified zone model
 - `firmware/main/mochi_pack.h` — the reader
 - `site/tools/sprite-forge.html` — the authoring tool (target: mochi-esp)
+- `15-device-sprite-consolidation.md` — the one-encoder home (c15r/mochi-device)
+  the packer is built on, plus the val/firmware conformance that pins this format
+- `firmware/scripts/verify-mpk.py` — validates embedded packs against this spec
