@@ -1,8 +1,11 @@
 # 16 — on-device imagine (sketch)
 
-**Status:** in progress, 2026-05-22. **Server half landed + verified**
-(see "Server changes — as built"); firmware pipeline next. Companion
-firmware skeleton lives in `firmware/main/imagine.{h,c}`.
+**Status:** v0 implemented, 2026-05-22. **Server half landed + verified
+live** (see "Server changes — as built"). **Firmware pipeline landed**
+(`imagine.c` fleshed out from scaffold; builds clean idf v5.3, shipped in
+release `v0.0.17`) — pending on-device validation (needs hardware + BYO
+key + a real generation spend). One polish item remains: the
+re-render-on-DONE wire in `main.cpp` (step 7 below).
 
 > **Update 2026-05-22 — reconciliation.** The first pass of this doc
 > assumed the imagine flow lived in `backend/devsprite-dashboard.ts` and
@@ -344,25 +347,36 @@ already enforces a daily budget (`day_cap` reason in
 - **Pack fetch fails.** As above; pack is on disk server-side,
   retry-friendly.
 
-## v0 scope (what I'd build first)
+## v0 scope — progress
 
-1. Add the three voice tool specs to val.run's `voice-tools-spec-route.ts`.
-2. Add `imagine_place` handler in `voice-tools.ts` that just calls
-   `queuePlaceBirth` and returns the orchestration metadata.
-3. Add the three new `GET` endpoints (`guide.png`, `orchestration`,
-   `pack.mpk`).
-4. Skeleton `firmware/main/imagine.{h,c}` with `imagine_start()`
-   logging each phase but not actually fetching anything (lets us
-   wire the voice-tool path end-to-end before bringing up TLS to
-   api.openai.com a second time).
-5. Fill in step 4 (real OpenAI multipart). This is the load-bearing
-   bit; the rest is plumbing.
-6. Fill in steps 5–8 (upload, ready, pack download, swap).
-7. UX: a "thinking" expression (already exists as a sprite) +
-   bubble text that updates with phase ("painting…", "almost…").
+- [x] **`imagine_place` voice-tool spec** — in `shared/voice-tools-spec.ts`
+  (`buildVoiceToolSpecs`), served per-pet via `/api/voice/tools`. Carries
+  `name` / `vibe` / optional `revising`.
+- [x] **On-device dispatch** — `voice/voice_tools.c` intercepts
+  `imagine_place` and calls `imagine_start()` (effect is on-device, not a
+  val.run round-trip).
+- [x] **Server endpoints** — `/api/places/:id/orchestration`,
+  `/sheets/:id/guide.png` (resvg-wasm), and dynamic-place resolution in
+  `/devsprite/pack/:sheet`. Live + verified. (The original sketch's
+  `pack.mpk` endpoint was unnecessary — the existing pack route serves it
+  once `effectiveTemplate` resolves place sheets.)
+- [x] **Firmware skeleton** — `imagine.{h,c}` phase machine + worker.
+- [x] **OpenAI multipart generate** — `imagine.c` `openai_edit()`:
+  multipart body in PSRAM, BYO-key Bearer auth, b64 extracted by scan +
+  mbedtls (no cJSON on the ~900 KB body). The load-bearing step.
+- [x] **Upload / ready / pack-fetch / swap** — `upload_png()`, ready POST,
+  `sprite_fetch_blob` of the MPK1, `scene_pack_load_bytes()`.
+- [ ] **UX polish** — re-render the panel the moment `imagine_phase()`
+  hits DONE (and surface phase text — "painting…", "almost…" — via the
+  thought bubble). Today the swap lands but paints on the next render
+  tick/tap. The phase enum + accessors are already exposed for this.
+- [ ] **On-device validation** — flash, trigger via voice, confirm the
+  round-trip and the visible scene swap. Owner: device holder.
 
-Steps 1–4 are independently shippable as a no-op feature; steps 5–6
-are the meat; step 7 is polish.
+Not in v0 (deferred): cross-reboot persistence of the active imagined
+place (in-session swap only today), and `imagine_costume` (scene path
+first; the costume flow exists server-side but the device doesn't render
+costume sprites yet).
 
 ## Open questions
 

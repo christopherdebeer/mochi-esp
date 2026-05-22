@@ -3,7 +3,9 @@
 Status: in progress, 2026-05-22. Phases 1–2 landed (single encoder + the
 live serve path delegating to it + conformance; the consolidated studio +
 `format=1` authoring + SPRITE·FORGE retired; boot-sync pack refresh).
-Phase 3 (device-side generation → substrate) planned, tracked in `design/16`.
+Phase 3 v0 landed (on-device imagine: server endpoints live + firmware
+pipeline shipped in `v0.0.17`), pending on-device validation — tracked in
+`design/16`.
 
 **Predecessors:** [05-sprite-format.md](./05-sprite-format.md) (the cell
 wire format), [13-build-time-asset-packs.md](./13-build-time-asset-packs.md)
@@ -112,10 +114,12 @@ The shipped `pet_a.mpk` (96×96, 18 cells) and `scenes_a.mpk` (200×200,
    backed by the single encoder. SPRITE·FORGE is retired to a redirect
    (`site/tools/sprite-forge.html`); `scene-bundle-a`'s zones were
    recovered from the firmware-bundled `scenes_a.mpk` into substrate.
-3. **Unified generation → substrate** — device-side image generation
-   writes canonical sheets back to substrate (the "one artifact, two
-   renderers" model); web-gen and device-gen share one flow. (See
-   `design/16-on-device-imagine.md`.)
+3. **Unified generation → substrate** — *v0 landed*. On-device imagine
+   (design/16): a voice tool drives gpt-image-2 with the BYO key on the
+   device, uploads the PNG to substrate via `/sheets/:id/png`, and pulls
+   the server-assembled MPK1 back through the existing pack route. Server
+   endpoints live; firmware pipeline shipped in `v0.0.17`. Remaining:
+   on-device validation + the re-render-on-DONE UX wire.
 
 ## Cross-references
 
