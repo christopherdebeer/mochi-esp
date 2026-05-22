@@ -38,6 +38,13 @@ static SemaphoreHandle_t s_mtx;
 static pet_t s_pet;
 static bool  s_have_snapshot;
 
+/* Current location (place id) + its resolved sheetId, parsed from
+ * /api/state on every pull/mutate. The device renders pets.location:
+ * home = the embedded bundle, any other place renders its server pack
+ * at device geometry (design/17). Guarded by s_mtx like s_pet. */
+static char s_location[40];
+static char s_location_sheet[64];
+
 /* Push queue + worker. */
 typedef struct {
     event_kind_t kind;
@@ -74,7 +81,9 @@ static bool json_bool(cJSON *parent, const char *key, bool fallback) {
 static bool parse_state_response(const char *body, int len,
                                  pet_t *out_pet,
                                  pet_event_t *out_events, size_t cap,
-                                 size_t *out_count) {
+                                 size_t *out_count,
+                                 char *out_loc, size_t loc_cap,
+                                 char *out_loc_sheet, size_t sheet_cap) {
     cJSON *root = cJSON_ParseWithLength(body, (size_t)len);
     if (!root) {
         ESP_LOGW(TAG, "json parse failed");
@@ -141,6 +150,33 @@ static bool parse_state_response(const char *body, int len,
         }
     }
 
+    /* Current location + resolve its sheetId from places[] (design/17).
+     * location lives on the `pet` object; places[] on the root. */
+    if (out_loc && loc_cap) {
+        out_loc[0] = '\0';
+        cJSON *loc = cJSON_GetObjectItemCaseSensitive(pet, "location");
+        if (cJSON_IsString(loc) && loc->valuestring) {
+            snprintf(out_loc, loc_cap, "%s", loc->valuestring);
+        }
+    }
+    if (out_loc_sheet && sheet_cap) {
+        out_loc_sheet[0] = '\0';
+        cJSON *places = cJSON_GetObjectItemCaseSensitive(root, "places");
+        if (cJSON_IsArray(places) && out_loc && out_loc[0]) {
+            cJSON *p = NULL;
+            cJSON_ArrayForEach(p, places) {
+                cJSON *pid = cJSON_GetObjectItemCaseSensitive(p, "id");
+                cJSON *psh = cJSON_GetObjectItemCaseSensitive(p, "sheetId");
+                if (cJSON_IsString(pid) && pid->valuestring &&
+                    strcmp(pid->valuestring, out_loc) == 0 &&
+                    cJSON_IsString(psh) && psh->valuestring) {
+                    snprintf(out_loc_sheet, sheet_cap, "%s", psh->valuestring);
+                    break;
+                }
+            }
+        }
+    }
+
     cJSON_Delete(root);
     return true;
 }
@@ -184,9 +220,18 @@ static bool do_state_pull(pet_t *out_pet,
         return false;
     }
 
+    char loc[40] = {0}, sheet[64] = {0};
     bool ok = parse_state_response(cap_state.body, cap_state.len,
-                                   out_pet, out_events, cap, out_count);
+                                   out_pet, out_events, cap, out_count,
+                                   loc, sizeof(loc), sheet, sizeof(sheet));
     free(cap_state.body);
+    if (ok) {
+        if (!s_mtx) s_mtx = xSemaphoreCreateMutex();
+        xSemaphoreTake(s_mtx, portMAX_DELAY);
+        snprintf(s_location, sizeof(s_location), "%s", loc);
+        snprintf(s_location_sheet, sizeof(s_location_sheet), "%s", sheet);
+        xSemaphoreGive(s_mtx);
+    }
     return ok;
 }
 
@@ -240,6 +285,17 @@ void pet_sync_touch(int64_t at_ms) {
     xSemaphoreGive(s_mtx);
 }
 
+void pet_sync_current_location(char *id_out, size_t id_cap,
+                               char *sheet_out, size_t sheet_cap) {
+    if (id_out && id_cap) id_out[0] = '\0';
+    if (sheet_out && sheet_cap) sheet_out[0] = '\0';
+    if (!s_mtx) return;
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    if (id_out && id_cap) snprintf(id_out, id_cap, "%s", s_location);
+    if (sheet_out && sheet_cap) snprintf(sheet_out, sheet_cap, "%s", s_location_sheet);
+    xSemaphoreGive(s_mtx);
+}
+
 /* ─── push ────────────────────────────────────────────────────── */
 
 static bool do_mutate_post(event_kind_t kind, int64_t at_ms) {
@@ -275,8 +331,10 @@ static bool do_mutate_post(event_kind_t kind, int64_t at_ms) {
     pet_t tmp;
     pet_event_t evs[12];
     size_t n = 0;
+    char loc[40] = {0}, sheet[64] = {0};
     bool ok = parse_state_response(cap_mut.body, cap_mut.len, &tmp,
-                                   evs, sizeof(evs)/sizeof(evs[0]), &n);
+                                   evs, sizeof(evs)/sizeof(evs[0]), &n,
+                                   loc, sizeof(loc), sheet, sizeof(sheet));
     free(cap_mut.body);
     if (!ok) return false;
 
@@ -284,6 +342,8 @@ static bool do_mutate_post(event_kind_t kind, int64_t at_ms) {
     xSemaphoreTake(s_mtx, portMAX_DELAY);
     s_pet = tmp;
     s_have_snapshot = true;
+    snprintf(s_location, sizeof(s_location), "%s", loc);
+    snprintf(s_location_sheet, sizeof(s_location_sheet), "%s", sheet);
     xSemaphoreGive(s_mtx);
     (void)at_ms;  /* server stamps its own at; we don't need ours */
     ESP_LOGI(TAG,

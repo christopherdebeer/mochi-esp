@@ -67,6 +67,14 @@ bool pet_sync_get_snapshot(pet_t *out_pet);
  * the authoritative server value. */
 void pet_sync_touch(int64_t at_ms);
 
+/* Current location (place id) + its resolved device sheetId, from the
+ * latest /api/state. Both NUL-terminated; empty strings before the
+ * first successful pull or if the pet has no location. The device
+ * renders pets.location: "home" → the bundle, else the place's pack
+ * at device geometry. See design/17. */
+void pet_sync_current_location(char *id_out, size_t id_cap,
+                               char *sheet_out, size_t sheet_cap);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif

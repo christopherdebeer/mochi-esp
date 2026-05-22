@@ -117,6 +117,12 @@ static constexpr size_t SCENE_BYTES = (SCENE_W / 8) * SCENE_H;  /* 5000 */
 #define SCENE_NAV_FULL_EVERY 4
 #define MOCHI_PET_CELL_URL_BASE "https://mochi.val.run/devsprite/cell/pet-v1/"
 
+/* Travel (design/17): a place's device pack fetched into PSRAM and held
+ * live (scene_pack points into it). One reused buffer — travel is
+ * sequential and fetch→swap→blit is atomic on the render thread. */
+#define TRAVEL_PACK_BYTES (320u * 1024u)
+#define MOCHI_BASE_URL    "https://mochi.val.run"
+
 /* OTA — manifest is uploaded as a release asset by the GitHub
  * Actions workflow on every tag push. The `/releases/latest/download/`
  * URL is GitHub's redirector to the latest release's asset, so we
@@ -785,6 +791,9 @@ extern "C" void app_main(void) {
      * remains full-panel size. */
     uint8_t *scene_fb  = (uint8_t *)heap_caps_malloc(SCENE_BYTES, MALLOC_CAP_SPIRAM);
     uint8_t *composite = (uint8_t *)heap_caps_malloc(FB_LEN, MALLOC_CAP_SPIRAM);
+    /* Travel destination pack (design/17). Non-fatal if it fails — the
+     * device just can't follow pets.location to non-home places. */
+    uint8_t *travel_pack = (uint8_t *)heap_caps_malloc(TRAVEL_PACK_BYTES, MALLOC_CAP_SPIRAM);
     /* Pet cell uses the two-plane format: ink (line work) + mask
      * (silhouette). Both same size; allocated separately so we can
      * pass them to blit_two_plane without packing. */
@@ -1456,6 +1465,11 @@ extern "C" void app_main(void) {
     int64_t last_event_us = 0;
     constexpr int64_t DEBOUNCE_US = 200 * 1000;
 
+    /* Travel state (design/17): the place the device is currently
+     * rendering. Boot rendered the home bundle, so we start at "home".
+     * The loop below follows pets.location and re-renders on change. */
+    char last_location[40] = "home";
+
     /* Auto-trigger key portal if NVS has no OpenAI key. The user
      * landed here either by skipping the optional key field during
      * provisioning, or by an OTA from a build where it was set on a
@@ -1575,6 +1589,53 @@ extern "C" void app_main(void) {
             voice::stop_session();
             render_with_expression("neutral", false, nullptr);
             last_voice_phase = voice::Phase::Idle;
+        }
+
+        /* Travel (design/17): follow pets.location. pet_sync refreshes it
+         * on every pull/mutate, so a tap or the periodic resync picks up
+         * a voice move_to_location / idle drift / travel-to-an-imagined-
+         * place. On change we swap the device scene: "home" restores the
+         * embedded bundle, any other place renders its server pack at
+         * device geometry. Deferred while voice is live (avoid a mid-call
+         * full refresh + a blocking fetch on the render thread); picked up
+         * the tick after the session ends. */
+        if (!voice::is_active()) {
+            char loc[40], lsheet[64];
+            pet_sync_current_location(loc, sizeof(loc), lsheet, sizeof(lsheet));
+            if (loc[0] && strcmp(loc, last_location) != 0) {
+                bool swapped = false;
+                if (strcmp(loc, "home") == 0) {
+                    swapped = scene_pack_load_home();
+                } else if (lsheet[0] && travel_pack) {
+                    char purl[160];
+                    snprintf(purl, sizeof(purl),
+                        "%s/devsprite/pack/%s?cw=%u&ch=%u",
+                        MOCHI_BASE_URL, lsheet,
+                        (unsigned)SCENE_W, (unsigned)SCENE_H);
+                    size_t plen = 0; uint32_t pms = 0;
+                    if (sprite_fetch_blob(purl, travel_pack,
+                            TRAVEL_PACK_BYTES, &plen, &pms)) {
+                        swapped = scene_pack_load_bytes(travel_pack);
+                    } else {
+                        ESP_LOGW(TAG, "travel: pack fetch failed for %s", lsheet);
+                    }
+                }
+                if (swapped) {
+                    /* Day/night for 2-cell place packs: pick the cell by
+                     * RTC hour. Meta-link resolution is design/17 phase 4. */
+                    if (scene_pack_count() == 2) {
+                        mochi_datetime dt = {};
+                        bool night = rtc_get(&dt) && (dt.hour < 7 || dt.hour >= 19);
+                        scene_pack_set(night ? 1 : 0);
+                    }
+                    scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H);
+                    render_with_expression("neutral", true, nullptr);
+                    ESP_LOGI(TAG, "traveled → %s", loc);
+                }
+                /* Record either way so a failed fetch doesn't thrash the
+                 * loop every tick; a later re-travel retries. */
+                snprintf(last_location, sizeof(last_location), "%s", loc);
+            }
         }
 
         /* Phase-driven expression update. Runs on every loop tick

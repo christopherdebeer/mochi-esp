@@ -22,6 +22,11 @@ static mpk_t     s_pack;
 static bool      s_open;
 static uint16_t  s_current;
 
+/* The "home" bundle bytes resolved at init (server-synced or embedded).
+ * Kept so scene_pack_load_home() can restore the bundle after a travel
+ * swapped the active pack to a place (design/17). */
+static const uint8_t *s_home_bytes;
+
 bool scene_pack_init(void) {
     if (s_open) return true;
     /* "Sync at boot": prefer the server pack (substrate-authored) over
@@ -34,6 +39,7 @@ bool scene_pack_init(void) {
         ESP_LOGE(TAG, "mpk_open rc=%d", rc);
         return false;
     }
+    s_home_bytes = bytes;
     if (s_pack.count != SCENES_A_COUNT) {
         ESP_LOGW(TAG, "pack count %u != meta count %u — meta header"
                       " out of sync with .mpk binary",
@@ -44,6 +50,22 @@ bool scene_pack_init(void) {
         (unsigned)s_pack.count, (int)s_pack.has_mask);
     s_open = true;
     s_current = 0;
+    return true;
+}
+
+bool scene_pack_load_home(void) {
+    if (!s_home_bytes) return false;
+    mpk_t pack;
+    int rc = mpk_open(s_home_bytes, &pack);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "scene_pack_load_home: mpk_open rc=%d", rc);
+        return false;
+    }
+    s_pack    = pack;
+    s_open    = true;
+    s_current = 0;
+    ESP_LOGI(TAG, "scene_pack: restored home bundle (%u cells)",
+        (unsigned)s_pack.count);
     return true;
 }
 

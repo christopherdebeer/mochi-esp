@@ -45,6 +45,12 @@ bool scene_pack_init(void);
  * active pack (embedded or cached) is forgotten until the next reboot. */
 bool scene_pack_load_bytes(const uint8_t *mpk);
 
+/* Restore the active pack to the "home" bundle resolved at init (the
+ * embedded/server-synced scene-bundle-a). Used when travel returns the
+ * pet home (pets.location == "home"). Resets the index to 0. Returns
+ * false if init hasn't run. See design/17. */
+bool scene_pack_load_home(void);
+
 /* Number of scenes in the pack. Returns 0 before init. */
 uint16_t scene_pack_count(void);
 

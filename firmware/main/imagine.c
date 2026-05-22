@@ -11,8 +11,12 @@
  *   4. generate     POST api.openai.com/v1/images/edits (multipart)
  *   5. upload       POST /sheets/:sheet/png (raw image/png)
  *   6. ready        POST /api/places/:id/ready
- *   7. fetch pack   GET /devsprite/pack/:sheet         → MPK1
- *   8. swap         scene_pack_load_bytes()            → re-render
+ *
+ * Imagine NOTIFIES, it does not travel (design/17): the place now exists
+ * and is ready, but the pet stays put until it actually travels there
+ * (voice move_to_location, or accepting the hint). The device renders
+ * the new place only once pets.location points at it, via the
+ * pet_sync → scene-swap path in main.cpp.
  *
  * The server computes the prompt (versioned style preamble), the gen
  * size, and the exemplar — the firmware just follows the URLs the
@@ -48,7 +52,6 @@
 
 #include "voice/voice_https.h"
 #include "sprite_fetch.h"
-#include "scene_pack.h"
 #include "openai_key.h"
 #include "pair_creds.h"
 
@@ -70,14 +73,6 @@ static const char *TAG = "imagine";
 #define EXEMPLAR_MAX     (512u  * 1024)
 #define OPENAI_RESP_MAX  (1280u * 1024)   /* ~600-900 KB b64 + envelope */
 #define PNG_MAX          (768u  * 1024)   /* decoded 1504x720 PNG       */
-#define PACK_MAX         (320u  * 1024)
-
-/* Device scene geometry. Place sheets are authored at web geometry
- * (360x336); we fetch their pack at the panel's cell size so the
- * verbatim-row-copy blit accepts them (design/17). Matches main.cpp
- * SCENE_W/SCENE_H. */
-#define IMAGINE_CELL_W 200
-#define IMAGINE_CELL_H 200
 
 #define MP_BOUNDARY "----mochiimagineKLuaBOUNDARY"
 
@@ -92,10 +87,6 @@ static int64_t       s_last_attempt_us;
 static char          s_place_id[40];
 static char          s_pack_path[96];
 static char          s_reason[120];
-
-/* The active imagined pack lives forever once swapped in (mpk pointers
- * reference it). Freed only when a new imagine replaces it. */
-static uint8_t      *s_active_pack;
 
 static imagine_req_t *clone_req(const imagine_req_t *src) {
     imagine_req_t *dst = (imagine_req_t *)heap_caps_malloc(
@@ -421,14 +412,13 @@ static void run_imagine(const imagine_req_t *req) {
     char prompt[1200] = {0};
     char size_str[16] = "1504x720";
     char guide_url[160] = {0}, exemplar_url[160] = {0}, upload_url[160] = {0};
-    char pack_url[160] = {0}, ready_url[160] = {0}, failed_url[160] = {0};
+    char ready_url[160] = {0}, failed_url[160] = {0};
     char sheet_id[80] = {0};
     bool ok_fields =
         json_str(oroot, "prompt", prompt, sizeof(prompt)) &&
         json_str(oroot, "guide_url", guide_url, sizeof(guide_url)) &&
         json_str(oroot, "exemplar_url", exemplar_url, sizeof(exemplar_url)) &&
         json_str(oroot, "upload_url", upload_url, sizeof(upload_url)) &&
-        json_str(oroot, "pack_url", pack_url, sizeof(pack_url)) &&
         json_str(oroot, "ready_url", ready_url, sizeof(ready_url)) &&
         json_str(oroot, "sheet_id", sheet_id, sizeof(sheet_id));
     json_str(oroot, "failed_url", failed_url, sizeof(failed_url));
@@ -496,47 +486,18 @@ static void run_imagine(const imagine_req_t *req) {
     if (!rresp) { fail_reason("mark-ready failed", pet_id, failed_url); return; }
     free(rresp);
 
-    /* Travel: make this place the pet's current location so substrate +
-     * device agree, and it persists across reboot (design/17). Best-effort
-     * — the local swap below is the primary effect; web coherence is
-     * secondary, so a failure here doesn't fail the imagine. */
-    {
-        char enter_rel[96];
-        snprintf(enter_rel, sizeof(enter_rel), "/api/places/%s/enter", s_place_id);
-        char *en = api_post_json(enter_rel, pet_id, "{}");
-        free(en);
-    }
-
-    /* 7 — fetch the assembled pack (server crops day/night cells) -- */
-    set_phase(IMAGINE_FETCHING_PACK);
-    uint8_t *pack = (uint8_t *)heap_caps_malloc(PACK_MAX, MALLOC_CAP_SPIRAM);
-    if (!pack) { fail_reason("pack alloc failed", pet_id, failed_url); return; }
-    size_t pack_len = 0;
-    snprintf(url, sizeof(url), "%s%s?cw=%d&ch=%d",
-        MOCHI_BASE, pack_url, IMAGINE_CELL_W, IMAGINE_CELL_H);
-    if (!sprite_fetch_blob(url, pack, PACK_MAX, &pack_len, &ms)) {
-        heap_caps_free(pack);
-        fail_reason("pack fetch failed", pet_id, failed_url);
-        return;
-    }
-
-    /* 8 — swap into the live scene pack --------------------------- */
-    set_phase(IMAGINE_SWAPPING);
-    if (!scene_pack_load_bytes(pack)) {
-        heap_caps_free(pack);
-        fail_reason("pack invalid", pet_id, failed_url);
-        return;
-    }
-    /* Keep the pack alive (scene_pack holds pointers into it); free the
-     * previous imagined pack if any. */
-    if (s_active_pack) heap_caps_free(s_active_pack);
-    s_active_pack = pack;
+    /* Done. Imagine NOTIFIES, it does not travel (design/17): the place
+     * now exists + is ready, but the pet stays put until it actually
+     * travels there (voice move_to_location, or accepting the hint). The
+     * device's pet_sync→scene swap (main.cpp) renders it once
+     * pets.location points at it. The "somewhere new" hint is the
+     * substrate's job (a pet thought set on ready), shared by web + device
+     * — model proposes, substrate disposes. */
     snprintf(s_pack_path, sizeof(s_pack_path), "%s", sheet_id);
-
     set_phase(IMAGINE_DONE);
     atomic_store(&s_in_flight, false);
-    ESP_LOGI(TAG, "imagine done: %s (%u-byte pack)",
-        s_place_id, (unsigned)pack_len);
+    ESP_LOGI(TAG, "imagine done (ready, not traveled): place=%s sheet=%s",
+        s_place_id, sheet_id);
 }
 
 static void worker_task(void *arg) {

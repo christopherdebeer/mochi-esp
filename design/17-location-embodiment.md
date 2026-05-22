@@ -124,34 +124,45 @@ visual tuning knob.
 - **Geometry projection** — *landed.* `/devsprite/pack/<sheet>?cw=200&ch=200`
   crops per the authoring grid, encodes each cell at device size
   (`deriveOrLoadCell` `outW`/`outH`). Verified: scene-v1 200×200/20064 B.
-- **`POST /api/places/:id/enter`** — *landed.* Sets `pets.location` (the
-  travel write the device/voice/web all funnel through).
-- **Imagine notify-not-travel** — *to do.* Walk back the device auto-swap
-  added in v0.0.17 so imagine ends at ready+notify; land it *with* the
-  travel-render wire so the device doesn't regress to silent.
-- **Location-driven re-render** — *to do.* `pet_sync` parses `location` +
-  `places[]`; on change, fetch at device geometry + swap (+ the
-  re-render-on-change wire, which also covers design/16's deferred
-  re-render-on-DONE). Day/night via RTC + meta link.
+- **`POST /api/places/:id/enter`** — *landed.* Sets `pets.location`. The
+  device travel-write hook for a future device-initiated travel (accept a
+  hint / `nav_place`); currently unused on-device (imagine no longer calls
+  it — see below). Voice `move_to_location` + drift remain the live writers.
+- **Imagine notify-not-travel** — *landed.* `imagine.c` ends at
+  ready+DONE (no `/enter`, no pack-fetch, no swap); the pet stays put
+  until it actually travels there. The "somewhere new" hint is the
+  substrate's job (a pet thought on ready) — *to do server-side*.
+- **Location-driven re-render** — *landed* (pending on-device validation).
+  `pet_sync` parses `location` + resolves its `sheetId` from `places[]`
+  (`pet_sync_current_location`); `main.cpp`'s loop swaps the device scene
+  on change — `home` → `scene_pack_load_home()`, else fetch
+  `/devsprite/pack/<sheet>?cw=200&ch=200` → `scene_pack_load_bytes`, then
+  full-refresh. Deferred while voice is live. Day/night for 2-cell place
+  packs picks the cell by RTC hour (<7 or ≥19 → night).
 - **Costumes on device** — *to do.* Render `current_costume_id` via the
   costume sheet's device cells.
 - **Idle drift** — no new mechanism; it's already a `pets.location`
-  writer, so it "just works" once the device renders location. Only
+  writer, so it "just works" now that the device renders location. Only
   tuning: drift cadence vs e-ink full-refresh cost.
-- **Variant meta link** — *to do.* The non-tappable day/night (→general)
-  resolver in the `format=1` trailer + the device-side RTC resolution.
+- **Variant meta link** — *to do.* Today day/night is a 2-cell convention
+  (cell 0 day / 1 night) resolved by RTC; the general non-tappable meta
+  link (→ non-binary, non-time conditions) in the `format=1` trailer is
+  the phase-4 generalisation.
 
 ## Implementation phases
 
 1. **Geometry projection + `/enter`** — *done* (server). Unblocks
    rendering a place at device geometry.
-2. **Travel render + imagine notify.** `pet_sync` location→swap; walk back
-   imagine auto-travel to notify; re-render-on-change. Day/night via RTC +
-   meta link. (Lands the imagine loop visibly + correctly together.)
+2. **Travel render + imagine notify** — *done* (pending on-device
+   validation). `pet_sync` location→swap in `main.cpp`; imagine walked
+   back to notify; day/night by RTC for 2-cell packs. (Also delivers
+   design/16's deferred re-render: travel is the swap+render path.)
+   Remaining within this track: the substrate "somewhere new" thought on
+   `markPlaceReady` so imagine surfaces a travel hint.
 3. **Costumes on device** — render `current_costume_id`.
 4. **`nav_place` + variant authoring polish** — authored device→substrate
-   travel (door-to-a-place); studio support for meta links + tappable
-   variants.
+   travel (door-to-a-place, via `/enter`); the general meta-link variant
+   resolver + studio support for meta links + tappable variants.
 
 ## Cross-references
 
