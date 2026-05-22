@@ -103,3 +103,15 @@ bool scene_pack_current_has_zones(void) {
     }
     return false;
 }
+
+const mpk_zone_t *scene_pack_current_zones(uint8_t *out_count) {
+    if (out_count) *out_count = 0;
+    if (!s_open) return NULL;
+    for (size_t i = 0; i < SCENES_A_ZONES_COUNT; i++) {
+        if (SCENES_A_ZONES[i].sprite_idx == s_current) {
+            if (out_count) *out_count = SCENES_A_ZONES[i].count;
+            return SCENES_A_ZONES[i].items;
+        }
+    }
+    return NULL;
+}

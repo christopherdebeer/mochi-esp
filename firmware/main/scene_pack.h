@@ -27,6 +27,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "mochi_pack.h"   /* mpk_zone_t */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -72,6 +74,15 @@ bool scene_pack_zone_at(int16_t x, int16_t y, const char **out_name);
  * suppressed. Unzoned scenes (most of scenes_a today) keep the
  * old behaviour as a safety net. */
 bool scene_pack_current_has_zones(void);
+
+/* Iterate the current scene's zone set. Returns the count via
+ * *out_count and a pointer to the zones array (borrowed, lives for
+ * the program's lifetime). Returns NULL if the current scene has
+ * no zones. Used by the dev-only outline overlay so callers can
+ * visualise what hit-tests against what — invaluable when authored
+ * zone rects don't line up with what reads as tappable on the
+ * hardware panel. */
+const mpk_zone_t *scene_pack_current_zones(uint8_t *out_count);
 
 #ifdef __cplusplus
 }
