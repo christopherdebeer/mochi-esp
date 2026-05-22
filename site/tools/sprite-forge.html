@@ -376,6 +376,110 @@ function packPixels(imgData, format, threshold, invert, effect) {
   return out;
 }
 
+// ───────────────────────── mochi-esp native pack ─────────────────────────
+//
+// The device wire format (eink-pet:design/05-sprite-format.md) is the
+// OPPOSITE bit convention from the generic SPRT pack and carries a
+// second mask plane for transparency:
+//   ink  plane: bit 0 = ink/black,  bit 1 = paper/white
+//   mask plane: bit 0 = opaque,     bit 1 = transparent (show scene)
+// Both planes MSB-first, row-major, rows byte-aligned at ceil(w/8).
+//
+// Each cell is encoded byte-identical to a /devsprite/cell response:
+// an 8-byte header (w u16 BE, h u16 BE, flags u8, 3 reserved) followed
+// by the ink plane then the mask plane. That makes a bundled cell and
+// a fetched cell the same bytes — see design/13-build-time-asset-packs.md.
+
+// Per-pixel ink (dark) decision shared with the preview/effect path.
+function inkDarkBuffer(imgData, threshold, invert, effect) {
+  const N = imgData.width * imgData.height;
+  if (effect && effect.kind !== 'none') {
+    const bin = applyEffect(imgData, effect, threshold, invert); // 0/255
+    const out = new Uint8Array(N);
+    for (let i = 0; i < N; i++) out[i] = bin[i] === 0 ? 1 : 0;
+    return out;
+  }
+  const buf = lumaBuffer(imgData, invert);
+  const out = new Uint8Array(N);
+  for (let i = 0; i < N; i++) out[i] = buf[i] < threshold ? 1 : 0;
+  return out;
+}
+
+// Encode one cell to the device 2-plane format. Returns Uint8Array
+// (8-byte header + ink plane + mask plane).
+function packCellMochi(imgData, { threshold, invert, effect, maskSource, paperStroke }) {
+  const w = imgData.width, h = imgData.height, src = imgData.data;
+  const N = w * h;
+  const rowBytes = (w + 7) >> 3;
+  const planeBytes = rowBytes * h;
+
+  const isInk = inkDarkBuffer(imgData, threshold, invert, effect);
+
+  // Opacity per pixel: 1 = opaque, 0 = transparent.
+  const opaque = new Uint8Array(N);
+  for (let i = 0; i < N; i++) {
+    if (maskSource === 'alpha') {
+      opaque[i] = src[i * 4 + 3] >= 128 ? 1 : 0;
+    } else if (maskSource === 'white') {
+      // Near-white in the ORIGINAL image reads as background.
+      const r = src[i * 4], g = src[i * 4 + 1], b = src[i * 4 + 2];
+      opaque[i] = (r > 240 && g > 240 && b > 240) ? 0 : 1;
+    } else {
+      opaque[i] = 1; // 'none' — everything opaque
+    }
+  }
+
+  // Paper stroke: every transparent pixel with an opaque 8-neighbour
+  // becomes opaque paper (mask=0, ink=paper). Mirrors the server's
+  // STROKE step (design/05 § "Paper stroke"); clipped at cell bounds.
+  if (paperStroke) {
+    const grow = new Uint8Array(N);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (opaque[i]) continue;
+        let touch = false;
+        for (let dy = -1; dy <= 1 && !touch; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            const nx = x + dx, ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+            if (opaque[ny * w + nx]) { touch = true; break; }
+          }
+        }
+        if (touch) grow[i] = 1;
+      }
+    }
+    for (let i = 0; i < N; i++) {
+      if (grow[i]) { opaque[i] = 1; isInk[i] = 0; } // opaque paper ring
+    }
+  }
+
+  const ink = new Uint8Array(planeBytes);   // 0x00 = all ink; set bit → paper
+  const mask = new Uint8Array(planeBytes);  // 0x00 = all opaque; set bit → transparent
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      const bytePos = y * rowBytes + (x >> 3);
+      const bit = 0x80 >> (x & 7);
+      const transparent = !opaque[i];
+      // Transparent pixels carry paper in the ink plane by convention.
+      const inkBlack = !transparent && isInk[i];
+      if (!inkBlack) ink[bytePos] |= bit;     // paper(1) where not black
+      if (transparent) mask[bytePos] |= bit;  // transparent(1)
+    }
+  }
+
+  const out = new Uint8Array(8 + planeBytes * 2);
+  out[0] = (w >> 8) & 0xff; out[1] = w & 0xff;   // width BE
+  out[2] = (h >> 8) & 0xff; out[3] = h & 0xff;   // height BE
+  out[4] = 0x01;                                  // flags: mask present
+  // 5..7 reserved (zero)
+  out.set(ink, 8);
+  out.set(mask, 8 + planeBytes);
+  return out;
+}
+
 const imageDataToURL = (imgData) => {
   const c = document.createElement('canvas');
   c.width = imgData.width;
@@ -610,6 +714,90 @@ static inline int sprt_hit_test(const sprt_hit_set_t *sets, size_t n_sets,
 //                   current_sprite, touch_x, touch_y, &name) >= 0) {
 //   handle_tap(name);
 // }
+`;
+
+// Canonical reader for the mochi-esp native pack. Kept in sync with
+// firmware/main/mochi_pack.h in the repo (that file is the source of
+// truth on-device; this copy is for the binding card / copy button).
+const MOCHI_PARSER = `// mochi_pack.h — build-time sprite pack reader for mochi-esp
+// Pack "MPK1" from SPRITE·FORGE (target: mochi-esp). Each entry's cell
+// blob is byte-identical to a /devsprite/cell response, so bundled and
+// fetched cells share one compositor::blit_two_plane path.
+// See design/05-sprite-format.md + design/13-build-time-asset-packs.md.
+#pragma once
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+
+typedef struct {
+  uint16_t       cell_w, cell_h, count;
+  uint8_t        label_len, has_mask;
+  uint32_t       plane_bytes;   // ((cell_w+7)/8)*cell_h
+  uint32_t       cell_bytes;    // 8 + (has_mask?2:1)*plane_bytes
+  uint32_t       stride;        // label_len + cell_bytes
+  const uint8_t *base;
+} mpk_t;
+
+static inline int mpk_open(const uint8_t *d, mpk_t *p) {
+  if (memcmp(d, "MPK1", 4) != 0) return -1;
+  if (d[4] != 1) return -2;
+  p->cell_w    = (uint16_t)d[6]  | ((uint16_t)d[7]  << 8);
+  p->cell_h    = (uint16_t)d[8]  | ((uint16_t)d[9]  << 8);
+  p->count     = (uint16_t)d[10] | ((uint16_t)d[11] << 8);
+  p->label_len = d[12];
+  p->has_mask  = d[13] & 1;
+  p->plane_bytes = (uint32_t)((p->cell_w + 7) / 8) * p->cell_h;
+  p->cell_bytes  = 8u + (p->has_mask ? 2u : 1u) * p->plane_bytes;
+  p->stride      = (uint32_t)p->label_len + p->cell_bytes;
+  p->base        = d + 16;
+  return 0;
+}
+static inline const char    *mpk_label(const mpk_t *p, uint16_t i) {
+  return (const char *)(p->base + (size_t)i * p->stride);
+}
+static inline const uint8_t *mpk_cell(const mpk_t *p, uint16_t i) {
+  return p->base + (size_t)i * p->stride + p->label_len;     // = a /devsprite/cell blob
+}
+static inline const uint8_t *mpk_ink(const mpk_t *p, uint16_t i) {
+  return mpk_cell(p, i) + 8;
+}
+static inline const uint8_t *mpk_mask(const mpk_t *p, uint16_t i) {
+  return p->has_mask ? mpk_cell(p, i) + 8 + p->plane_bytes : NULL;
+}
+static inline int mpk_find(const mpk_t *p, const char *name) {
+  for (uint16_t i = 0; i < p->count; i++)
+    if (strncmp(mpk_label(p, i), name, p->label_len) == 0) return (int)i;
+  return -1;
+}
+
+// ── Tap zones (build-time scene contract; see <pack>_meta.h) ────────
+typedef struct { uint16_t x, y, w, h; const char *name; } mpk_zone_t;
+typedef struct { uint16_t sprite_idx; uint8_t count; const mpk_zone_t *items; } mpk_zone_set_t;
+static inline int mpk_zone_test(const mpk_zone_set_t *sets, size_t n,
+                                uint16_t idx, int16_t x, int16_t y,
+                                const char **out) {
+  for (size_t s = 0; s < n; s++) {
+    if (sets[s].sprite_idx != idx) continue;
+    for (uint8_t z = 0; z < sets[s].count; z++) {
+      const mpk_zone_t *r = &sets[s].items[z];
+      if (x >= (int16_t)r->x && x < (int16_t)(r->x + r->w) &&
+          y >= (int16_t)r->y && y < (int16_t)(r->y + r->h)) {
+        if (out) *out = r->name;
+        return (int)z;
+      }
+    }
+    return -1;
+  }
+  return -1;
+}
+
+// ── Wiring ──────────────────────────────────────────────────────────
+// CMake:  idf_component_register(... EMBED_FILES "assets/pets.mpk.bin" ...)
+// extern const uint8_t _binary_pets_mpk_bin_start[] asm("_binary_pets_mpk_bin_start");
+// mpk_t pack; mpk_open(_binary_pets_mpk_bin_start, &pack);
+// int i = mpk_find(&pack, "sleeping");
+// compositor::blit_two_plane(composite, W, H, mpk_ink(&pack, i),
+//   mpk_mask(&pack, i), pack.cell_w, pack.cell_h, PET_DX, PET_DY);
 `;
 
 // ───────────────────────────── hit area editor ─────────────────────
@@ -847,12 +1035,24 @@ function App() {
   const [hGutter, setHGutter] = useState(0);
   const [vGutter, setVGutter] = useState(0);
 
+  // Target: 'sprt' = generic ESP32/Arduino pack; 'mochi' = mochi-esp
+  // native build-time pack (MPK1, device 2-plane cells). See
+  // design/13-build-time-asset-packs.md.
+  const [target, setTarget] = useState('sprt');
+  // mochi-esp mask source: where transparency comes from.
+  const [maskSource, setMaskSource] = useState('alpha'); // 'alpha' | 'white' | 'none'
+  const [paperStroke, setPaperStroke] = useState(true);  // 1px paper halo (matches server STROKE)
+
   const [outSize, setOutSize] = useState(32);
   const [format, setFormat] = useState('rgb565');
   const [threshold, setThreshold] = useState(140);
   const [invert, setInvert] = useState(false);
   const [smoothing, setSmoothing] = useState(true);
   const [labelMaxLen, setLabelMaxLen] = useState(16);
+
+  // mochi-esp cells are always 200px tall at most; force a sensible
+  // ink threshold up front since the device is 1-bit.
+  const isMochi = target === 'mochi';
 
   // Effect: 'none' | 'fs' | 'atkinson' | 'bayer4' | 'bayer8' | 'screen'
   const [effectKind, setEffectKind] = useState('none');
@@ -1022,19 +1222,62 @@ function App() {
   }, [imgEl, layout, marginTop, marginLeft, hGutter, vGutter, outSize, smoothing]);
 
   // preview thumbnails reflect the chosen output format
+  // mochi-esp is always 1-bit on the device; preview as 1bpp so the
+  // thumbnails + threshold reflect what gets packed (the rgb565 sim
+  // would be misleading here).
+  const previewFormat = isMochi ? '1bpp' : format;
+
   const previewURLs = useMemo(
-    () => sprites.map((s) => imageDataToURL(convertPreview(s, format, threshold, invert, effect))),
-    [sprites, format, threshold, invert, effect]
+    () => sprites.map((s) => imageDataToURL(convertPreview(s, previewFormat, threshold, invert, effect))),
+    [sprites, previewFormat, threshold, invert, effect]
   );
 
   const { pixelBytes, perEntry, totalBytes } = useMemo(() => {
+    if (isMochi) {
+      // Device 2-plane cell: 8-byte header + ink + mask, rows byte-aligned.
+      const rowBytes = (outSize + 7) >> 3;
+      const planeBytes = rowBytes * outSize;
+      const cellBytes = 8 + planeBytes * 2;
+      const pe = cellBytes + labelMaxLen;
+      return { pixelBytes: cellBytes, perEntry: pe, totalBytes: 16 + layout.count * pe };
+    }
     const px = outSize * outSize;
     const pb = format === '1bpp' ? Math.ceil(px / 8) : format === 'gray8' ? px : px * 2;
     const pe = pb + labelMaxLen;
     return { pixelBytes: pb, perEntry: pe, totalBytes: 16 + layout.count * pe };
-  }, [outSize, format, labelMaxLen, layout.count]);
+  }, [isMochi, outSize, format, labelMaxLen, layout.count]);
 
   const buildBinary = useCallback(() => {
+    const enc = new TextEncoder();
+
+    if (isMochi) {
+      // MPK1: device 2-plane cell pack (see design/13-build-time-asset-packs.md).
+      const buf = new Uint8Array(totalBytes);
+      const dv = new DataView(buf.buffer);
+      buf[0] = 0x4d; buf[1] = 0x50; buf[2] = 0x4b; buf[3] = 0x31; // "MPK1"
+      buf[4] = 1;                       // version
+      buf[5] = 0;                       // format: 2-plane cell entries
+      dv.setUint16(6, outSize, true);   // cell_w LE
+      dv.setUint16(8, outSize, true);   // cell_h LE
+      dv.setUint16(10, sprites.length, true);
+      buf[12] = labelMaxLen;
+      buf[13] = 0x01;                   // flags: mask plane present
+      // 14..15 reserved (zero)
+
+      let off = 16;
+      for (let i = 0; i < sprites.length; i++) {
+        const lb = enc.encode(labels[i] || '');
+        const n = Math.min(lb.length, labelMaxLen);
+        for (let j = 0; j < n; j++) buf[off + j] = lb[j];
+        off += labelMaxLen;
+        const cell = packCellMochi(sprites[i], { threshold, invert, effect, maskSource, paperStroke });
+        buf.set(cell, off);
+        off += pixelBytes;             // == 8 + 2*planeBytes
+      }
+      return buf;
+    }
+
+    // SPRT: generic ESP32 / Arduino pack.
     const buf = new Uint8Array(totalBytes);
     const dv = new DataView(buf.buffer);
     buf[0] = 0x53; buf[1] = 0x50; buf[2] = 0x52; buf[3] = 0x54; // "SPRT"
@@ -1047,7 +1290,6 @@ function App() {
     // 13–15 reserved (zero)
 
     let off = 16;
-    const enc = new TextEncoder();
     for (let i = 0; i < sprites.length; i++) {
       const lb = enc.encode(labels[i] || '');
       const n = Math.min(lb.length, labelMaxLen);
@@ -1058,7 +1300,7 @@ function App() {
       off += pixelBytes;
     }
     return buf;
-  }, [sprites, labels, format, outSize, labelMaxLen, threshold, invert, effect, pixelBytes, totalBytes]);
+  }, [isMochi, sprites, labels, format, outSize, labelMaxLen, threshold, invert, effect, maskSource, paperStroke, pixelBytes, totalBytes]);
 
   const handleDownload = useCallback(() => {
     const buf = buildBinary();
@@ -1066,33 +1308,35 @@ function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${filename || 'sprites'}_${outSize}_${format}.bin`;
+    a.download = isMochi
+      ? `${filename || 'sprites'}_${outSize}.mpk.bin`
+      : `${filename || 'sprites'}_${outSize}_${format}.bin`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [buildBinary, filename, outSize, format]);
+  }, [buildBinary, filename, outSize, format, isMochi]);
 
   const copyParser = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(C_PARSER);
+      await navigator.clipboard.writeText(isMochi ? MOCHI_PARSER : C_PARSER);
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {}
-  }, []);
+  }, [isMochi]);
 
   // ─── Sheet PNG ────────────────────────────────────────────────────
   // Built lazily for inline preview; downloaded on demand.
   const sheetPNG = useMemo(() => {
     if (!sprites.length) return null;
-    const canvas = buildSheetCanvas(sprites, format, threshold, invert, effect, {
+    const canvas = buildSheetCanvas(sprites, previewFormat, threshold, invert, effect, {
       cols: effectiveSheetCols, hits, drawHits: true, drawIndices: showIndices,
     });
     return canvas ? canvas.toDataURL('image/png') : null;
-  }, [sprites, format, threshold, invert, effect, hits, effectiveSheetCols, showIndices]);
+  }, [sprites, previewFormat, threshold, invert, effect, hits, effectiveSheetCols, showIndices]);
 
   const handleDownloadSheet = useCallback(() => {
     if (!sprites.length) return;
     // Clean export: no hit overlays, no indices, no debug borders
-    const canvas = buildSheetCanvas(sprites, format, threshold, invert, effect, {
+    const canvas = buildSheetCanvas(sprites, previewFormat, threshold, invert, effect, {
       cols: effectiveSheetCols, hits, drawHits: false, drawIndices: false, drawBorders: false,
     });
     canvas.toBlob((blob) => {
@@ -1103,18 +1347,29 @@ function App() {
       a.click();
       URL.revokeObjectURL(url);
     }, 'image/png');
-  }, [sprites, format, threshold, invert, effect, hits, effectiveSheetCols, filename, outSize]);
+  }, [sprites, previewFormat, threshold, invert, effect, hits, effectiveSheetCols, filename, outSize]);
 
   // ─── Meta header generation ──────────────────────────────────────
+  // Same structure for both targets; only the included reader, the
+  // type names, and the set-table symbol differ. For mochi-esp the
+  // zone tables ARE a build-time scene contract (design/13).
   const metaHeader = useMemo(() => {
     if (!sprites.length) return null;
     const packName = cIdent(filename || 'sprites');
     const totalHits = hits.reduce((acc, hs) => acc + (hs?.length || 0), 0);
+
+    const m = isMochi
+      ? { include: 'mochi_pack.h', rect: 'mpk_zone_t',  set: 'mpk_zone_set_t',
+          arr: 'ZONES', kind: 'tap zones (build-time scene contract)' }
+      : { include: 'sprite_pack.h', rect: 'sprt_hit_t', set: 'sprt_hit_set_t',
+          arr: 'HITS',  kind: 'hit areas' };
+
+    const fmtLabel = isMochi ? 'mochi 2-plane (MPK1)' : format;
     const lines = [];
     lines.push(`// Generated by SPRITE·FORGE — metadata for pack "${filename || 'sprites'}"`);
-    lines.push(`// ${sprites.length} sprites · ${outSize}×${outSize} ${format} · ${totalHits} hit areas`);
+    lines.push(`// ${sprites.length} sprites · ${outSize}×${outSize} ${fmtLabel} · ${totalHits} ${m.kind}`);
     lines.push(`#pragma once`);
-    lines.push(`#include "sprite_pack.h"`);
+    lines.push(`#include "${m.include}"`);
     lines.push('');
     lines.push(`// Sprite indices (compile-time constants by label)`);
     labels.forEach((lab, i) => {
@@ -1123,17 +1378,17 @@ function App() {
     lines.push('');
 
     if (totalHits === 0) {
-      lines.push(`// No hit areas defined.`);
-      lines.push(`static const sprt_hit_set_t ${packName}_HITS[1] = { {0, 0, NULL} };`);
-      lines.push(`#define ${packName}_HITS_COUNT 0u`);
+      lines.push(`// No ${m.kind} defined.`);
+      lines.push(`static const ${m.set} ${packName}_${m.arr}[1] = { {0, 0, NULL} };`);
+      lines.push(`#define ${packName}_${m.arr}_COUNT 0u`);
     } else {
-      // Emit per-sprite hit arrays, then a set table.
+      // Emit per-sprite rect arrays, then a set table.
       const sets = [];
       hits.forEach((hs, i) => {
         if (!hs || hs.length === 0) return;
         const lab = cIdent(labels[i] || `sprite_${i}`);
-        const arrName = `${packName}_HITS_${lab}`;
-        lines.push(`static const sprt_hit_t ${arrName}[${hs.length}] = {`);
+        const arrName = `${packName}_${m.arr}_${lab}`;
+        lines.push(`static const ${m.rect} ${arrName}[${hs.length}] = {`);
         hs.forEach((h) => {
           const x = Math.round(h.x * outSize);
           const y = Math.round(h.y * outSize);
@@ -1147,16 +1402,16 @@ function App() {
         sets.push({ idx: i, count: hs.length, arrName });
       });
       lines.push('');
-      lines.push(`static const sprt_hit_set_t ${packName}_HITS[${sets.length}] = {`);
+      lines.push(`static const ${m.set} ${packName}_${m.arr}[${sets.length}] = {`);
       sets.forEach((s) => {
         lines.push(`  { ${s.idx}, ${s.count}, ${s.arrName} },`);
       });
       lines.push(`};`);
-      lines.push(`#define ${packName}_HITS_COUNT ${sets.length}u`);
+      lines.push(`#define ${packName}_${m.arr}_COUNT ${sets.length}u`);
     }
     lines.push('');
     return lines.join('\n');
-  }, [sprites.length, labels, hits, filename, outSize, format]);
+  }, [isMochi, sprites.length, labels, hits, filename, outSize, format]);
 
   const handleDownloadMeta = useCallback(() => {
     if (!metaHeader) return;
@@ -1180,7 +1435,7 @@ function App() {
           sprite={sprites[editingIdx]}
           hits={hits[editingIdx] || []}
           label={labels[editingIdx] || `sprite_${editingIdx}`}
-          format={format}
+          format={previewFormat}
           threshold={threshold}
           invert={invert}
           effect={effect}
@@ -1404,26 +1659,66 @@ function App() {
 
         {/* 04 output */}
         <Card num="04" title="OUTPUT">
-          <Row label="format" hint="display target">
+          <Row label="target" hint="pack flavor">
             <Chips
-              value={format}
-              onChange={setFormat}
+              value={target}
+              onChange={setTarget}
               options={[
-                { value: '1bpp', label: '1bpp mono' },
-                { value: 'gray8', label: '8-bit gray' },
-                { value: 'rgb565', label: 'rgb565' },
+                { value: 'sprt',  label: 'generic (SPRT)' },
+                { value: 'mochi', label: 'mochi-esp (MPK1)' },
               ]}
             />
           </Row>
-          <Row label="sprite size" hint="square output">
+
+          {isMochi ? (
+            <div className="text-[10px] text-zinc-500 leading-relaxed border border-teal-300/20 bg-teal-300/5 px-2 py-1.5">
+              Device 2-plane cell format — <span className="text-teal-300/80">bit 0 = ink</span>,
+              plus a mask plane for transparency. Each entry is byte-identical to a
+              <code> /devsprite/cell</code> response, so bundled and fetched cells share the
+              same compositor path. Embed the <code>.mpk.bin</code> at build time; tap zones
+              export to <code>meta.h</code> as a scene contract.
+            </div>
+          ) : (
+            <Row label="format" hint="display target">
+              <Chips
+                value={format}
+                onChange={setFormat}
+                options={[
+                  { value: '1bpp', label: '1bpp mono' },
+                  { value: 'gray8', label: '8-bit gray' },
+                  { value: 'rgb565', label: 'rgb565' },
+                ]}
+              />
+            </Row>
+          )}
+
+          <Row label="sprite size" hint={isMochi ? 'cell px (square)' : 'square output'}>
             <Chips
               value={outSize}
               onChange={setOutSize}
               options={[16, 24, 32, 48, 64, 96, 128, 200].map(n => ({ value: n, label: `${n}px` }))}
             />
           </Row>
-          {(format === '1bpp' || effectKind !== 'none') && (
-            <Row label="threshold" hint={effectKind === 'none' ? 'darker than → 1' : 'effect midpoint'}>
+
+          {isMochi && (
+            <>
+              <Row label="transparency" hint="mask plane source">
+                <Chips
+                  value={maskSource}
+                  onChange={setMaskSource}
+                  options={[
+                    { value: 'alpha', label: 'alpha channel' },
+                    { value: 'white', label: 'white = clear' },
+                    { value: 'none',  label: 'all opaque' },
+                  ]}
+                />
+              </Row>
+              <Toggle value={paperStroke} onChange={setPaperStroke} label="paper stroke (1px halo)" />
+            </>
+          )}
+
+          {(isMochi || format === '1bpp' || effectKind !== 'none') && (
+            <Row label="threshold" hint={effectKind === 'none' ? 'darker than → ink' : 'effect midpoint'}>
               <Slider value={threshold} onChange={setThreshold} min={0} max={255} />
             </Row>
           )}
@@ -1431,13 +1726,23 @@ function App() {
             <Stepper value={labelMaxLen} onChange={setLabelMaxLen} min={4} max={64} suffix="bytes" />
           </Row>
           <div className="grid grid-cols-2 gap-3 pt-1 border-t border-zinc-800/60">
-            <Toggle value={invert} onChange={setInvert} label="invert colors" />
+            <Toggle value={invert} onChange={setInvert} label="invert ink" />
             <Toggle value={smoothing} onChange={setSmoothing} label="smooth resample" />
           </div>
           <div className="text-[10px] text-zinc-500 leading-relaxed pt-2 border-t border-zinc-800/60 tabular-nums">
-            <div>pixel data: <span className="text-teal-300/80">{pixelBytes}</span> B/sprite ({outSize}×{outSize} {format}{effectKind !== 'none' ? ' · binary' : ''})</div>
-            <div>entry:      <span className="text-teal-300/80">{perEntry}</span> B  ({pixelBytes} pixels + {labelMaxLen} label)</div>
-            <div>total:      <span className="text-teal-300">{totalBytes.toLocaleString()}</span> B  (16 header + {layout.count} × {perEntry})</div>
+            {isMochi ? (
+              <>
+                <div>cell data:  <span className="text-teal-300/80">{pixelBytes}</span> B/sprite (8 hdr + ink + mask · {outSize}×{outSize})</div>
+                <div>entry:      <span className="text-teal-300/80">{perEntry}</span> B  ({pixelBytes} cell + {labelMaxLen} label)</div>
+                <div>total:      <span className="text-teal-300">{totalBytes.toLocaleString()}</span> B  (16 MPK1 header + {layout.count} × {perEntry})</div>
+              </>
+            ) : (
+              <>
+                <div>pixel data: <span className="text-teal-300/80">{pixelBytes}</span> B/sprite ({outSize}×{outSize} {format}{effectKind !== 'none' ? ' · binary' : ''})</div>
+                <div>entry:      <span className="text-teal-300/80">{perEntry}</span> B  ({pixelBytes} pixels + {labelMaxLen} label)</div>
+                <div>total:      <span className="text-teal-300">{totalBytes.toLocaleString()}</span> B  (16 header + {layout.count} × {perEntry})</div>
+              </>
+            )}
           </div>
         </Card>
 
@@ -1632,11 +1937,14 @@ function App() {
         >
           {!showC ? (
             <p className="text-[11px] text-zinc-500 leading-relaxed">
-              Drop-in C header for reading the pack from PROGMEM / SPIFFS / PSRAM. Tap to expand.
+              {isMochi
+                ? 'Drop-in mochi_pack.h reader (matches firmware/main/mochi_pack.h). Tap to expand.'
+                : 'Drop-in C header for reading the pack from PROGMEM / SPIFFS / PSRAM. Tap to expand.'}
             </p>
           ) : (
             <div className="space-y-2">
-              <div className="flex justify-end">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] text-zinc-600">{isMochi ? 'mochi_pack.h' : 'sprite_pack.h'}</span>
                 <button
                   onClick={copyParser}
                   className="text-[11px] text-zinc-400 hover:text-teal-300 flex items-center gap-1.5"
@@ -1645,11 +1953,22 @@ function App() {
                 </button>
               </div>
               <pre className="text-[10px] text-zinc-300 bg-zinc-950 border border-zinc-800 p-3 overflow-x-auto leading-relaxed">
-{C_PARSER}
+{isMochi ? MOCHI_PARSER : C_PARSER}
               </pre>
               <div className="text-[10px] text-zinc-500 leading-relaxed">
-                Embed the .bin with <span className="text-teal-300/80">xxd -i sprites.bin {'>'} sprites.h</span> for PROGMEM,
-                or read from SPIFFS / LittleFS / SD on boot.
+                {isMochi ? (
+                  <>
+                    Bundle via CMake <span className="text-teal-300/80">EMBED_FILES "assets/pack.mpk.bin"</span>
+                    {' '}(same path as splash.bin), then <code>mpk_open()</code> +
+                    {' '}<code>compositor::blit_two_plane()</code>. See
+                    {' '}<a href="https://github.com/christopherdebeer/mochi-esp/blob/main/design/13-build-time-asset-packs.md" className="text-teal-300/80 hover:underline underline-offset-2">design/13</a>.
+                  </>
+                ) : (
+                  <>
+                    Embed the .bin with <span className="text-teal-300/80">xxd -i sprites.bin {'>'} sprites.h</span> for PROGMEM,
+                    or read from SPIFFS / LittleFS / SD on boot.
+                  </>
+                )}
               </div>
             </div>
           )}
@@ -1664,7 +1983,7 @@ function App() {
             <div className="text-zinc-600 uppercase tracking-wider text-[9px]">output ▸</div>
             <div className="text-teal-300 font-bold tabular-nums truncate">
               {totalBytes.toLocaleString()} B
-              <span className="text-zinc-500 font-normal"> · {sprites.length || 0} sprites · {format}</span>
+              <span className="text-zinc-500 font-normal"> · {sprites.length || 0} sprites · {isMochi ? 'mpk1' : format}</span>
             </div>
           </div>
           <button
@@ -1673,7 +1992,7 @@ function App() {
             className="bg-teal-300 text-zinc-950 px-4 sm:px-5 py-2.5 font-bold text-sm disabled:bg-zinc-800 disabled:text-zinc-600 active:bg-teal-400 flex items-center gap-2 shrink-0"
           >
             <Download size={15} strokeWidth={2.5} />
-            PACK.BIN
+            {isMochi ? 'MPK.BIN' : 'PACK.BIN'}
           </button>
         </div>
       </div>

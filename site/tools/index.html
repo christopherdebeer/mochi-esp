@@ -34,18 +34,21 @@
       </div>
       <p class="text-[11px] text-zinc-400 leading-relaxed mt-2">
         Slice a sprite sheet into a grid, resample each cell, and pack to a single
-        <code class="text-teal-300/80">.bin</code> (1bpp / gray8 / rgb565) with a drop-in
-        C reader and authored per-sprite tap rectangles. Halftone / dither effects
-        (Floyd–Steinberg, Atkinson, Bayer, line-screen) for 1-bit panels.
+        <code class="text-teal-300/80">.bin</code> with a drop-in C reader and authored
+        per-sprite tap rectangles. Halftone / dither effects (Floyd–Steinberg, Atkinson,
+        Bayer, line-screen) for 1-bit panels.
       </p>
       <div class="text-[10px] text-zinc-500 leading-relaxed mt-3 pt-3 border-t border-zinc-800/60">
-        <span class="text-amber-400/80">note</span> — SPRITE·FORGE emits a generic
-        <code>SPRT</code> pack (single-plane, <code>bit 1 = ink</code>). mochi-esp's own
-        device wire format differs: <code>bit 0 = ink</code>, and cells carry a second
-        <em>mask</em> plane for transparency. See
-        <a href="https://github.com/christopherdebeer/mochi-esp/blob/main/design/05-sprite-format.md" class="text-teal-300/80 hover:underline underline-offset-2">design/05-sprite-format.md</a>.
-        Use this tool for general ESP32 / Arduino projects, or as a starting point for
-        device assets you convert to the two-plane format.
+        Two targets:
+        <span class="text-teal-300/80">generic (SPRT)</span> — 1bpp / gray8 / rgb565 single-plane
+        packs for any ESP32 / Arduino project; and
+        <span class="text-teal-300/80">mochi-esp (MPK1)</span> — the device-native build-time
+        pack: <code>bit 0 = ink</code> two-plane cells (ink + mask) byte-identical to a
+        <code>/devsprite/cell</code> response, so a bundled cell drops straight into the
+        on-device compositor. Tap zones export as a build-time scene contract. See
+        <a href="https://github.com/christopherdebeer/mochi-esp/blob/main/design/13-build-time-asset-packs.md" class="text-teal-300/80 hover:underline underline-offset-2">design/13</a>
+        +
+        <a href="https://github.com/christopherdebeer/mochi-esp/blob/main/design/05-sprite-format.md" class="text-teal-300/80 hover:underline underline-offset-2">design/05</a>.
       </div>
     </a>
 

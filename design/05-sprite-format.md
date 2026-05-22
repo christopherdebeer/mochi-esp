@@ -446,6 +446,9 @@ sibling describing the contract payload.
 ## Cross-references
 
 - `00-architecture.md` — sprite generation lives server-side
+- `13-build-time-asset-packs.md` — the MPK1 build-time pack bundles
+  many of these cells (byte-identical entries) for offline / first-boot
+  use; authored by the SPRITE·FORGE web tool
 - `01-bring-up-plan.md` — M4 (this doc unblocks it)
 - `firmware/vendor/waveshare-eink/epaper_driver_bsp.cpp` — bit packing
    that this format must match
