@@ -24,6 +24,15 @@
  * keep these in lock-step when tuning, or device and web will
  * disagree on what counts as "really needs sleep." */
 static const uint8_t SLEEPY_ENERGY_THRESHOLD = 28;
+
+/* Debug knob: when 1, thought_generate always emits a SLEEPY bubble
+ * (skipping the energy threshold) so the bubble + tap-to-sleep flow
+ * can be exercised on a freshly-fed pet. Asleep gating is preserved.
+ * Flip to 0 (or delete) before shipping — this bypasses the substrate
+ * predicate that gives the bubble its meaning. */
+#ifndef MOCHI_FORCE_THOUGHT_BUSY
+#define MOCHI_FORCE_THOUGHT_BUSY 1
+#endif
 /* Reserved for M2 (hungry need):
  *   static const uint8_t HUNGRY_FULLNESS_THRESHOLD = 35; */
 
@@ -132,14 +141,27 @@ static void blit_text_centered(uint8_t *dst, size_t dst_w, size_t dst_h,
 extern "C" bool thought_generate(const pet_t *pet, int64_t /*now_ms*/,
                                  pet_thought_t *out) {
     if (!pet || !out) return false;
-    if (pet->asleep) return false;
+
+    /* WAKE — pet is currently asleep. Tapping = wake mochi up.
+     * Symmetric with the web side's care_direct{kind:"woke"} path:
+     * substrate sets asleep=false on its next mutate, and the
+     * resting sprite flips back to its waking projection. */
+    if (pet->asleep) {
+        out->action_kind   = THOUGHT_ACTION_CARE_EVENT;
+        out->action_event  = EVENT_WOKE;
+        out->line1         = "zzz...";
+        out->line2         = "tap wake";
+        out->expires_at_ms = 0;
+        return true;
+    }
 
     /* SLEEPY — energy below threshold, awake. Tapping = put mochi
      * to sleep. The visible action on the device is symmetric with
      * the web side's care_direct{kind:"slept"} path: substrate
      * sets asleep=true on its next mutate, and the resting sprite
      * flips to SPRITE_SLEEPING on the following render. */
-    if (pet->stats.energy < SLEEPY_ENERGY_THRESHOLD) {
+    if (pet->stats.energy < SLEEPY_ENERGY_THRESHOLD ||
+        MOCHI_FORCE_THOUGHT_BUSY) {
         out->action_kind   = THOUGHT_ACTION_CARE_EVENT;
         out->action_event  = EVENT_SLEPT;
         out->line1         = "sleepy...";
