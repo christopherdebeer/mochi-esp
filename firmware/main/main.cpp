@@ -107,6 +107,14 @@ extern "C" {
 static constexpr size_t SCENE_W = 200;
 static constexpr size_t SCENE_H = 200;
 static constexpr size_t SCENE_BYTES = (SCENE_W / 8) * SCENE_H;  /* 5000 */
+
+/* Scene-navigation e-ink refresh policy (design/17). A scene swap is a
+ * whole-screen change, so a partial refresh leaves residue from the
+ * previous scene; a full refresh is clean but ~1 s and flashes. We use
+ * a hybrid: partial on each navigate (fast), with a clean full refresh
+ * every Nth to clear the ghosting partial accumulates. Tune against the
+ * panel's ghosting tolerance — 1 = always full (pre-design/17 behaviour). */
+#define SCENE_NAV_FULL_EVERY 4
 #define MOCHI_PET_CELL_URL_BASE "https://mochi.val.run/devsprite/cell/pet-v1/"
 
 /* OTA — manifest is uploaded as a release asset by the GitHub
@@ -1705,23 +1713,22 @@ extern "C" void app_main(void) {
                 : "(none)",
             expr ? expr : "(gutter)");
 
-        /* Scene-navigation actions short-circuit the rest of the
-         * touch pipeline: re-blit the scene cell, force a full
-         * refresh (partial would leave residue from the previous
-         * scene), and bail before the per-tap care pipeline runs. */
-        if (scene_hit && scene_act.kind == MPK_ACTION_NAV_RELATIVE) {
-            int delta = scene_act.data;
-            uint16_t to = scene_pack_advance(delta);
-            ESP_LOGI(TAG, "scene nav rel %+d → idx=%u", delta, (unsigned)to);
+        /* Scene-navigation actions short-circuit the rest of the touch
+         * pipeline: re-blit the scene cell, refresh, and bail before the
+         * per-tap care pipeline runs. Refresh is hybrid partial/full —
+         * see SCENE_NAV_FULL_EVERY. */
+        if (scene_hit && (scene_act.kind == MPK_ACTION_NAV_RELATIVE ||
+                          scene_act.kind == MPK_ACTION_NAV_SCENE)) {
+            static uint32_t s_nav_n = 0;
+            uint16_t to = (scene_act.kind == MPK_ACTION_NAV_RELATIVE)
+                ? scene_pack_advance(scene_act.data)
+                : scene_pack_set((uint16_t)scene_act.data);
+            bool full = (++s_nav_n % SCENE_NAV_FULL_EVERY) == 0;
+            ESP_LOGI(TAG, "scene nav %s → idx=%u (%s)",
+                scene_act.kind == MPK_ACTION_NAV_RELATIVE ? "rel" : "abs",
+                (unsigned)to, full ? "full" : "partial");
             scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H);
-            render_with_expression("neutral", true, nullptr);
-            continue;
-        }
-        if (scene_hit && scene_act.kind == MPK_ACTION_NAV_SCENE) {
-            uint16_t to = scene_pack_set((uint16_t)scene_act.data);
-            ESP_LOGI(TAG, "scene nav abs → idx=%u", (unsigned)to);
-            scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H);
-            render_with_expression("neutral", true, nullptr);
+            render_with_expression("neutral", full, nullptr);
             continue;
         }
 
