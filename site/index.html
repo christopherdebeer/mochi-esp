@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>mochi-esp</title>
+  <meta name="description" content="A hardware embodiment of Mochi — a virtual pet on a 200x200 e-paper ESP32-S3 device. Tools, docs, and firmware releases." />
+  <link rel="stylesheet" href="assets/theme.css" />
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-zinc-950 text-zinc-100 scanline">
+
+  <header class="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
+    <div class="mx-auto max-w-3xl px-3 sm:px-4 py-3 flex items-baseline justify-between">
+      <div class="flex items-baseline gap-2 sm:gap-3">
+        <h1 class="pixel text-base sm:text-lg text-teal-300">MOCHI·ESP</h1>
+        <span class="text-[10px] text-zinc-600 hidden sm:inline">// e-paper desk pet on esp32-s3</span>
+      </div>
+      <a href="https://github.com/christopherdebeer/mochi-esp" class="text-[10px] text-zinc-500 hover:text-teal-300">github ↗</a>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-3xl p-3 sm:p-4 pb-20 space-y-6">
+
+    <!-- hero -->
+    <section class="border border-zinc-800 bg-zinc-900/40 p-4 sm:p-6 space-y-3">
+      <p class="text-sm sm:text-[15px] text-zinc-300 leading-relaxed">
+        A hardware embodiment of
+        <a href="https://mochi.val.run" class="text-teal-300 hover:underline underline-offset-2">Mochi</a>
+        — a virtual pet that runs on a small e-paper device, talks over WiFi via the
+        OpenAI Realtime API, and works in airplane mode for everything except voice.
+      </p>
+      <div class="text-[11px] text-zinc-500 leading-relaxed tabular-nums border-t border-zinc-800/60 pt-3">
+        <span class="text-zinc-400">target</span> ▸ Waveshare ESP32-S3-Touch-ePaper-1.54 V2
+        <span class="text-zinc-700"> · </span>200×200 SSD1681
+        <span class="text-zinc-700"> · </span>8MB flash / 8MB PSRAM
+        <span class="text-zinc-700"> · </span>ES8311 audio
+        <span class="text-zinc-700"> · </span>capacitive touch
+      </div>
+    </section>
+
+    <!-- index cards -->
+    <section class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+
+      <a href="tools/" class="group border border-zinc-800 bg-zinc-900/40 p-4 hover:border-teal-300/50 transition-colors">
+        <div class="flex items-center justify-between">
+          <h2 class="pixel text-[12px] text-teal-300"><span class="text-zinc-600">01 ▸ </span>TOOLS</h2>
+          <span class="text-zinc-600 group-hover:text-teal-300 transition-colors">→</span>
+        </div>
+        <p class="text-[11px] text-zinc-400 leading-relaxed mt-2">
+          Browser utilities for the device asset pipeline. Sprite-sheet packer, with more
+          to come — no install, runs entirely client-side.
+        </p>
+      </a>
+
+      <a href="https://github.com/christopherdebeer/mochi-esp/tree/main/design" class="group border border-zinc-800 bg-zinc-900/40 p-4 hover:border-teal-300/50 transition-colors">
+        <div class="flex items-center justify-between">
+          <h2 class="pixel text-[12px] text-teal-300"><span class="text-zinc-600">02 ▸ </span>DOCS</h2>
+          <span class="text-zinc-600 group-hover:text-teal-300 transition-colors">↗</span>
+        </div>
+        <p class="text-[11px] text-zinc-400 leading-relaxed mt-2">
+          Architecture and per-decision design docs (00–12): boot, provisioning, pairing,
+          sprite format, scene contracts, voice, OTA, pet state.
+        </p>
+      </a>
+
+      <a href="https://github.com/christopherdebeer/mochi-esp/releases" class="group border border-zinc-800 bg-zinc-900/40 p-4 hover:border-teal-300/50 transition-colors">
+        <div class="flex items-center justify-between">
+          <h2 class="pixel text-[12px] text-teal-300"><span class="text-zinc-600">03 ▸ </span>RELEASES</h2>
+          <span class="text-zinc-600 group-hover:text-teal-300 transition-colors">↗</span>
+        </div>
+        <p class="text-[11px] text-zinc-400 leading-relaxed mt-2">
+          Signed OTA firmware images and the <code class="text-teal-300/80">latest.json</code>
+          manifest the device checks against on its daily update poll.
+        </p>
+      </a>
+
+      <a href="https://github.com/christopherdebeer/mochi-esp/blob/main/firmware/README.md" class="group border border-zinc-800 bg-zinc-900/40 p-4 hover:border-teal-300/50 transition-colors">
+        <div class="flex items-center justify-between">
+          <h2 class="pixel text-[12px] text-teal-300"><span class="text-zinc-600">04 ▸ </span>FIRMWARE</h2>
+          <span class="text-zinc-600 group-hover:text-teal-300 transition-colors">↗</span>
+        </div>
+        <p class="text-[11px] text-zinc-400 leading-relaxed mt-2">
+          The ESP-IDF project — toolchain setup, build/flash/monitor instructions, and
+          per-OS port conventions.
+        </p>
+      </a>
+
+      <a href="https://github.com/christopherdebeer/mochi-esp" class="group border border-zinc-800 bg-zinc-900/40 p-4 hover:border-teal-300/50 transition-colors">
+        <div class="flex items-center justify-between">
+          <h2 class="pixel text-[12px] text-teal-300"><span class="text-zinc-600">05 ▸ </span>SOURCE</h2>
+          <span class="text-zinc-600 group-hover:text-teal-300 transition-colors">↗</span>
+        </div>
+        <p class="text-[11px] text-zinc-400 leading-relaxed mt-2">
+          Full repository on GitHub: firmware, design docs, the val.town server side, and
+          this site.
+        </p>
+      </a>
+
+      <a href="https://mochi.val.run" class="group border border-zinc-800 bg-zinc-900/40 p-4 hover:border-teal-300/50 transition-colors">
+        <div class="flex items-center justify-between">
+          <h2 class="pixel text-[12px] text-teal-300"><span class="text-zinc-600">06 ▸ </span>MOCHI WEB</h2>
+          <span class="text-zinc-600 group-hover:text-teal-300 transition-colors">↗</span>
+        </div>
+        <p class="text-[11px] text-zinc-400 leading-relaxed mt-2">
+          The web prototype this device embodies — and the server that renders its sprites
+          and holds the realtime voice contract.
+        </p>
+      </a>
+
+    </section>
+
+  </main>
+
+  <footer class="border-t border-zinc-800">
+    <div class="mx-auto max-w-3xl px-3 sm:px-4 py-4 text-[10px] text-zinc-600 flex items-center justify-between">
+      <span class="pixel text-zinc-700">MOCHI·ESP</span>
+      <span>static site · github pages</span>
+    </div>
+  </footer>
+
+</body>
+</html>
