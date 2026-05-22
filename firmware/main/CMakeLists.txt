@@ -40,6 +40,8 @@ idf_component_register(
         "time_sync.c"
         "pet_sync.cpp"
         "scene_pack.c"
+        "pet_pack.c"
+        "imagine.c"
         "voice.cpp"
         "voice/voice_https.c"
         "voice/openai_signaling.c"
@@ -62,6 +64,7 @@ idf_component_register(
     EMBED_FILES
         "assets/splash.bin"
         "assets/scenes_a.mpk"
+        "assets/pet_a.mpk"
     REQUIRES
         driver
         esp_timer

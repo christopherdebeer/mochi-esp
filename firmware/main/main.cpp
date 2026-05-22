@@ -70,6 +70,8 @@ extern "C" {
 #include "event_log.h"
 #include "time_sync.h"
 #include "scene_pack.h"
+#include "pet_pack.h"
+#include "imagine.h"
 }
 #include "pet_sync.h"
 
@@ -828,6 +830,22 @@ extern "C" void app_main(void) {
         }
     }
 
+    /* Bring up the bundled pet pack so render_with_expression can
+     * serve cells from flash without touching the network. Network
+     * stays as the fallback for expressions absent from the pack
+     * (and for the pack-unavailable case). */
+    if (!pet_pack_init()) {
+        ESP_LOGW(TAG, "pet_pack unavailable; falling back to network "
+                      "+ littlefs cache for every render");
+    }
+
+    /* On-device scene generation pipeline. Idle until a voice tool
+     * call (`imagine_place`) lands; see design/15-on-device-imagine.md. */
+    if (!imagine_init()) {
+        ESP_LOGW(TAG, "imagine pipeline unavailable; voice "
+                      "imagine_place tool will refuse");
+    }
+
     /*
      * Fetch each care icon at native 80×80, downsample to 32×32
      * once, cache the downsampled planes for the rest of the
@@ -1060,27 +1078,51 @@ extern "C" void app_main(void) {
                                       bool full_refresh,
                                       const pet_thought_t *thought) -> bool {
         /*
-         * Cache-first pet cell load. Two suffixes per expression
-         * (ink + mask). If both hit, no network. If either misses
-         * (or is the wrong size), refetch from the server and
-         * persist both planes back to the cache.
+         * Pet cell load priority:
+         *   1. Bundled MPK1 pack (flash, zero-network).
+         *   2. littlefs cache from a previous fetch.
+         *   3. Server fetch over HTTPS.
+         *
+         * The bundle lets the device run the pet UI offline once
+         * paired — boot doesn't have to wait for WiFi to render.
+         * The cache + network paths stay as fallbacks for
+         * expressions the pack doesn't carry, and for the
+         * pet_pack-unavailable case.
          */
+        const char *cell_source = nullptr;
+        uint32_t ms = 0;
+        {
+            uint16_t pw = 0, ph = 0;
+            if (pet_pack_load(expr, pet_ink, pet_mask,
+                              PET_CELL_BYTES, &pw, &ph)) {
+                if (pw != PET_CELL_W || ph != PET_CELL_H) {
+                    ESP_LOGW(TAG, "pack cell '%s' dims %ux%u != %ux%u",
+                        expr, pw, ph,
+                        (unsigned)PET_CELL_W, (unsigned)PET_CELL_H);
+                } else {
+                    cell_source = "pack";
+                }
+            }
+        }
+
         char ink_suffix[40], mask_suffix[40];
         snprintf(ink_suffix,  sizeof(ink_suffix),  "%s_cell_ink",  expr);
         snprintf(mask_suffix, sizeof(mask_suffix), "%s_cell_mask", expr);
 
-        size_t got_ink = 0, got_mask = 0;
-        bool from_cache =
-            cache_ok &&
-            sprite_cache::load("pet-v1", ink_suffix,
-                pet_ink, PET_CELL_BYTES, &got_ink) &&
-            got_ink == PET_CELL_BYTES &&
-            sprite_cache::load("pet-v1", mask_suffix,
-                pet_mask, PET_CELL_BYTES, &got_mask) &&
-            got_mask == PET_CELL_BYTES;
+        if (!cell_source) {
+            size_t got_ink = 0, got_mask = 0;
+            bool from_cache =
+                cache_ok &&
+                sprite_cache::load("pet-v1", ink_suffix,
+                    pet_ink, PET_CELL_BYTES, &got_ink) &&
+                got_ink == PET_CELL_BYTES &&
+                sprite_cache::load("pet-v1", mask_suffix,
+                    pet_mask, PET_CELL_BYTES, &got_mask) &&
+                got_mask == PET_CELL_BYTES;
+            if (from_cache) cell_source = "cache";
+        }
 
-        uint32_t ms = 0;
-        if (!from_cache) {
+        if (!cell_source) {
             char url[160];
             snprintf(url, sizeof(url), "%s%s", MOCHI_PET_CELL_URL_BASE, expr);
             uint16_t w = 0, h = 0;
@@ -1098,6 +1140,7 @@ extern "C" void app_main(void) {
                 sprite_cache::store("pet-v1", ink_suffix,  pet_ink,  PET_CELL_BYTES);
                 sprite_cache::store("pet-v1", mask_suffix, pet_mask, PET_CELL_BYTES);
             }
+            cell_source = "fetch";
         }
 
         /* Scene fills the full 200×200 panel — same stride as
@@ -1133,10 +1176,9 @@ extern "C" void app_main(void) {
             epd->EPD_Init_Partial();
             epd->EPD_DisplayPart();
         }
-        ESP_LOGI(TAG, "rendered '%s' (%s%s%lu ms, %s refresh)",
+        ESP_LOGI(TAG, "rendered '%s' (%s %lu ms, %s refresh)",
             expr,
-            from_cache ? "cache" : "fetch",
-            from_cache ? " " : " ",
+            cell_source ? cell_source : "?",
             (unsigned long)ms,
             full_refresh ? "full" : "partial");
         return true;
@@ -1196,17 +1238,24 @@ extern "C" void app_main(void) {
      * Full refresh because the screen will sit untouched for hours.
      */
     auto render_asleep = [&]() {
-        /* Try cache first for the 'sleeping' cell so falling asleep
-         * is responsive even on a flaky network. */
+        /* Pack first, then cache, then network — same priority as
+         * render_with_expression. Bundled 'sleeping' makes the
+         * PWR-long-press gesture work offline. */
+        uint16_t pw = 0, ph = 0;
+        bool got_pet = pet_pack_load("sleeping", pet_ink, pet_mask,
+                                     PET_CELL_BYTES, &pw, &ph) &&
+                       pw == PET_CELL_W && ph == PET_CELL_H;
         size_t got_ink = 0, got_mask = 0;
-        bool got_pet =
-            cache_ok &&
-            sprite_cache::load("pet-v1", "sleeping_cell_ink",
-                pet_ink,  PET_CELL_BYTES, &got_ink) &&
-            got_ink == PET_CELL_BYTES &&
-            sprite_cache::load("pet-v1", "sleeping_cell_mask",
-                pet_mask, PET_CELL_BYTES, &got_mask) &&
-            got_mask == PET_CELL_BYTES;
+        if (!got_pet) {
+            got_pet =
+                cache_ok &&
+                sprite_cache::load("pet-v1", "sleeping_cell_ink",
+                    pet_ink,  PET_CELL_BYTES, &got_ink) &&
+                got_ink == PET_CELL_BYTES &&
+                sprite_cache::load("pet-v1", "sleeping_cell_mask",
+                    pet_mask, PET_CELL_BYTES, &got_mask) &&
+                got_mask == PET_CELL_BYTES;
+        }
         if (!got_pet) {
             char url[160];
             snprintf(url, sizeof(url), "%s%s", MOCHI_PET_CELL_URL_BASE, "sleeping");
