@@ -66,6 +66,13 @@ bool scene_pack_blit_current(uint8_t *dst, size_t scene_w, size_t scene_h);
  * the pack/meta — borrowed, lives forever). Returns true on hit. */
 bool scene_pack_zone_at(int16_t x, int16_t y, const char **out_name);
 
+/* True if the current scene has any authored zones. Callers use this
+ * to gate UI chrome — when the scene's diegetic affordances cover
+ * intent, the legacy corner icons + corner-quadrant fallback are
+ * suppressed. Unzoned scenes (most of scenes_a today) keep the
+ * old behaviour as a safety net. */
+bool scene_pack_current_has_zones(void);
+
 #ifdef __cplusplus
 }
 #endif

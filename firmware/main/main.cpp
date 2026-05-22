@@ -95,9 +95,16 @@ extern "C" {
  * STATUS_BAR_H rows are reserved at the top, leaving the rest for
  * the scene. The fetch URL uses the server's `?fit=area` form. */
 #define MOCHI_SCENE_URL  "https://mochi.val.run/devsprite/scene-v1/day?fit=fill&w=200&h=172"
+/* Scene buffer covers the FULL panel now, not just the area below
+ * the status bar. The MPK1 cells SPRITE·FORGE authors are 200×200
+ * — same as the panel — and authored zones often extend into what
+ * the old 200×172 layout was clipping (e.g. food/ball zones in
+ * scenes_a sit at y=139..184). Rendering the full cell preserves
+ * authored content; the status bar paint at panel rows 0..18 then
+ * overwrites the top of the scene with white + glyphs. */
 static constexpr size_t SCENE_W = 200;
-static constexpr size_t SCENE_H = 172;
-static constexpr size_t SCENE_BYTES = (SCENE_W / 8) * SCENE_H;  /* 4300 */
+static constexpr size_t SCENE_H = 200;
+static constexpr size_t SCENE_BYTES = (SCENE_W / 8) * SCENE_H;  /* 5000 */
 #define MOCHI_PET_CELL_URL_BASE "https://mochi.val.run/devsprite/cell/pet-v1/"
 
 /* OTA — manifest is uploaded as a release asset by the GitHub
@@ -1029,16 +1036,23 @@ extern "C" void app_main(void) {
             memset(composite + row_off, 0x00, 25);
         }
 
-        /* Stamp the 4 care icons. All 4 sit below the status bar
-         * inside the scene area; the two-plane blit means
-         * transparent pixels in the icon don't trash the
-         * underlying scene. */
-        for (int i = 0; i < 4; i++) {
-            compositor::blit_two_plane(composite,
-                MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
-                icon_ink[i], icon_mask[i],
-                ICON_W, ICON_H,
-                icon_pos_x[i], icon_pos_y[i]);
+        /* Stamp the 4 care icons — but ONLY when the current scene
+         * doesn't have authored zones. A scenes_a cell with food /
+         * heart / ball / door drawn into the world doesn't need
+         * the corner-icon overlay too; it's redundant chrome on
+         * top of diegetic affordances. Unzoned scenes (most of
+         * scenes_a today) keep the corner-icon UX.
+         *
+         * Two-plane blit means transparent pixels in the icon don't
+         * trash the underlying scene. */
+        if (!scene_pack_current_has_zones()) {
+            for (int i = 0; i < 4; i++) {
+                compositor::blit_two_plane(composite,
+                    MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
+                    icon_ink[i], icon_mask[i],
+                    ICON_W, ICON_H,
+                    icon_pos_x[i], icon_pos_y[i]);
+            }
         }
     };
 
@@ -1086,13 +1100,12 @@ extern "C" void app_main(void) {
             }
         }
 
-        /* Top STATUS_BAR_H rows are paper-white; render_chrome()
-         * paints status text + icons over the top of that. The
-         * scene fills 200×172 below the bar — same stride as
+        /* Scene fills the full 200×200 panel — same stride as
          * composite (25 bytes/row) so a single memcpy is the
-         * natural blit. */
-        memset(composite, 0xFF, 25 * STATUS_BAR_H);
-        memcpy(composite + 25 * SCENE_TOP_Y, scene_fb, SCENE_BYTES);
+         * natural blit. render_chrome() then white-fills the top
+         * STATUS_BAR_H rows and paints status text + icons over
+         * the top, hiding whatever the cell drew up there. */
+        memcpy(composite, scene_fb, SCENE_BYTES);
 
         compositor::blit_two_plane(composite,
             MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
@@ -1212,9 +1225,12 @@ extern "C" void app_main(void) {
 
         /* Scene + (sleeping) pet base. If the pet fetch failed (no
          * network, etc) we still render the asleep status — pet
-         * just doesn't update from whatever was last shown. */
+         * just doesn't update from whatever was last shown. White-
+         * fill the top STATUS_BAR_H rows AFTER the cell blit so the
+         * asleep banner reads against paper, not whatever the cell
+         * drew up there. */
+        memcpy(composite, scene_fb, SCENE_BYTES);
         memset(composite, 0xFF, 25 * STATUS_BAR_H);
-        memcpy(composite + 25 * SCENE_TOP_Y, scene_fb, SCENE_BYTES);
         if (got_pet) {
             compositor::blit_two_plane(composite,
                 MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
@@ -1614,8 +1630,14 @@ extern "C" void app_main(void) {
          * EVENT_TAPPED so their existence is at least observable. */
         const char *scene_zone_name = nullptr;
         if (!tapped_thought) {
-            int16_t cell_y = (int16_t)((int)ev.y - SCENE_TOP_Y);
-            (void)scene_pack_zone_at((int16_t)ev.x, cell_y, &scene_zone_name);
+            /* Cell is now blitted at panel row 0, so cell-local y
+             * matches panel y directly. Suppress hits in the status
+             * bar area so a tap on the time/battery glyphs doesn't
+             * accidentally fire a zone underneath. */
+            if ((int)ev.y >= STATUS_BAR_H) {
+                (void)scene_pack_zone_at(
+                    (int16_t)ev.x, (int16_t)ev.y, &scene_zone_name);
+            }
         }
 
         const char *expr = tapped_thought
@@ -1625,6 +1647,16 @@ extern "C" void app_main(void) {
             (unsigned)ev.x, (unsigned)ev.y, (unsigned)z,
             scene_zone_name ? scene_zone_name : "(none)",
             expr ? expr : "(gutter)");
+
+        /* When the current scene has authored zones, the corner-
+         * quadrant fallback is suppressed: a tap that misses every
+         * zone resolves to a generic curious tap rather than a
+         * corner care action. Scenes own intent on zoned scenes;
+         * unzoned scenes keep the legacy corner UX. */
+        const bool zoned = scene_pack_current_has_zones();
+        if (zoned && !scene_zone_name && !tapped_thought) {
+            expr = "curious";
+        }
 
         /* If the tap fell inside a named scene zone, route by name
          * instead of by corner quadrant. Scene navigation
@@ -1679,6 +1711,11 @@ extern "C" void app_main(void) {
                      strcmp(scene_zone_name, "light") == 0 ||
                      strcmp(scene_zone_name, "star") == 0)     kind = EVENT_CHEERED;
             else                                               kind = EVENT_TAPPED;
+        } else if (zoned) {
+            /* Zoned scene + tap missed all zones → generic tap.
+             * Don't infer corner care on a scene that has its own
+             * affordance vocabulary. */
+            kind = EVENT_TAPPED;
         } else {
             kind = zone_to_event(z);
         }

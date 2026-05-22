@@ -91,3 +91,15 @@ bool scene_pack_zone_at(int16_t x, int16_t y, const char **out_name) {
     return mpk_zone_test(SCENES_A_ZONES, SCENES_A_ZONES_COUNT,
                          s_current, x, y, out_name) >= 0;
 }
+
+bool scene_pack_current_has_zones(void) {
+    if (!s_open) return false;
+    /* Linear scan — zone-set table is tiny (~4 entries). */
+    for (size_t i = 0; i < SCENES_A_ZONES_COUNT; i++) {
+        if (SCENES_A_ZONES[i].sprite_idx == s_current &&
+            SCENES_A_ZONES[i].count > 0) {
+            return true;
+        }
+    }
+    return false;
+}
