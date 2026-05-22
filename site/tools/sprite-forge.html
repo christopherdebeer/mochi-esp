@@ -1,0 +1,1687 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>SPRITE·FORGE — mochi-esp tools</title>
+  <meta name="description" content="Pack sprite sheets into ESP32 / Arduino .bin packs (1bpp / gray8 / rgb565) with a C reader and authored tap rectangles. Runs entirely in your browser." />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script type="importmap">
+  {
+    "imports": {
+      "react": "https://esm.sh/react@18.3.1",
+      "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
+      "react-dom": "https://esm.sh/react-dom@18.3.1",
+      "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+      "lucide-react": "https://esm.sh/lucide-react@0.453.0?external=react"
+    }
+  }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.26.4/babel.min.js"></script>
+</head>
+<body style="background:#09090b">
+  <div id="root"></div>
+
+  <script type="text/babel" data-type="module" data-presets="react">
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { createRoot } from 'react-dom/client';
+import { Upload, Download, ChevronDown, ChevronRight, RotateCcw, Copy, Check, FileImage } from 'lucide-react';
+
+const FONTS = `
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Silkscreen:wght@400;700&display=swap');
+* { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+.pixel { font-family: 'Silkscreen', monospace; letter-spacing: 0.05em; }
+input[type=range]::-webkit-slider-thumb { background: #5eead4; }
+input[type=range] { accent-color: #5eead4; }
+.scanline {
+  background-image: repeating-linear-gradient(0deg, rgba(94,234,212,0.03) 0px, rgba(94,234,212,0.03) 1px, transparent 1px, transparent 3px);
+}
+.checker {
+  background-image:
+    linear-gradient(45deg, #18181b 25%, transparent 25%),
+    linear-gradient(-45deg, #18181b 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #18181b 75%),
+    linear-gradient(-45deg, transparent 75%, #18181b 75%);
+  background-size: 8px 8px;
+  background-position: 0 0, 0 4px, 4px -4px, -4px 0px;
+  background-color: #27272a;
+}
+`;
+
+// ───────────────────────────── primitives ─────────────────────────────
+
+function Card({ title, num, children, right }) {
+  return (
+    <section className="border border-zinc-800 bg-zinc-900/40">
+      <header className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
+        <h2 className="pixel text-[11px] text-teal-300">
+          <span className="text-zinc-600">{num} ▸ </span>{title}
+        </h2>
+        {right}
+      </header>
+      <div className="p-3 space-y-2">{children}</div>
+    </section>
+  );
+}
+
+function Row({ label, children, hint }) {
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between text-[11px]">
+        <span className="text-zinc-400 uppercase tracking-wider">{label}</span>
+        {hint && <span className="text-zinc-600 text-[10px]">{hint}</span>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function Stepper({ value, onChange, min = 1, max = 99, suffix }) {
+  return (
+    <div className="flex items-stretch border border-zinc-700 w-fit">
+      <button
+        onClick={() => onChange(Math.max(min, value - 1))}
+        className="px-3 text-zinc-400 hover:bg-zinc-800 active:bg-teal-300/20 select-none"
+        aria-label="decrement"
+      >−</button>
+      <input
+        type="number"
+        value={value}
+        onChange={(e) => {
+          const n = parseInt(e.target.value);
+          if (!isNaN(n)) onChange(Math.max(min, Math.min(max, n)));
+        }}
+        className="w-14 bg-transparent text-center text-sm text-teal-300 outline-none [&::-webkit-inner-spin-button]:appearance-none"
+      />
+      <button
+        onClick={() => onChange(Math.min(max, value + 1))}
+        className="px-3 text-zinc-400 hover:bg-zinc-800 active:bg-teal-300/20 select-none"
+        aria-label="increment"
+      >+</button>
+      {suffix && <span className="px-2 self-center text-[10px] text-zinc-600">{suffix}</span>}
+    </div>
+  );
+}
+
+function Slider({ value, onChange, min = 0, max = 100, suffix = '' }) {
+  return (
+    <div className="flex items-center gap-3">
+      <input
+        type="range"
+        min={min}
+        max={max}
+        value={value}
+        onChange={(e) => onChange(parseInt(e.target.value))}
+        className="flex-1 h-1 bg-zinc-800 outline-none"
+      />
+      <span className="text-xs text-teal-300 w-14 text-right tabular-nums">{value}{suffix}</span>
+    </div>
+  );
+}
+
+function Toggle({ value, onChange, label }) {
+  return (
+    <button
+      onClick={() => onChange(!value)}
+      className="flex items-center justify-between w-full py-1.5 group"
+    >
+      <span className="text-[11px] text-zinc-400 uppercase tracking-wider">{label}</span>
+      <div className={`w-10 h-5 border relative transition-colors ${value ? 'border-teal-300 bg-teal-300/10' : 'border-zinc-700'}`}>
+        <div className={`absolute top-0 bottom-0 w-4 transition-all ${value ? 'bg-teal-300 left-[calc(100%-1rem)]' : 'bg-zinc-600 left-0'}`} />
+      </div>
+    </button>
+  );
+}
+
+function Chips({ value, onChange, options }) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {options.map(opt => (
+        <button
+          key={opt.value}
+          onClick={() => onChange(opt.value)}
+          className={`px-2.5 py-1 text-xs border transition-colors ${
+            value === opt.value
+              ? 'border-teal-300 bg-teal-300/15 text-teal-300'
+              : 'border-zinc-700 text-zinc-400 hover:border-zinc-600'
+          }`}
+        >
+          {opt.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ───────────────────────────── pixel conversion ─────────────────────────────
+
+const luma = (r, g, b) => 0.299 * r + 0.587 * g + 0.114 * b;
+
+// 4×4 Bayer matrix, normalized to 0..15
+const BAYER_4 = [
+  [0, 8, 2, 10],
+  [12, 4, 14, 6],
+  [3, 11, 1, 9],
+  [15, 7, 13, 5],
+];
+// 8×8 Bayer (standard recursive expansion), 0..63
+const BAYER_8 = [
+  [ 0, 32,  8, 40,  2, 34, 10, 42],
+  [48, 16, 56, 24, 50, 18, 58, 26],
+  [12, 44,  4, 36, 14, 46,  6, 38],
+  [60, 28, 52, 20, 62, 30, 54, 22],
+  [ 3, 35, 11, 43,  1, 33,  9, 41],
+  [51, 19, 59, 27, 49, 17, 57, 25],
+  [15, 47,  7, 39, 13, 45,  5, 37],
+  [63, 31, 55, 23, 61, 29, 53, 21],
+];
+
+// Build an [w*h] luma array (Float32) honoring invert.
+function lumaBuffer(imgData, invert) {
+  const { width: w, height: h, data: src } = imgData;
+  const buf = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    let r = src[i * 4], g = src[i * 4 + 1], b = src[i * 4 + 2];
+    if (invert) { r = 255 - r; g = 255 - g; b = 255 - b; }
+    buf[i] = luma(r, g, b);
+  }
+  return buf;
+}
+
+// Apply effect; returns Uint8Array(w*h) of 0/255 binary luma.
+function applyEffect(imgData, effect, threshold, invert) {
+  const { width: w, height: h } = imgData;
+  const N = w * h;
+  const buf = lumaBuffer(imgData, invert);
+  const out = new Uint8Array(N);
+
+  if (effect.kind === 'fs' || effect.kind === 'atkinson') {
+    const serp = effect.serpentine;
+    for (let y = 0; y < h; y++) {
+      const ltr = !serp || (y & 1) === 0;
+      const xStart = ltr ? 0 : w - 1;
+      const xEnd = ltr ? w : -1;
+      const xStep = ltr ? 1 : -1;
+      for (let x = xStart; x !== xEnd; x += xStep) {
+        const i = y * w + x;
+        const old = buf[i];
+        const nv = old < threshold ? 0 : 255;
+        out[i] = nv;
+        const err = old - nv;
+        if (effect.kind === 'fs') {
+          // Floyd-Steinberg (mirror x-offsets when scanning right-to-left)
+          const d = xStep;
+          if (x + d >= 0 && x + d < w)         buf[i + d]         += err * (7 / 16);
+          if (y + 1 < h) {
+            if (x - d >= 0 && x - d < w)       buf[i + w - d]     += err * (3 / 16);
+                                               buf[i + w]         += err * (5 / 16);
+            if (x + d >= 0 && x + d < w)       buf[i + w + d]     += err * (1 / 16);
+          }
+        } else {
+          // Atkinson (passes only 6/8 of the error → higher contrast)
+          const e8 = err / 8;
+          const d = xStep;
+          if (x + d >= 0 && x + d < w)         buf[i + d]         += e8;
+          if (x + 2 * d >= 0 && x + 2 * d < w) buf[i + 2 * d]     += e8;
+          if (y + 1 < h) {
+            if (x - d >= 0 && x - d < w)       buf[i + w - d]     += e8;
+                                               buf[i + w]         += e8;
+            if (x + d >= 0 && x + d < w)       buf[i + w + d]     += e8;
+          }
+          if (y + 2 < h)                       buf[i + 2 * w]     += e8;
+        }
+      }
+    }
+    return out;
+  }
+
+  if (effect.kind === 'bayer4' || effect.kind === 'bayer8') {
+    const M = effect.kind === 'bayer4' ? BAYER_4 : BAYER_8;
+    const n = M.length;
+    const scale = 255 / (n * n);
+    // Strength: how strongly the matrix modulates threshold (0..1)
+    const s = effect.strength;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        const m = (M[y % n][x % n] + 0.5) * scale;       // 0..255 dither value
+        const t = threshold + (m - 128) * s;             // shifted threshold
+        out[i] = buf[i] < t ? 0 : 255;
+      }
+    }
+    return out;
+  }
+
+  if (effect.kind === 'screen') {
+    const rad = (effect.angle * Math.PI) / 180;
+    const cs = Math.cos(rad), sn = Math.sin(rad);
+    const sp = Math.max(1, effect.spacing);
+    const contrast = effect.contrast; // 0..1, how aggressive the screen is
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        // Project onto line-normal axis
+        const u = x * cs + y * sn;
+        // Triangle wave in [0,1] with period `sp`
+        const phase = ((u % sp) + sp) % sp;
+        const tri = 1 - Math.abs(phase / sp - 0.5) * 2;  // 0 at edges, 1 in middle
+        // Mix screen value with fixed threshold for control
+        const screenT = tri * 255;
+        const t = threshold * (1 - contrast) + screenT * contrast;
+        out[i] = buf[i] < t ? 0 : 255;
+      }
+    }
+    return out;
+  }
+
+  // 'none' — simple threshold (used only when effect explicitly requests binary)
+  for (let i = 0; i < N; i++) out[i] = buf[i] < threshold ? 0 : 255;
+  return out;
+}
+
+// Renders a preview ImageData reflecting both effect and target format.
+function convertPreview(imgData, format, threshold, invert, effect) {
+  const { width: w, height: h, data: src } = imgData;
+  const out = new ImageData(w, h);
+  const dst = out.data;
+  const useEffect = effect && effect.kind !== 'none';
+
+  // Effects always produce binary; preview as black-on-white.
+  if (useEffect) {
+    const bin = applyEffect(imgData, effect, threshold, invert);
+    for (let i = 0; i < w * h; i++) {
+      const v = bin[i];
+      dst[i * 4] = v; dst[i * 4 + 1] = v; dst[i * 4 + 2] = v; dst[i * 4 + 3] = 255;
+    }
+    return out;
+  }
+
+  for (let i = 0; i < w * h; i++) {
+    let r = src[i * 4], g = src[i * 4 + 1], b = src[i * 4 + 2];
+    if (invert) { r = 255 - r; g = 255 - g; b = 255 - b; }
+    if (format === '1bpp') {
+      const v = luma(r, g, b) < threshold ? 0 : 255;
+      dst[i * 4] = v; dst[i * 4 + 1] = v; dst[i * 4 + 2] = v;
+    } else if (format === 'gray8') {
+      const v = Math.round(luma(r, g, b));
+      dst[i * 4] = v; dst[i * 4 + 1] = v; dst[i * 4 + 2] = v;
+    } else {
+      // Simulate RGB565 quantisation
+      const r5 = r >> 3, g6 = g >> 2, b5 = b >> 3;
+      dst[i * 4] = (r5 << 3) | (r5 >> 2);
+      dst[i * 4 + 1] = (g6 << 2) | (g6 >> 4);
+      dst[i * 4 + 2] = (b5 << 3) | (b5 >> 2);
+    }
+    dst[i * 4 + 3] = 255;
+  }
+  return out;
+}
+
+function packPixels(imgData, format, threshold, invert, effect) {
+  const { width: w, height: h, data: src } = imgData;
+  const N = w * h;
+  const useEffect = effect && effect.kind !== 'none';
+
+  // Pre-binarized path: every format renders the same black/white image.
+  if (useEffect) {
+    const bin = applyEffect(imgData, effect, threshold, invert);
+    if (format === '1bpp') {
+      const out = new Uint8Array(Math.ceil(N / 8));
+      for (let i = 0; i < N; i++) {
+        // Convention: bit=1 means "ink" (dark pixel)
+        if (bin[i] === 0) out[i >> 3] |= 0x80 >> (i & 7);
+      }
+      return out;
+    }
+    if (format === 'gray8') return bin;  // already 0/255
+    // rgb565: black (0x0000) or white (0xFFFF)
+    const out = new Uint8Array(N * 2);
+    for (let i = 0; i < N; i++) {
+      const v = bin[i] === 0 ? 0x0000 : 0xFFFF;
+      out[i * 2] = v & 0xff;
+      out[i * 2 + 1] = (v >> 8) & 0xff;
+    }
+    return out;
+  }
+
+  if (format === 'rgb565') {
+    const out = new Uint8Array(N * 2);
+    for (let i = 0; i < N; i++) {
+      let r = src[i * 4], g = src[i * 4 + 1], b = src[i * 4 + 2];
+      if (invert) { r = 255 - r; g = 255 - g; b = 255 - b; }
+      const v = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+      out[i * 2] = v & 0xff;
+      out[i * 2 + 1] = (v >> 8) & 0xff;
+    }
+    return out;
+  }
+  if (format === 'gray8') {
+    const out = new Uint8Array(N);
+    for (let i = 0; i < N; i++) {
+      let r = src[i * 4], g = src[i * 4 + 1], b = src[i * 4 + 2];
+      if (invert) { r = 255 - r; g = 255 - g; b = 255 - b; }
+      out[i] = Math.round(luma(r, g, b));
+    }
+    return out;
+  }
+  // 1bpp, MSB-first, row-major (bit=1 → ink)
+  const out = new Uint8Array(Math.ceil(N / 8));
+  for (let i = 0; i < N; i++) {
+    let r = src[i * 4], g = src[i * 4 + 1], b = src[i * 4 + 2];
+    if (invert) { r = 255 - r; g = 255 - g; b = 255 - b; }
+    if (luma(r, g, b) < threshold) {
+      out[i >> 3] |= 0x80 >> (i & 7);
+    }
+  }
+  return out;
+}
+
+const imageDataToURL = (imgData) => {
+  const c = document.createElement('canvas');
+  c.width = imgData.width;
+  c.height = imgData.height;
+  c.getContext('2d').putImageData(imgData, 0, 0);
+  return c.toDataURL();
+};
+
+// Build a sheet canvas of processed sprites laid out in a tight grid.
+// `hits` is an array of arrays of {x,y,w,h,name} in normalized coords.
+function buildSheetCanvas(sprites, format, threshold, invert, effect, opts = {}) {
+  if (!sprites || sprites.length === 0) return null;
+  const {
+    cols = 8,
+    gap = 2,
+    padding = 8,
+    hits = null,
+    drawHits = true,
+    drawBorders = true,
+    drawIndices = false,
+    bg = '#ffffff',
+  } = opts;
+  const sw = sprites[0].width, sh = sprites[0].height;
+  const N = sprites.length;
+  const ncols = Math.max(1, Math.min(cols, N));
+  const nrows = Math.ceil(N / ncols);
+  const W = padding * 2 + ncols * sw + (ncols - 1) * gap;
+  const H = padding * 2 + nrows * sh + (nrows - 1) * gap;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Pass 1: pixel data. putImageData writes raw pixels (no compositing) — fine
+  // because every processed sprite has alpha=255 throughout.
+  for (let i = 0; i < N; i++) {
+    const col = i % ncols;
+    const row = Math.floor(i / ncols);
+    const x = padding + col * (sw + gap);
+    const y = padding + row * (sh + gap);
+    const processed = convertPreview(sprites[i], format, threshold, invert, effect);
+    ctx.putImageData(processed, x, y);
+  }
+
+  // Pass 2: cell borders. Makes empty/all-white sprites visually distinguishable.
+  if (drawBorders) {
+    ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < N; i++) {
+      const col = i % ncols;
+      const row = Math.floor(i / ncols);
+      const x = padding + col * (sw + gap);
+      const y = padding + row * (sh + gap);
+      ctx.strokeRect(x - 0.5, y - 0.5, sw + 1, sh + 1);
+    }
+  }
+
+  // Pass 3: hit overlays.
+  if (drawHits && hits) {
+    for (let i = 0; i < N; i++) {
+      const hs = hits[i];
+      if (!hs || hs.length === 0) continue;
+      const col = i % ncols;
+      const row = Math.floor(i / ncols);
+      const x = padding + col * (sw + gap);
+      const y = padding + row * (sh + gap);
+      for (const h of hs) {
+        const hx = Math.round(h.x * sw);
+        const hy = Math.round(h.y * sh);
+        const hw = Math.max(1, Math.round(h.w * sw));
+        const hh = Math.max(1, Math.round(h.h * sh));
+        ctx.fillStyle = 'rgba(244,63,94,0.18)';
+        ctx.fillRect(x + hx, y + hy, hw, hh);
+        ctx.strokeStyle = 'rgba(244,63,94,0.9)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x + hx + 0.5, y + hy + 0.5, hw - 1, hh - 1);
+      }
+    }
+  }
+
+  // Pass 4: cell indices (debug overlay).
+  if (drawIndices) {
+    const fontSize = Math.max(8, Math.round(Math.min(sw, sh) / 4));
+    ctx.font = `bold ${fontSize}px monospace`;
+    ctx.textBaseline = 'top';
+    for (let i = 0; i < N; i++) {
+      const col = i % ncols;
+      const row = Math.floor(i / ncols);
+      const x = padding + col * (sw + gap);
+      const y = padding + row * (sh + gap);
+      const txt = String(i);
+      const tw = ctx.measureText(txt).width + 4;
+      ctx.fillStyle = 'rgba(20,184,166,0.9)';
+      ctx.fillRect(x, y, tw, fontSize + 2);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(txt, x + 2, y + 1);
+    }
+  }
+
+  return canvas;
+}
+
+// Make a label valid as a C identifier prefix.
+function cIdent(s) {
+  if (!s) return 'sprite';
+  let out = s.replace(/[^a-zA-Z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+  if (/^\d/.test(out)) out = '_' + out;
+  return out.toUpperCase() || 'SPRITE';
+}
+
+// ───────────────────────────── C parser ─────────────────────────────
+
+const C_PARSER = `// sprite_pack.h — ESP32 / Arduino sprite-pack reader
+// Pack format produced by SPRITE·FORGE v1
+#pragma once
+#include <stdint.h>
+#include <string.h>
+
+#define SPRT_MAGIC "SPRT"
+
+enum {
+  SPRT_FORMAT_1BPP   = 0,  // MSB-first, row-major; ceil(w*h/8) bytes
+  SPRT_FORMAT_GRAY8  = 1,  // 1 byte per pixel
+  SPRT_FORMAT_RGB565 = 2,  // 2 bytes per pixel, little-endian
+};
+
+typedef struct {
+  uint8_t        version;
+  uint8_t        format;       // see enum above
+  uint16_t       width;
+  uint16_t       height;
+  uint16_t       count;
+  uint8_t        label_len;
+  const uint8_t *base;         // pointer to first sprite entry
+  size_t         pixel_bytes;  // bytes of pixel data per sprite
+  size_t         stride;       // label_len + pixel_bytes (entry size)
+} sprt_pack_t;
+
+// Returns 0 on success, negative on error. \`data\` must remain valid
+// for the lifetime of the pack (use PROGMEM, embedded data, or PSRAM).
+static inline int sprt_open(const uint8_t *data, sprt_pack_t *p) {
+  if (memcmp(data, SPRT_MAGIC, 4) != 0) return -1;
+  p->version   = data[4];
+  p->format    = data[5];
+  p->width     = (uint16_t)data[6]  | ((uint16_t)data[7]  << 8);
+  p->height    = (uint16_t)data[8]  | ((uint16_t)data[9]  << 8);
+  p->count     = (uint16_t)data[10] | ((uint16_t)data[11] << 8);
+  p->label_len = data[12];
+  const uint32_t px = (uint32_t)p->width * p->height;
+  switch (p->format) {
+    case SPRT_FORMAT_1BPP:   p->pixel_bytes = (px + 7) / 8; break;
+    case SPRT_FORMAT_GRAY8:  p->pixel_bytes = px;           break;
+    case SPRT_FORMAT_RGB565: p->pixel_bytes = px * 2;       break;
+    default: return -2;
+  }
+  p->stride = p->label_len + p->pixel_bytes;
+  p->base   = data + 16;
+  return 0;
+}
+
+// Label is null-padded; safe to printf as %s only if you copy <= label_len.
+static inline const char *sprt_label(const sprt_pack_t *p, uint16_t i) {
+  return (const char *)(p->base + (size_t)i * p->stride);
+}
+
+static inline const uint8_t *sprt_pixels(const sprt_pack_t *p, uint16_t i) {
+  return p->base + (size_t)i * p->stride + p->label_len;
+}
+
+// Linear search by label (small N — fine for sprite packs).
+static inline int sprt_find(const sprt_pack_t *p, const char *name) {
+  for (uint16_t i = 0; i < p->count; i++) {
+    const char *l = sprt_label(p, i);
+    if (strncmp(l, name, p->label_len) == 0) return i;
+  }
+  return -1;
+}
+
+// ── Hit areas ──────────────────────────────────────────────────────
+// Rectangles in sprite-local pixel space (origin = top-left of sprite).
+typedef struct {
+  uint16_t x, y, w, h;
+  const char *name;
+} sprt_hit_t;
+
+typedef struct {
+  uint16_t          sprite_idx;
+  uint8_t           count;
+  const sprt_hit_t *items;
+} sprt_hit_set_t;
+
+// Point-in-rect test against all hit sets for a sprite.
+// Returns the hit index within the sprite's set, or -1 if no hit.
+// Sets \`*out_name\` to the matched rect's name when non-null.
+static inline int sprt_hit_test(const sprt_hit_set_t *sets, size_t n_sets,
+                                uint16_t sprite_idx, int16_t x, int16_t y,
+                                const char **out_name) {
+  for (size_t s = 0; s < n_sets; s++) {
+    if (sets[s].sprite_idx != sprite_idx) continue;
+    for (uint8_t h = 0; h < sets[s].count; h++) {
+      const sprt_hit_t *r = &sets[s].items[h];
+      if (x >= (int16_t)r->x && x < (int16_t)(r->x + r->w) &&
+          y >= (int16_t)r->y && y < (int16_t)(r->y + r->h)) {
+        if (out_name) *out_name = r->name;
+        return (int)h;
+      }
+    }
+    return -1;
+  }
+  return -1;
+}
+
+// ── Example: draw an RGB565 sprite with Adafruit_GFX ────────────────
+// extern const uint8_t sprites_bin[] PROGMEM;
+// sprt_pack_t pack;
+// sprt_open(sprites_bin, &pack);
+// int idx = sprt_find(&pack, "happy");
+// if (idx >= 0) {
+//   tft.drawRGBBitmap(x, y, (uint16_t*)sprt_pixels(&pack, idx),
+//                     pack.width, pack.height);
+// }
+//
+// ── Example: dispatch a touch event ────────────────────────────────
+// // sprites_meta.h declares: SPRITES_HITS[] and SPRITES_HITS_COUNT
+// #include "sprites_meta.h"
+// const char *name = NULL;
+// if (sprt_hit_test(SPRITES_HITS, SPRITES_HITS_COUNT,
+//                   current_sprite, touch_x, touch_y, &name) >= 0) {
+//   handle_tap(name);
+// }
+`;
+
+// ───────────────────────────── hit area editor ─────────────────────
+
+function HitAreaEditor({ sprite, hits, label, format, threshold, invert, effect, onChange, onClose }) {
+  const canvasRef = useRef(null);
+  const wrapRef = useRef(null);
+  const [drawing, setDrawing] = useState(null); // {x1,y1,x2,y2} normalized
+  const [containerW, setContainerW] = useState(320);
+
+  const sw = sprite.width, sh = sprite.height;
+  // Scale to fit container width, integer multiple for pixel-perfect look
+  const baseScale = Math.max(1, Math.floor(containerW / sw));
+  const scale = Math.min(baseScale, 16);
+  const dW = sw * scale, dH = sh * scale;
+
+  useEffect(() => {
+    const update = () => {
+      if (wrapRef.current) setContainerW(wrapRef.current.clientWidth);
+    };
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, []);
+
+  // Render the canvas
+  useEffect(() => {
+    const c = canvasRef.current;
+    if (!c) return;
+    c.width = dW;
+    c.height = dH;
+    const ctx = c.getContext('2d');
+    ctx.imageSmoothingEnabled = false;
+
+    const processed = convertPreview(sprite, format, threshold, invert, effect);
+    const off = document.createElement('canvas');
+    off.width = sw; off.height = sh;
+    off.getContext('2d').putImageData(processed, 0, 0);
+
+    // Checker background
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, dW, dH);
+    ctx.drawImage(off, 0, 0, dW, dH);
+
+    // Pixel grid (faint, only if scale large enough)
+    if (scale >= 6) {
+      ctx.strokeStyle = 'rgba(0,0,0,0.08)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let x = 1; x < sw; x++) {
+        ctx.moveTo(x * scale + 0.5, 0);
+        ctx.lineTo(x * scale + 0.5, dH);
+      }
+      for (let y = 1; y < sh; y++) {
+        ctx.moveTo(0, y * scale + 0.5);
+        ctx.lineTo(dW, y * scale + 0.5);
+      }
+      ctx.stroke();
+    }
+
+    // Existing hits
+    ctx.lineWidth = 2;
+    hits.forEach((h, idx) => {
+      const x = h.x * dW, y = h.y * dH, w = h.w * dW, hgt = h.h * dH;
+      ctx.fillStyle = 'rgba(244,63,94,0.18)';
+      ctx.fillRect(x, y, w, hgt);
+      ctx.strokeStyle = 'rgba(244,63,94,0.95)';
+      ctx.strokeRect(x + 1, y + 1, w - 2, hgt - 2);
+      // Index badge
+      ctx.fillStyle = 'rgba(244,63,94,0.95)';
+      ctx.fillRect(x, y, 16, 14);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 10px monospace';
+      ctx.fillText(String(idx), x + 4, y + 10);
+    });
+
+    // In-progress draw
+    if (drawing) {
+      const x = Math.min(drawing.x1, drawing.x2) * dW;
+      const y = Math.min(drawing.y1, drawing.y2) * dH;
+      const w = Math.abs(drawing.x2 - drawing.x1) * dW;
+      const hgt = Math.abs(drawing.y2 - drawing.y1) * dH;
+      ctx.fillStyle = 'rgba(94,234,212,0.2)';
+      ctx.fillRect(x, y, w, hgt);
+      ctx.strokeStyle = 'rgba(94,234,212,1)';
+      ctx.setLineDash([4, 4]);
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x, y, w, hgt);
+      ctx.setLineDash([]);
+    }
+  }, [sprite, hits, drawing, format, threshold, invert, effect, dW, dH, sw, sh, scale]);
+
+  const ptToNorm = (e) => {
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    return { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) };
+  };
+
+  const onPointerDown = (e) => {
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const p = ptToNorm(e);
+    setDrawing({ x1: p.x, y1: p.y, x2: p.x, y2: p.y });
+  };
+  const onPointerMove = (e) => {
+    if (!drawing) return;
+    e.preventDefault();
+    const p = ptToNorm(e);
+    setDrawing({ ...drawing, x2: p.x, y2: p.y });
+  };
+  const onPointerUp = (e) => {
+    if (!drawing) return;
+    e.preventDefault();
+    const x = Math.min(drawing.x1, drawing.x2);
+    const y = Math.min(drawing.y1, drawing.y2);
+    const w = Math.abs(drawing.x2 - drawing.x1);
+    const h = Math.abs(drawing.y2 - drawing.y1);
+    setDrawing(null);
+    // Snap to integer pixels in sprite space
+    const px = Math.round(x * sw);
+    const py = Math.round(y * sh);
+    const pw = Math.max(1, Math.round(w * sw));
+    const ph = Math.max(1, Math.round(h * sh));
+    if (pw < 2 && ph < 2) return; // ignore tap-without-drag
+    const nx = px / sw, ny = py / sh, nw = pw / sw, nh = ph / sh;
+    onChange([...hits, { x: nx, y: ny, w: nw, h: nh, name: `hit_${hits.length}` }]);
+  };
+
+  const updateHit = (i, patch) => {
+    onChange(hits.map((h, j) => (j === i ? { ...h, ...patch } : h)));
+  };
+  const deleteHit = (i) => {
+    onChange(hits.filter((_, j) => j !== i));
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-zinc-950/95 backdrop-blur flex flex-col">
+      <header className="border-b border-zinc-800 px-3 py-3 flex items-center justify-between">
+        <div>
+          <div className="text-[10px] text-zinc-600 uppercase tracking-wider">edit hit areas</div>
+          <div className="pixel text-sm text-teal-300">{label}</div>
+        </div>
+        <button
+          onClick={onClose}
+          className="bg-zinc-800 text-zinc-200 px-3 py-1.5 text-xs hover:bg-zinc-700"
+        >
+          done
+        </button>
+      </header>
+
+      <div className="flex-1 overflow-y-auto p-3 space-y-3">
+        <div ref={wrapRef} className="space-y-2">
+          <canvas
+            ref={canvasRef}
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+            onPointerCancel={onPointerUp}
+            style={{
+              width: '100%',
+              height: 'auto',
+              imageRendering: 'pixelated',
+              touchAction: 'none',
+              cursor: 'crosshair',
+              display: 'block',
+              border: '1px solid #3f3f46',
+            }}
+          />
+          <div className="text-[10px] text-zinc-500">
+            drag to draw a hit area · {sw}×{sh}px sprite · {scale}× zoom
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <div className="text-[10px] text-zinc-500 uppercase tracking-wider">
+            hit areas ({hits.length})
+          </div>
+          {hits.length === 0 ? (
+            <div className="text-[11px] text-zinc-600 italic">no hit areas yet — drag on the canvas above</div>
+          ) : (
+            hits.map((h, i) => {
+              const px = Math.round(h.x * sw);
+              const py = Math.round(h.y * sh);
+              const pw = Math.max(1, Math.round(h.w * sw));
+              const ph = Math.max(1, Math.round(h.h * sh));
+              return (
+                <div key={i} className="border border-zinc-800 p-2 space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-rose-400 bg-rose-500/10 border border-rose-500/40 px-1.5 tabular-nums">
+                      {i}
+                    </span>
+                    <input
+                      type="text"
+                      value={h.name}
+                      onChange={(e) => updateHit(i, { name: e.target.value })}
+                      className="flex-1 bg-zinc-900 border border-zinc-800 focus:border-teal-300/60 outline-none px-2 py-1 text-[12px] text-zinc-200"
+                      placeholder="name"
+                    />
+                    <button
+                      onClick={() => deleteHit(i)}
+                      className="text-[10px] text-rose-400 hover:text-rose-300 border border-rose-500/40 hover:border-rose-400 px-2 py-1"
+                    >
+                      del
+                    </button>
+                  </div>
+                  <div className="text-[10px] text-zinc-500 font-mono tabular-nums">
+                    x={px} y={py} w={pw} h={ph}
+                    <span className="text-zinc-700"> · </span>
+                    nx={h.x.toFixed(3)} ny={h.y.toFixed(3)} nw={h.w.toFixed(3)} nh={h.h.toFixed(3)}
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ───────────────────────────── main ─────────────────────────────
+
+function App() {
+  const [imgEl, setImgEl] = useState(null);
+  const [imageURL, setImageURL] = useState(null);
+  const [filename, setFilename] = useState('');
+
+  const [cols, setCols] = useState(4);
+  const [rows, setRows] = useState(4);
+  const [marginTop, setMarginTop] = useState(0);
+  const [marginRight, setMarginRight] = useState(0);
+  const [marginBottom, setMarginBottom] = useState(0);
+  const [marginLeft, setMarginLeft] = useState(0);
+  const [hGutter, setHGutter] = useState(0);
+  const [vGutter, setVGutter] = useState(0);
+
+  const [outSize, setOutSize] = useState(32);
+  const [format, setFormat] = useState('rgb565');
+  const [threshold, setThreshold] = useState(140);
+  const [invert, setInvert] = useState(false);
+  const [smoothing, setSmoothing] = useState(true);
+  const [labelMaxLen, setLabelMaxLen] = useState(16);
+
+  // Effect: 'none' | 'fs' | 'atkinson' | 'bayer4' | 'bayer8' | 'screen'
+  const [effectKind, setEffectKind] = useState('none');
+  const [serpentine, setSerpentine] = useState(true);   // for error-diffusion
+  const [bayerStrength, setBayerStrength] = useState(80); // 0..100 → 0..1
+  const [screenAngle, setScreenAngle] = useState(45);
+  const [screenSpacing, setScreenSpacing] = useState(4);
+  const [screenContrast, setScreenContrast] = useState(70); // 0..100 → 0..1
+
+  const effect = useMemo(() => ({
+    kind: effectKind,
+    serpentine,
+    strength: bayerStrength / 100,
+    angle: screenAngle,
+    spacing: screenSpacing,
+    contrast: screenContrast / 100,
+  }), [effectKind, serpentine, bayerStrength, screenAngle, screenSpacing, screenContrast]);
+
+  const [labels, setLabels] = useState([]);
+  const [hits, setHits] = useState([]);          // hits[i] = [{x,y,w,h,name}] in normalized coords
+  const [editingIdx, setEditingIdx] = useState(null);
+  const [showLayout, setShowLayout] = useState(true);
+  const [showC, setShowC] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [overlayOn, setOverlayOn] = useState(true);
+  const [sheetCols, setSheetCols] = useState(null);  // null = follow source cols
+  const [showIndices, setShowIndices] = useState(false);
+  const effectiveSheetCols = sheetCols ?? cols;
+
+  const [error, setError] = useState(null);
+  const fileInputRef = useRef(null);
+
+  // Derive sprite size from cols/rows, margins, and gutters.
+  //   usableW = imgW - marginL - marginR
+  //   spriteW = (usableW - (cols-1)*hGutter) / cols
+  const layout = useMemo(() => {
+    if (!imgEl || cols <= 0 || rows <= 0) {
+      return { cols: 0, rows: 0, count: 0, spriteW: 0, spriteH: 0, fits: false };
+    }
+    const iw = imgEl.naturalWidth, ih = imgEl.naturalHeight;
+    const usableW = iw - marginLeft - marginRight;
+    const usableH = ih - marginTop - marginBottom;
+    const spriteW = (usableW - (cols - 1) * hGutter) / cols;
+    const spriteH = (usableH - (rows - 1) * vGutter) / rows;
+    const fits = spriteW > 0 && spriteH > 0;
+    return {
+      cols, rows, count: cols * rows,
+      spriteW: fits ? spriteW : 0,
+      spriteH: fits ? spriteH : 0,
+      fits,
+    };
+  }, [imgEl, cols, rows, marginTop, marginRight, marginBottom, marginLeft, hGutter, vGutter]);
+
+  // keep labels array in sync with grid count
+  useEffect(() => {
+    const n = layout.count;
+    setLabels((prev) =>
+      Array.from({ length: n }, (_, i) => prev[i] ?? `sprite_${String(i).padStart(2, '0')}`)
+    );
+  }, [layout.count]);
+
+  // keep hits array in sync with grid count
+  useEffect(() => {
+    const n = layout.count;
+    setHits((prev) => Array.from({ length: n }, (_, i) => prev[i] ?? []));
+  }, [layout.count]);
+
+  const setSpriteHits = useCallback((idx, newHits) => {
+    setHits((prev) => {
+      const next = [...prev];
+      next[idx] = newHits;
+      return next;
+    });
+  }, []);
+
+  const handleFile = useCallback((file) => {
+    setError(null);
+    if (!file) { setError('No file received from picker.'); return; }
+    const ext = (file.name || '').match(/\.([^.]+)$/)?.[1]?.toLowerCase() || '';
+    const looksLikeImage =
+      (file.type && file.type.startsWith('image/')) ||
+      ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'avif', 'heic', 'heif'].includes(ext);
+    if (!looksLikeImage) {
+      setError(`Unsupported file: "${file.name}" type=${file.type || '?'} size=${file.size}B`);
+      return;
+    }
+    setFilename((file.name || 'sprites').replace(/\.[^.]+$/, ''));
+
+    // FileReader → data URL is more reliable than blob: URLs in sandboxed iframes
+    const reader = new FileReader();
+    reader.onerror = () => setError(`FileReader: ${reader.error?.message || 'unknown error'}`);
+    reader.onload = (e) => {
+      const dataURL = e.target.result;
+      const img = new Image();
+      img.onload = () => {
+        if (!img.naturalWidth || !img.naturalHeight) {
+          setError(`Image decoded but has zero dimensions (${file.size}B, ${file.type || '?'}).`);
+          return;
+        }
+        setImgEl(img);
+        setImageURL(dataURL);
+      };
+      img.onerror = async () => {
+        // Sniff actual file format by reading magic bytes
+        try {
+          const buf = await file.slice(0, 16).arrayBuffer();
+          const b = new Uint8Array(buf);
+          const hex = Array.from(b).map(x => x.toString(16).padStart(2, '0')).join(' ');
+          let detected = 'unknown';
+          if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) detected = 'PNG';
+          else if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) detected = 'JPEG';
+          else if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) detected = 'GIF';
+          else if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46) detected = 'RIFF/WebP';
+          else if (b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) {
+            const brand = String.fromCharCode(b[8], b[9], b[10], b[11]);
+            detected = `ISOBMFF (brand=${brand}) — likely HEIC/HEIF/AVIF`;
+          }
+          setError(
+            `Decode failed. Browser cannot render this image.\n` +
+            `• File: ${file.name} (${file.size}B)\n` +
+            `• Reported type: ${file.type || 'none'}\n` +
+            `• Detected from bytes: ${detected}\n` +
+            `• Magic: ${hex}` +
+            (detected.startsWith('ISOBMFF')
+              ? `\n→ This is a HEIC/HEIF photo. Export as PNG or JPEG from Photos (Share → Save to Files → choose PNG, or Settings → Camera → Formats → Most Compatible).`
+              : '')
+          );
+        } catch (err) {
+          setError(`Decode failed (${file.size}B ${file.type || '?'}). Could not sniff bytes: ${err.message}`);
+        }
+      };
+      img.src = dataURL;
+    };
+    reader.readAsDataURL(file);
+  }, []);
+
+  const pickFile = useCallback(() => {
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ''; // re-pick same file works
+      fileInputRef.current.click();
+    }
+  }, []);
+
+  // extract raw sprites at outSize × outSize using derived geometry
+  const sprites = useMemo(() => {
+    if (!imgEl || !layout.fits || layout.count === 0) return [];
+    const { spriteW, spriteH } = layout;
+
+    const result = [];
+    const tmp = document.createElement('canvas');
+    tmp.width = outSize;
+    tmp.height = outSize;
+    const ctx = tmp.getContext('2d');
+
+    for (let r = 0; r < layout.rows; r++) {
+      for (let c = 0; c < layout.cols; c++) {
+        ctx.imageSmoothingEnabled = smoothing;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.clearRect(0, 0, outSize, outSize);
+        const sx = marginLeft + c * (spriteW + hGutter);
+        const sy = marginTop + r * (spriteH + vGutter);
+        ctx.drawImage(imgEl, sx, sy, spriteW, spriteH, 0, 0, outSize, outSize);
+        result.push(ctx.getImageData(0, 0, outSize, outSize));
+      }
+    }
+    return result;
+  }, [imgEl, layout, marginTop, marginLeft, hGutter, vGutter, outSize, smoothing]);
+
+  // preview thumbnails reflect the chosen output format
+  const previewURLs = useMemo(
+    () => sprites.map((s) => imageDataToURL(convertPreview(s, format, threshold, invert, effect))),
+    [sprites, format, threshold, invert, effect]
+  );
+
+  const { pixelBytes, perEntry, totalBytes } = useMemo(() => {
+    const px = outSize * outSize;
+    const pb = format === '1bpp' ? Math.ceil(px / 8) : format === 'gray8' ? px : px * 2;
+    const pe = pb + labelMaxLen;
+    return { pixelBytes: pb, perEntry: pe, totalBytes: 16 + layout.count * pe };
+  }, [outSize, format, labelMaxLen, layout.count]);
+
+  const buildBinary = useCallback(() => {
+    const buf = new Uint8Array(totalBytes);
+    const dv = new DataView(buf.buffer);
+    buf[0] = 0x53; buf[1] = 0x50; buf[2] = 0x52; buf[3] = 0x54; // "SPRT"
+    buf[4] = 1; // version
+    buf[5] = format === '1bpp' ? 0 : format === 'gray8' ? 1 : 2;
+    dv.setUint16(6, outSize, true);
+    dv.setUint16(8, outSize, true);
+    dv.setUint16(10, sprites.length, true);
+    buf[12] = labelMaxLen;
+    // 13–15 reserved (zero)
+
+    let off = 16;
+    const enc = new TextEncoder();
+    for (let i = 0; i < sprites.length; i++) {
+      const lb = enc.encode(labels[i] || '');
+      const n = Math.min(lb.length, labelMaxLen);
+      for (let j = 0; j < n; j++) buf[off + j] = lb[j];
+      off += labelMaxLen;
+      const pix = packPixels(sprites[i], format, threshold, invert, effect);
+      for (let j = 0; j < pix.length; j++) buf[off + j] = pix[j];
+      off += pixelBytes;
+    }
+    return buf;
+  }, [sprites, labels, format, outSize, labelMaxLen, threshold, invert, effect, pixelBytes, totalBytes]);
+
+  const handleDownload = useCallback(() => {
+    const buf = buildBinary();
+    const blob = new Blob([buf], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${filename || 'sprites'}_${outSize}_${format}.bin`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [buildBinary, filename, outSize, format]);
+
+  const copyParser = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(C_PARSER);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {}
+  }, []);
+
+  // ─── Sheet PNG ────────────────────────────────────────────────────
+  // Built lazily for inline preview; downloaded on demand.
+  const sheetPNG = useMemo(() => {
+    if (!sprites.length) return null;
+    const canvas = buildSheetCanvas(sprites, format, threshold, invert, effect, {
+      cols: effectiveSheetCols, hits, drawHits: true, drawIndices: showIndices,
+    });
+    return canvas ? canvas.toDataURL('image/png') : null;
+  }, [sprites, format, threshold, invert, effect, hits, effectiveSheetCols, showIndices]);
+
+  const handleDownloadSheet = useCallback(() => {
+    if (!sprites.length) return;
+    // Clean export: no hit overlays, no indices, no debug borders
+    const canvas = buildSheetCanvas(sprites, format, threshold, invert, effect, {
+      cols: effectiveSheetCols, hits, drawHits: false, drawIndices: false, drawBorders: false,
+    });
+    canvas.toBlob((blob) => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${filename || 'sprites'}_${outSize}_${format}_sheet.png`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }, 'image/png');
+  }, [sprites, format, threshold, invert, effect, hits, effectiveSheetCols, filename, outSize]);
+
+  // ─── Meta header generation ──────────────────────────────────────
+  const metaHeader = useMemo(() => {
+    if (!sprites.length) return null;
+    const packName = cIdent(filename || 'sprites');
+    const totalHits = hits.reduce((acc, hs) => acc + (hs?.length || 0), 0);
+    const lines = [];
+    lines.push(`// Generated by SPRITE·FORGE — metadata for pack "${filename || 'sprites'}"`);
+    lines.push(`// ${sprites.length} sprites · ${outSize}×${outSize} ${format} · ${totalHits} hit areas`);
+    lines.push(`#pragma once`);
+    lines.push(`#include "sprite_pack.h"`);
+    lines.push('');
+    lines.push(`// Sprite indices (compile-time constants by label)`);
+    labels.forEach((lab, i) => {
+      lines.push(`#define ${packName}_SPRITE_${cIdent(lab)} ${i}u`);
+    });
+    lines.push('');
+
+    if (totalHits === 0) {
+      lines.push(`// No hit areas defined.`);
+      lines.push(`static const sprt_hit_set_t ${packName}_HITS[1] = { {0, 0, NULL} };`);
+      lines.push(`#define ${packName}_HITS_COUNT 0u`);
+    } else {
+      // Emit per-sprite hit arrays, then a set table.
+      const sets = [];
+      hits.forEach((hs, i) => {
+        if (!hs || hs.length === 0) return;
+        const lab = cIdent(labels[i] || `sprite_${i}`);
+        const arrName = `${packName}_HITS_${lab}`;
+        lines.push(`static const sprt_hit_t ${arrName}[${hs.length}] = {`);
+        hs.forEach((h) => {
+          const x = Math.round(h.x * outSize);
+          const y = Math.round(h.y * outSize);
+          const w = Math.max(1, Math.round(h.w * outSize));
+          const ht = Math.max(1, Math.round(h.h * outSize));
+          // Sanitize the name for C string content (no quotes/newlines)
+          const safeName = (h.name || `hit_${i}`).replace(/[\\"\n\r]/g, '_');
+          lines.push(`  { ${x.toString().padStart(3)}, ${y.toString().padStart(3)}, ${w.toString().padStart(3)}, ${ht.toString().padStart(3)}, "${safeName}" },`);
+        });
+        lines.push(`};`);
+        sets.push({ idx: i, count: hs.length, arrName });
+      });
+      lines.push('');
+      lines.push(`static const sprt_hit_set_t ${packName}_HITS[${sets.length}] = {`);
+      sets.forEach((s) => {
+        lines.push(`  { ${s.idx}, ${s.count}, ${s.arrName} },`);
+      });
+      lines.push(`};`);
+      lines.push(`#define ${packName}_HITS_COUNT ${sets.length}u`);
+    }
+    lines.push('');
+    return lines.join('\n');
+  }, [sprites.length, labels, hits, filename, outSize, format]);
+
+  const handleDownloadMeta = useCallback(() => {
+    if (!metaHeader) return;
+    const blob = new Blob([metaHeader], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${filename || 'sprites'}_meta.h`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [metaHeader, filename]);
+
+  // (overlay geometry now derived directly in JSX from state — no useMemo needed)
+
+  return (
+    <div className="min-h-screen bg-zinc-950 text-zinc-100 scanline">
+      <style>{FONTS}</style>
+
+      {editingIdx !== null && sprites[editingIdx] && (
+        <HitAreaEditor
+          sprite={sprites[editingIdx]}
+          hits={hits[editingIdx] || []}
+          label={labels[editingIdx] || `sprite_${editingIdx}`}
+          format={format}
+          threshold={threshold}
+          invert={invert}
+          effect={effect}
+          onChange={(newHits) => setSpriteHits(editingIdx, newHits)}
+          onClose={() => setEditingIdx(null)}
+        />
+      )}
+
+      <header className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
+        <div className="mx-auto max-w-3xl px-3 sm:px-4 py-3 flex items-baseline justify-between">
+          <div className="flex items-baseline gap-2 sm:gap-3">
+            <h1 className="pixel text-base sm:text-lg text-teal-300">SPRITE·FORGE</h1>
+            <span className="text-[10px] text-zinc-600 hidden sm:inline">// pack sheets → bin for esp32 / arduino</span>
+          </div>
+          <div className="flex items-baseline gap-3">
+            <a href="../" className="text-[10px] text-zinc-500 hover:text-teal-300">← mochi-esp</a>
+            <span className="text-[10px] text-zinc-600">v1.0</span>
+          </div>
+        </div>
+      </header>
+
+      <main className="mx-auto max-w-3xl p-3 sm:p-4 pb-32 space-y-3">
+
+        {/* 01 source */}
+        <Card num="01" title="SOURCE">
+          {/* Always-mounted, visually hidden input (avoids display:none mobile quirks) */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*,.png,.jpg,.jpeg,.gif,.webp,.bmp,.avif"
+            onChange={(e) => handleFile(e.target.files?.[0])}
+            style={{
+              position: 'absolute',
+              width: 1, height: 1,
+              opacity: 0, pointerEvents: 'none',
+              left: 0, top: 0,
+            }}
+            aria-hidden="true"
+            tabIndex={-1}
+          />
+
+          {error && (
+            <div className="border border-rose-500/40 bg-rose-500/10 px-2 py-1.5 text-[11px] text-rose-300 whitespace-pre-wrap font-mono leading-relaxed">
+              ⚠ {error}
+            </div>
+          )}
+
+          {!imgEl ? (
+            <button
+              type="button"
+              onClick={pickFile}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => { e.preventDefault(); handleFile(e.dataTransfer.files?.[0]); }}
+              className="w-full block border border-dashed border-zinc-700 hover:border-teal-300/50 transition-colors p-8 text-center bg-transparent"
+            >
+              <Upload size={28} className="mx-auto mb-2 text-zinc-500" strokeWidth={1.5} />
+              <div className="text-sm text-zinc-300">drop or tap to upload</div>
+              <div className="text-[10px] text-zinc-500 mt-1">png · jpg · webp · gif</div>
+            </button>
+          ) : (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-zinc-400 truncate flex items-center gap-1.5">
+                  <FileImage size={12} />{filename || 'image'}
+                </span>
+                <span className="text-zinc-500 tabular-nums shrink-0 ml-2">
+                  {imgEl.naturalWidth}×{imgEl.naturalHeight}
+                </span>
+              </div>
+              <div className="relative inline-block max-w-full checker">
+                <img src={imageURL} alt="" className="block max-w-full h-auto" />
+                {overlayOn && imgEl && layout.fits && (
+                  <svg
+                    className="absolute inset-0 w-full h-full pointer-events-none"
+                    viewBox={`0 0 ${imgEl.naturalWidth} ${imgEl.naturalHeight}`}
+                    preserveAspectRatio="none"
+                  >
+                    {/* outer margins (cropped out) */}
+                    {marginTop > 0 && <rect x="0" y="0" width={imgEl.naturalWidth} height={marginTop} fill="rgba(244,63,94,0.15)" />}
+                    {marginBottom > 0 && <rect x="0" y={imgEl.naturalHeight - marginBottom} width={imgEl.naturalWidth} height={marginBottom} fill="rgba(244,63,94,0.15)" />}
+                    {marginLeft > 0 && <rect x="0" y="0" width={marginLeft} height={imgEl.naturalHeight} fill="rgba(244,63,94,0.15)" />}
+                    {marginRight > 0 && <rect x={imgEl.naturalWidth - marginRight} y="0" width={marginRight} height={imgEl.naturalHeight} fill="rgba(244,63,94,0.15)" />}
+
+                    {/* sprite cells (teal) + gutters (amber between) */}
+                    {Array.from({ length: layout.rows }, (_, r) =>
+                      Array.from({ length: layout.cols }, (_, c) => {
+                        const x = marginLeft + c * (layout.spriteW + hGutter);
+                        const y = marginTop + r * (layout.spriteH + vGutter);
+                        const stroke = Math.max(1, imgEl.naturalWidth / 600);
+                        const dash = imgEl.naturalWidth / 200;
+                        return (
+                          <g key={`${r}-${c}`}>
+                            <rect
+                              x={x} y={y}
+                              width={layout.spriteW} height={layout.spriteH}
+                              fill="none" stroke="#5eead4" strokeWidth={stroke}
+                              strokeDasharray={`${dash} ${dash / 2}`}
+                            />
+                            {/* horizontal gutter after this column (except last) */}
+                            {hGutter > 0 && c < layout.cols - 1 && (
+                              <rect
+                                x={x + layout.spriteW} y={y}
+                                width={hGutter} height={layout.spriteH}
+                                fill="rgba(251,191,36,0.15)"
+                              />
+                            )}
+                            {/* vertical gutter after this row (except last) */}
+                            {vGutter > 0 && r < layout.rows - 1 && (
+                              <rect
+                                x={x} y={y + layout.spriteH}
+                                width={layout.spriteW} height={vGutter}
+                                fill="rgba(251,191,36,0.15)"
+                              />
+                            )}
+                          </g>
+                        );
+                      })
+                    )}
+                  </svg>
+                )}
+              </div>
+              <div className="flex items-center gap-2 text-[11px]">
+                <button onClick={pickFile} className="text-zinc-400 hover:text-teal-300 underline underline-offset-2">
+                  replace
+                </button>
+                <span className="text-zinc-700">·</span>
+                <button onClick={() => setOverlayOn(v => !v)} className="text-zinc-400 hover:text-teal-300 underline underline-offset-2">
+                  {overlayOn ? 'hide overlay' : 'show overlay'}
+                </button>
+              </div>
+              <div className="text-[10px] text-zinc-500 leading-relaxed pt-1 border-t border-zinc-800/60">
+                <span className="text-teal-300/80">teal ░</span> sprite cell
+                <span className="text-zinc-700"> · </span>
+                <span className="text-amber-400/80">amber ▒</span> gutter
+                <span className="text-zinc-700"> · </span>
+                <span className="text-rose-400/80">rose ▒</span> margin
+              </div>
+            </div>
+          )}
+        </Card>
+
+        {/* 02 sprite size */}
+        <Card num="02" title="GRID">
+          <div className="grid grid-cols-2 gap-3">
+            <Row label="cols" hint="sprites across">
+              <Stepper value={cols} onChange={setCols} min={1} max={64} />
+            </Row>
+            <Row label="rows" hint="sprites down">
+              <Stepper value={rows} onChange={setRows} min={1} max={64} />
+            </Row>
+          </div>
+          <div className="text-[10px] text-zinc-500 tabular-nums leading-relaxed">
+            {imgEl ? (
+              layout.fits ? (
+                <>
+                  <span className="text-teal-300">{layout.count}</span> sprites
+                  <span className="text-zinc-700"> · </span>
+                  cell size: <span className="text-teal-300">{layout.spriteW.toFixed(1)}×{layout.spriteH.toFixed(1)}</span> px in source
+                  {(Math.abs(layout.spriteW - Math.round(layout.spriteW)) > 0.01 ||
+                    Math.abs(layout.spriteH - Math.round(layout.spriteH)) > 0.01) && (
+                    <span className="text-amber-400/80"> ⚠ non-integer — tweak margins/gutters</span>
+                  )}
+                </>
+              ) : (
+                <span className="text-rose-400">geometry yields zero sprites — check margins/gutters vs image</span>
+              )
+            ) : (
+              'upload image to compute'
+            )}
+          </div>
+        </Card>
+
+        {/* 03 layout: margins + gutters */}
+        <Card
+          num="03"
+          title="LAYOUT"
+          right={
+            <button onClick={() => setShowLayout(v => !v)} className="text-zinc-500 hover:text-teal-300">
+              {showLayout ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            </button>
+          }
+        >
+          {showLayout && (
+            <>
+              <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1">margins</div>
+              <div className="grid grid-cols-2 gap-3">
+                <Row label="top">
+                  <Stepper value={marginTop} onChange={setMarginTop} min={0} max={4096} />
+                </Row>
+                <Row label="right">
+                  <Stepper value={marginRight} onChange={setMarginRight} min={0} max={4096} />
+                </Row>
+                <Row label="bottom">
+                  <Stepper value={marginBottom} onChange={setMarginBottom} min={0} max={4096} />
+                </Row>
+                <Row label="left">
+                  <Stepper value={marginLeft} onChange={setMarginLeft} min={0} max={4096} />
+                </Row>
+              </div>
+              <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1 mt-3 pt-3 border-t border-zinc-800/60">gutters</div>
+              <div className="grid grid-cols-2 gap-3">
+                <Row label="h-gutter" hint="between cols">
+                  <Stepper value={hGutter} onChange={setHGutter} min={0} max={1024} />
+                </Row>
+                <Row label="v-gutter" hint="between rows">
+                  <Stepper value={vGutter} onChange={setVGutter} min={0} max={1024} />
+                </Row>
+              </div>
+              <button
+                onClick={() => {
+                  setMarginTop(0); setMarginRight(0); setMarginBottom(0); setMarginLeft(0);
+                  setHGutter(0); setVGutter(0);
+                }}
+                className="text-[10px] text-zinc-500 hover:text-teal-300 flex items-center gap-1 mt-2"
+              >
+                <RotateCcw size={10} /> reset all
+              </button>
+            </>
+          )}
+        </Card>
+
+        {/* 04 output */}
+        <Card num="04" title="OUTPUT">
+          <Row label="format" hint="display target">
+            <Chips
+              value={format}
+              onChange={setFormat}
+              options={[
+                { value: '1bpp', label: '1bpp mono' },
+                { value: 'gray8', label: '8-bit gray' },
+                { value: 'rgb565', label: 'rgb565' },
+              ]}
+            />
+          </Row>
+          <Row label="sprite size" hint="square output">
+            <Chips
+              value={outSize}
+              onChange={setOutSize}
+              options={[16, 24, 32, 48, 64, 96, 128, 200].map(n => ({ value: n, label: `${n}px` }))}
+            />
+          </Row>
+          {(format === '1bpp' || effectKind !== 'none') && (
+            <Row label="threshold" hint={effectKind === 'none' ? 'darker than → 1' : 'effect midpoint'}>
+              <Slider value={threshold} onChange={setThreshold} min={0} max={255} />
+            </Row>
+          )}
+          <Row label="label max len" hint="bytes per label (fixed)">
+            <Stepper value={labelMaxLen} onChange={setLabelMaxLen} min={4} max={64} suffix="bytes" />
+          </Row>
+          <div className="grid grid-cols-2 gap-3 pt-1 border-t border-zinc-800/60">
+            <Toggle value={invert} onChange={setInvert} label="invert colors" />
+            <Toggle value={smoothing} onChange={setSmoothing} label="smooth resample" />
+          </div>
+          <div className="text-[10px] text-zinc-500 leading-relaxed pt-2 border-t border-zinc-800/60 tabular-nums">
+            <div>pixel data: <span className="text-teal-300/80">{pixelBytes}</span> B/sprite ({outSize}×{outSize} {format}{effectKind !== 'none' ? ' · binary' : ''})</div>
+            <div>entry:      <span className="text-teal-300/80">{perEntry}</span> B  ({pixelBytes} pixels + {labelMaxLen} label)</div>
+            <div>total:      <span className="text-teal-300">{totalBytes.toLocaleString()}</span> B  (16 header + {layout.count} × {perEntry})</div>
+          </div>
+        </Card>
+
+        {/* 04b effect */}
+        <Card num="04b" title="EFFECT">
+          <Row label="mode" hint="binarize via halftone">
+            <Chips
+              value={effectKind}
+              onChange={setEffectKind}
+              options={[
+                { value: 'none',     label: 'none' },
+                { value: 'fs',       label: 'floyd-steinberg' },
+                { value: 'atkinson', label: 'atkinson' },
+                { value: 'bayer4',   label: 'bayer 4×4' },
+                { value: 'bayer8',   label: 'bayer 8×8' },
+                { value: 'screen',   label: 'line screen' },
+              ]}
+            />
+          </Row>
+
+          {(effectKind === 'fs' || effectKind === 'atkinson') && (
+            <div className="pt-1 border-t border-zinc-800/60">
+              <Toggle value={serpentine} onChange={setSerpentine} label="serpentine scan" />
+              <div className="text-[10px] text-zinc-500 mt-1 leading-relaxed">
+                Alternates scan direction by row to reduce directional artifacts.
+              </div>
+            </div>
+          )}
+
+          {(effectKind === 'bayer4' || effectKind === 'bayer8') && (
+            <Row label="strength" hint="matrix vs threshold mix">
+              <Slider value={bayerStrength} onChange={setBayerStrength} min={0} max={100} suffix="%" />
+            </Row>
+          )}
+
+          {effectKind === 'screen' && (
+            <>
+              <Row label="angle" hint="line direction">
+                <Slider value={screenAngle} onChange={setScreenAngle} min={0} max={180} suffix="°" />
+              </Row>
+              <Row label="spacing" hint="px between lines (in source)">
+                <Stepper value={screenSpacing} onChange={setScreenSpacing} min={2} max={64} suffix="px" />
+              </Row>
+              <Row label="contrast" hint="screen vs flat threshold">
+                <Slider value={screenContrast} onChange={setScreenContrast} min={0} max={100} suffix="%" />
+              </Row>
+            </>
+          )}
+
+          {effectKind !== 'none' && (
+            <div className="text-[10px] text-zinc-500 leading-relaxed pt-2 border-t border-zinc-800/60">
+              Effect produces a black-and-white image. With <span className="text-teal-300/80">{format}</span> output, ink pixels encode as
+              {format === '1bpp' && <> bits (1 = ink).</>}
+              {format === 'gray8' && <> 0x00; paper as 0xFF.</>}
+              {format === 'rgb565' && <> 0x0000; paper as 0xFFFF.</>}
+            </div>
+          )}
+        </Card>
+
+        {/* 05 preview + labels */}
+        {imgEl && (
+          <Card num="05" title="SPRITES" right={<span className="text-[10px] text-zinc-600">{sprites.length} entries</span>}>
+            <div className="text-[10px] text-zinc-500 mb-2">
+              tap a sprite to edit its hit areas
+            </div>
+            <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+              {previewURLs.map((url, i) => {
+                const hitCount = hits[i]?.length || 0;
+                return (
+                  <div key={i} className="space-y-1">
+                    <button
+                      onClick={() => setEditingIdx(i)}
+                      className="relative aspect-square w-full border border-zinc-800 hover:border-teal-300/60 checker overflow-hidden p-0 block"
+                    >
+                      <img
+                        src={url}
+                        alt=""
+                        className="w-full h-full object-contain pointer-events-none"
+                        style={{ imageRendering: 'pixelated' }}
+                      />
+                      {/* hit area overlays */}
+                      {hits[i]?.map((h, j) => (
+                        <div
+                          key={j}
+                          className="absolute pointer-events-none"
+                          style={{
+                            left: `${h.x * 100}%`,
+                            top: `${h.y * 100}%`,
+                            width: `${h.w * 100}%`,
+                            height: `${h.h * 100}%`,
+                            background: 'rgba(244,63,94,0.2)',
+                            outline: '1px solid rgba(244,63,94,0.9)',
+                          }}
+                        />
+                      ))}
+                      {hitCount > 0 && (
+                        <span className="absolute top-0.5 right-0.5 bg-rose-500/90 text-white text-[9px] px-1 tabular-nums">
+                          {hitCount}
+                        </span>
+                      )}
+                    </button>
+                    <input
+                      type="text"
+                      value={labels[i] ?? ''}
+                      maxLength={labelMaxLen}
+                      onChange={(e) => {
+                        const next = [...labels];
+                        next[i] = e.target.value;
+                        setLabels(next);
+                      }}
+                      className="w-full bg-zinc-900 border border-zinc-800 focus:border-teal-300/60 outline-none px-1.5 py-0.5 text-[11px] text-zinc-200"
+                    />
+                    <div className="text-[9px] text-zinc-600 tabular-nums">
+                      [{String(i).padStart(2, '0')}] {(labels[i] ?? '').length}/{labelMaxLen}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </Card>
+        )}
+
+        {/* 05b sheet PNG preview + downloads */}
+        {imgEl && sheetPNG && (
+          <Card num="05b" title="SHEET" right={<span className="text-[10px] text-zinc-600">processed · {sprites.length} cells</span>}>
+            <Row label="cols" hint={sheetCols === null ? `following source (${cols})` : 'override'}>
+              <div className="flex flex-wrap gap-1.5 items-center">
+                <button
+                  onClick={() => setSheetCols(null)}
+                  className={`px-2.5 py-1 text-xs border transition-colors ${
+                    sheetCols === null
+                      ? 'border-teal-300 bg-teal-300/15 text-teal-300'
+                      : 'border-zinc-700 text-zinc-400 hover:border-zinc-600'
+                  }`}
+                >
+                  match source ({cols})
+                </button>
+                {[4, 6, 8, 10, 12, 16].map(n => (
+                  <button
+                    key={n}
+                    onClick={() => setSheetCols(n)}
+                    className={`px-2.5 py-1 text-xs border transition-colors ${
+                      sheetCols === n
+                        ? 'border-teal-300 bg-teal-300/15 text-teal-300'
+                        : 'border-zinc-700 text-zinc-400 hover:border-zinc-600'
+                    }`}
+                  >
+                    {n}
+                  </button>
+                ))}
+              </div>
+            </Row>
+            <Toggle value={showIndices} onChange={setShowIndices} label="show cell indices" />
+            <div className="border border-zinc-800 bg-zinc-900 p-2 overflow-x-auto">
+              <img
+                src={sheetPNG}
+                alt="processed sheet preview"
+                className="block mx-auto max-w-full"
+                style={{ imageRendering: 'pixelated' }}
+              />
+            </div>
+            <div className="flex gap-2 pt-1">
+              <button
+                onClick={handleDownloadSheet}
+                className="flex-1 border border-teal-300/40 text-teal-300 text-[11px] py-2 hover:bg-teal-300/10 active:bg-teal-300/20 flex items-center justify-center gap-1.5"
+              >
+                <Download size={12} /> sheet.png
+              </button>
+              <button
+                onClick={handleDownloadMeta}
+                disabled={!metaHeader}
+                className="flex-1 border border-teal-300/40 text-teal-300 text-[11px] py-2 hover:bg-teal-300/10 active:bg-teal-300/20 disabled:opacity-40 flex items-center justify-center gap-1.5"
+              >
+                <Download size={12} /> meta.h
+              </button>
+            </div>
+            <div className="text-[10px] text-zinc-500 leading-relaxed pt-1">
+              preview shows faint borders so all-white cells remain visible. PNG export is clean (no borders/overlays).
+            </div>
+          </Card>
+        )}
+
+        {/* 06 esp32 binding */}
+        <Card
+          num="06"
+          title="ESP32 BINDING"
+          right={
+            <button onClick={() => setShowC(v => !v)} className="text-zinc-500 hover:text-teal-300">
+              {showC ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            </button>
+          }
+        >
+          {!showC ? (
+            <p className="text-[11px] text-zinc-500 leading-relaxed">
+              Drop-in C header for reading the pack from PROGMEM / SPIFFS / PSRAM. Tap to expand.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              <div className="flex justify-end">
+                <button
+                  onClick={copyParser}
+                  className="text-[11px] text-zinc-400 hover:text-teal-300 flex items-center gap-1.5"
+                >
+                  {copied ? <><Check size={12} /> copied</> : <><Copy size={12} /> copy header</>}
+                </button>
+              </div>
+              <pre className="text-[10px] text-zinc-300 bg-zinc-950 border border-zinc-800 p-3 overflow-x-auto leading-relaxed">
+{C_PARSER}
+              </pre>
+              <div className="text-[10px] text-zinc-500 leading-relaxed">
+                Embed the .bin with <span className="text-teal-300/80">xxd -i sprites.bin {'>'} sprites.h</span> for PROGMEM,
+                or read from SPIFFS / LittleFS / SD on boot.
+              </div>
+            </div>
+          )}
+        </Card>
+
+      </main>
+
+      {/* sticky bottom action bar */}
+      <div className="fixed bottom-0 inset-x-0 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur z-30">
+        <div className="mx-auto max-w-3xl px-3 sm:px-4 py-3 flex items-center gap-3">
+          <div className="flex-1 text-[11px] min-w-0">
+            <div className="text-zinc-600 uppercase tracking-wider text-[9px]">output ▸</div>
+            <div className="text-teal-300 font-bold tabular-nums truncate">
+              {totalBytes.toLocaleString()} B
+              <span className="text-zinc-500 font-normal"> · {sprites.length || 0} sprites · {format}</span>
+            </div>
+          </div>
+          <button
+            onClick={handleDownload}
+            disabled={!imgEl}
+            className="bg-teal-300 text-zinc-950 px-4 sm:px-5 py-2.5 font-bold text-sm disabled:bg-zinc-800 disabled:text-zinc-600 active:bg-teal-400 flex items-center gap-2 shrink-0"
+          >
+            <Download size={15} strokeWidth={2.5} />
+            PACK.BIN
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

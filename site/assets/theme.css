@@ -1,0 +1,28 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Silkscreen:wght@400;700&display=swap');
+
+* { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+.pixel { font-family: 'Silkscreen', monospace; letter-spacing: 0.05em; }
+
+html, body { background-color: #09090b; color: #f4f4f5; }
+a { color: inherit; text-decoration: none; }
+
+.scanline {
+  background-image: repeating-linear-gradient(
+    0deg,
+    rgba(94, 234, 212, 0.03) 0px,
+    rgba(94, 234, 212, 0.03) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+
+.checker {
+  background-image:
+    linear-gradient(45deg, #18181b 25%, transparent 25%),
+    linear-gradient(-45deg, #18181b 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #18181b 75%),
+    linear-gradient(-45deg, transparent 75%, #18181b 75%);
+  background-size: 8px 8px;
+  background-position: 0 0, 0 4px, 4px -4px, -4px 0px;
+  background-color: #27272a;
+}

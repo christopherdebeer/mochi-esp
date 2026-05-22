@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>tools — mochi-esp</title>
+  <meta name="description" content="Browser tools for the mochi-esp asset pipeline." />
+  <link rel="stylesheet" href="../assets/theme.css" />
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-zinc-950 text-zinc-100 scanline">
+
+  <header class="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
+    <div class="mx-auto max-w-3xl px-3 sm:px-4 py-3 flex items-baseline justify-between">
+      <div class="flex items-baseline gap-2 sm:gap-3">
+        <a href="../" class="pixel text-base sm:text-lg text-teal-300 hover:opacity-80">MOCHI·ESP</a>
+        <span class="text-[10px] text-zinc-600">/ tools</span>
+      </div>
+      <a href="../" class="text-[10px] text-zinc-500 hover:text-teal-300">← home</a>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-3xl p-3 sm:p-4 pb-20 space-y-4">
+
+    <p class="text-[11px] text-zinc-500 leading-relaxed pt-1">
+      Client-side utilities for preparing device assets. Everything runs in your browser —
+      no upload, no server, no install.
+    </p>
+
+    <a href="sprite-forge.html" class="group block border border-zinc-800 bg-zinc-900/40 p-4 hover:border-teal-300/50 transition-colors">
+      <div class="flex items-center justify-between">
+        <h2 class="pixel text-[13px] text-teal-300">SPRITE·FORGE</h2>
+        <span class="text-zinc-600 group-hover:text-teal-300 transition-colors">→</span>
+      </div>
+      <p class="text-[11px] text-zinc-400 leading-relaxed mt-2">
+        Slice a sprite sheet into a grid, resample each cell, and pack to a single
+        <code class="text-teal-300/80">.bin</code> (1bpp / gray8 / rgb565) with a drop-in
+        C reader and authored per-sprite tap rectangles. Halftone / dither effects
+        (Floyd–Steinberg, Atkinson, Bayer, line-screen) for 1-bit panels.
+      </p>
+      <div class="text-[10px] text-zinc-500 leading-relaxed mt-3 pt-3 border-t border-zinc-800/60">
+        <span class="text-amber-400/80">note</span> — SPRITE·FORGE emits a generic
+        <code>SPRT</code> pack (single-plane, <code>bit 1 = ink</code>). mochi-esp's own
+        device wire format differs: <code>bit 0 = ink</code>, and cells carry a second
+        <em>mask</em> plane for transparency. See
+        <a href="https://github.com/christopherdebeer/mochi-esp/blob/main/design/05-sprite-format.md" class="text-teal-300/80 hover:underline underline-offset-2">design/05-sprite-format.md</a>.
+        Use this tool for general ESP32 / Arduino projects, or as a starting point for
+        device assets you convert to the two-plane format.
+      </div>
+    </a>
+
+    <div class="border border-dashed border-zinc-800 p-4 text-center">
+      <p class="text-[11px] text-zinc-600">more tools as the pipeline grows</p>
+    </div>
+
+  </main>
+
+  <footer class="border-t border-zinc-800">
+    <div class="mx-auto max-w-3xl px-3 sm:px-4 py-4 text-[10px] text-zinc-600 flex items-center justify-between">
+      <a href="../" class="pixel text-zinc-700 hover:text-zinc-500">MOCHI·ESP</a>
+      <span>static site · github pages</span>
+    </div>
+  </footer>
+
+</body>
+</html>
