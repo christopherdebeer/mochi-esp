@@ -69,6 +69,9 @@ extern "C" {
 #include "thought.h"
 #include "event_log.h"
 #include "time_sync.h"
+#include "scene_pack.h"
+#include "pet_pack.h"
+#include "imagine.h"
 }
 #include "pet_sync.h"
 
@@ -94,9 +97,16 @@ extern "C" {
  * STATUS_BAR_H rows are reserved at the top, leaving the rest for
  * the scene. The fetch URL uses the server's `?fit=area` form. */
 #define MOCHI_SCENE_URL  "https://mochi.val.run/devsprite/scene-v1/day?fit=fill&w=200&h=172"
+/* Scene buffer covers the FULL panel now, not just the area below
+ * the status bar. The MPK1 cells SPRITE·FORGE authors are 200×200
+ * — same as the panel — and authored zones often extend into what
+ * the old 200×172 layout was clipping (e.g. food/ball zones in
+ * scenes_a sit at y=139..184). Rendering the full cell preserves
+ * authored content; the status bar paint at panel rows 0..18 then
+ * overwrites the top of the scene with white + glyphs. */
 static constexpr size_t SCENE_W = 200;
-static constexpr size_t SCENE_H = 172;
-static constexpr size_t SCENE_BYTES = (SCENE_W / 8) * SCENE_H;  /* 4300 */
+static constexpr size_t SCENE_H = 200;
+static constexpr size_t SCENE_BYTES = (SCENE_W / 8) * SCENE_H;  /* 5000 */
 #define MOCHI_PET_CELL_URL_BASE "https://mochi.val.run/devsprite/cell/pet-v1/"
 
 /* OTA — manifest is uploaded as a release asset by the GitHub
@@ -801,23 +811,39 @@ extern "C" void app_main(void) {
      * paper-white background so the pet is still visible.
      */
     {
-        size_t got = 0;
-        if (cache_ok && sprite_cache::load("scene-v1", "fill_200x172",
-                scene_fb, SCENE_BYTES, &got) && got == SCENE_BYTES) {
-            ESP_LOGI(TAG, "scene loaded from cache");
+        /* MPK1 — bundled at build time via EMBED_FILES, see
+         * design/13-build-time-asset-packs.md. Replaces the previous
+         * /devsprite/scene-v1 HTTPS fetch entirely: zero-network,
+         * zero-latency, fixed working set, and the scene comes with
+         * named tap zones authored by SPRITE·FORGE rather than
+         * coarse corner quadrants. The runtime fetch path is kept
+         * compiled (sprite_fetch / sprite_cache::load both still
+         * exist) only for the unused MOCHI_SCENE_URL define and as
+         * a future fallback for non-bundled scenes. */
+        if (scene_pack_init() &&
+            scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H)) {
+            ESP_LOGI(TAG, "scene from pack idx=%u",
+                (unsigned)scene_pack_current());
         } else {
-            uint32_t ms = 0;
-            if (sprite_fetch(MOCHI_SCENE_URL, scene_fb, SCENE_BYTES, &ms)) {
-                ESP_LOGI(TAG, "scene fetched in %lu ms", (unsigned long)ms);
-                if (cache_ok) {
-                    sprite_cache::store("scene-v1", "fill_200x172",
-                        scene_fb, SCENE_BYTES);
-                }
-            } else {
-                ESP_LOGW(TAG, "scene fetch failed; using blank backdrop");
-                compositor::clear_to_paper(scene_fb, SCENE_W, SCENE_H);
-            }
+            ESP_LOGW(TAG, "scene_pack unavailable; blank backdrop");
+            compositor::clear_to_paper(scene_fb, SCENE_W, SCENE_H);
         }
+    }
+
+    /* Bring up the bundled pet pack so render_with_expression can
+     * serve cells from flash without touching the network. Network
+     * stays as the fallback for expressions absent from the pack
+     * (and for the pack-unavailable case). */
+    if (!pet_pack_init()) {
+        ESP_LOGW(TAG, "pet_pack unavailable; falling back to network "
+                      "+ littlefs cache for every render");
+    }
+
+    /* On-device scene generation pipeline. Idle until a voice tool
+     * call (`imagine_place`) lands; see design/15-on-device-imagine.md. */
+    if (!imagine_init()) {
+        ESP_LOGW(TAG, "imagine pipeline unavailable; voice "
+                      "imagine_place tool will refuse");
     }
 
     /*
@@ -1028,16 +1054,23 @@ extern "C" void app_main(void) {
             memset(composite + row_off, 0x00, 25);
         }
 
-        /* Stamp the 4 care icons. All 4 sit below the status bar
-         * inside the scene area; the two-plane blit means
-         * transparent pixels in the icon don't trash the
-         * underlying scene. */
-        for (int i = 0; i < 4; i++) {
-            compositor::blit_two_plane(composite,
-                MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
-                icon_ink[i], icon_mask[i],
-                ICON_W, ICON_H,
-                icon_pos_x[i], icon_pos_y[i]);
+        /* Stamp the 4 care icons — but ONLY when the current scene
+         * doesn't have authored zones. A scenes_a cell with food /
+         * heart / ball / door drawn into the world doesn't need
+         * the corner-icon overlay too; it's redundant chrome on
+         * top of diegetic affordances. Unzoned scenes (most of
+         * scenes_a today) keep the corner-icon UX.
+         *
+         * Two-plane blit means transparent pixels in the icon don't
+         * trash the underlying scene. */
+        if (!scene_pack_current_has_zones()) {
+            for (int i = 0; i < 4; i++) {
+                compositor::blit_two_plane(composite,
+                    MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
+                    icon_ink[i], icon_mask[i],
+                    ICON_W, ICON_H,
+                    icon_pos_x[i], icon_pos_y[i]);
+            }
         }
     };
 
@@ -1045,27 +1078,51 @@ extern "C" void app_main(void) {
                                       bool full_refresh,
                                       const pet_thought_t *thought) -> bool {
         /*
-         * Cache-first pet cell load. Two suffixes per expression
-         * (ink + mask). If both hit, no network. If either misses
-         * (or is the wrong size), refetch from the server and
-         * persist both planes back to the cache.
+         * Pet cell load priority:
+         *   1. Bundled MPK1 pack (flash, zero-network).
+         *   2. littlefs cache from a previous fetch.
+         *   3. Server fetch over HTTPS.
+         *
+         * The bundle lets the device run the pet UI offline once
+         * paired — boot doesn't have to wait for WiFi to render.
+         * The cache + network paths stay as fallbacks for
+         * expressions the pack doesn't carry, and for the
+         * pet_pack-unavailable case.
          */
+        const char *cell_source = nullptr;
+        uint32_t ms = 0;
+        {
+            uint16_t pw = 0, ph = 0;
+            if (pet_pack_load(expr, pet_ink, pet_mask,
+                              PET_CELL_BYTES, &pw, &ph)) {
+                if (pw != PET_CELL_W || ph != PET_CELL_H) {
+                    ESP_LOGW(TAG, "pack cell '%s' dims %ux%u != %ux%u",
+                        expr, pw, ph,
+                        (unsigned)PET_CELL_W, (unsigned)PET_CELL_H);
+                } else {
+                    cell_source = "pack";
+                }
+            }
+        }
+
         char ink_suffix[40], mask_suffix[40];
         snprintf(ink_suffix,  sizeof(ink_suffix),  "%s_cell_ink",  expr);
         snprintf(mask_suffix, sizeof(mask_suffix), "%s_cell_mask", expr);
 
-        size_t got_ink = 0, got_mask = 0;
-        bool from_cache =
-            cache_ok &&
-            sprite_cache::load("pet-v1", ink_suffix,
-                pet_ink, PET_CELL_BYTES, &got_ink) &&
-            got_ink == PET_CELL_BYTES &&
-            sprite_cache::load("pet-v1", mask_suffix,
-                pet_mask, PET_CELL_BYTES, &got_mask) &&
-            got_mask == PET_CELL_BYTES;
+        if (!cell_source) {
+            size_t got_ink = 0, got_mask = 0;
+            bool from_cache =
+                cache_ok &&
+                sprite_cache::load("pet-v1", ink_suffix,
+                    pet_ink, PET_CELL_BYTES, &got_ink) &&
+                got_ink == PET_CELL_BYTES &&
+                sprite_cache::load("pet-v1", mask_suffix,
+                    pet_mask, PET_CELL_BYTES, &got_mask) &&
+                got_mask == PET_CELL_BYTES;
+            if (from_cache) cell_source = "cache";
+        }
 
-        uint32_t ms = 0;
-        if (!from_cache) {
+        if (!cell_source) {
             char url[160];
             snprintf(url, sizeof(url), "%s%s", MOCHI_PET_CELL_URL_BASE, expr);
             uint16_t w = 0, h = 0;
@@ -1083,15 +1140,15 @@ extern "C" void app_main(void) {
                 sprite_cache::store("pet-v1", ink_suffix,  pet_ink,  PET_CELL_BYTES);
                 sprite_cache::store("pet-v1", mask_suffix, pet_mask, PET_CELL_BYTES);
             }
+            cell_source = "fetch";
         }
 
-        /* Top STATUS_BAR_H rows are paper-white; render_chrome()
-         * paints status text + icons over the top of that. The
-         * scene fills 200×172 below the bar — same stride as
+        /* Scene fills the full 200×200 panel — same stride as
          * composite (25 bytes/row) so a single memcpy is the
-         * natural blit. */
-        memset(composite, 0xFF, 25 * STATUS_BAR_H);
-        memcpy(composite + 25 * SCENE_TOP_Y, scene_fb, SCENE_BYTES);
+         * natural blit. render_chrome() then white-fills the top
+         * STATUS_BAR_H rows and paints status text + icons over
+         * the top, hiding whatever the cell drew up there. */
+        memcpy(composite, scene_fb, SCENE_BYTES);
 
         compositor::blit_two_plane(composite,
             MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
@@ -1119,10 +1176,9 @@ extern "C" void app_main(void) {
             epd->EPD_Init_Partial();
             epd->EPD_DisplayPart();
         }
-        ESP_LOGI(TAG, "rendered '%s' (%s%s%lu ms, %s refresh)",
+        ESP_LOGI(TAG, "rendered '%s' (%s %lu ms, %s refresh)",
             expr,
-            from_cache ? "cache" : "fetch",
-            from_cache ? " " : " ",
+            cell_source ? cell_source : "?",
             (unsigned long)ms,
             full_refresh ? "full" : "partial");
         return true;
@@ -1182,17 +1238,24 @@ extern "C" void app_main(void) {
      * Full refresh because the screen will sit untouched for hours.
      */
     auto render_asleep = [&]() {
-        /* Try cache first for the 'sleeping' cell so falling asleep
-         * is responsive even on a flaky network. */
+        /* Pack first, then cache, then network — same priority as
+         * render_with_expression. Bundled 'sleeping' makes the
+         * PWR-long-press gesture work offline. */
+        uint16_t pw = 0, ph = 0;
+        bool got_pet = pet_pack_load("sleeping", pet_ink, pet_mask,
+                                     PET_CELL_BYTES, &pw, &ph) &&
+                       pw == PET_CELL_W && ph == PET_CELL_H;
         size_t got_ink = 0, got_mask = 0;
-        bool got_pet =
-            cache_ok &&
-            sprite_cache::load("pet-v1", "sleeping_cell_ink",
-                pet_ink,  PET_CELL_BYTES, &got_ink) &&
-            got_ink == PET_CELL_BYTES &&
-            sprite_cache::load("pet-v1", "sleeping_cell_mask",
-                pet_mask, PET_CELL_BYTES, &got_mask) &&
-            got_mask == PET_CELL_BYTES;
+        if (!got_pet) {
+            got_pet =
+                cache_ok &&
+                sprite_cache::load("pet-v1", "sleeping_cell_ink",
+                    pet_ink,  PET_CELL_BYTES, &got_ink) &&
+                got_ink == PET_CELL_BYTES &&
+                sprite_cache::load("pet-v1", "sleeping_cell_mask",
+                    pet_mask, PET_CELL_BYTES, &got_mask) &&
+                got_mask == PET_CELL_BYTES;
+        }
         if (!got_pet) {
             char url[160];
             snprintf(url, sizeof(url), "%s%s", MOCHI_PET_CELL_URL_BASE, "sleeping");
@@ -1211,9 +1274,12 @@ extern "C" void app_main(void) {
 
         /* Scene + (sleeping) pet base. If the pet fetch failed (no
          * network, etc) we still render the asleep status — pet
-         * just doesn't update from whatever was last shown. */
+         * just doesn't update from whatever was last shown. White-
+         * fill the top STATUS_BAR_H rows AFTER the cell blit so the
+         * asleep banner reads against paper, not whatever the cell
+         * drew up there. */
+        memcpy(composite, scene_fb, SCENE_BYTES);
         memset(composite, 0xFF, 25 * STATUS_BAR_H);
-        memcpy(composite + 25 * SCENE_TOP_Y, scene_fb, SCENE_BYTES);
         if (got_pet) {
             compositor::blit_two_plane(composite,
                 MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
@@ -1590,12 +1656,110 @@ extern "C" void app_main(void) {
          * etc. — see design/12-thought-bubble.md). */
         const pet_thought_t *tapped_thought =
             (z == Zone::Thought && s_thought_active) ? &s_active_thought : nullptr;
+
+        /* Scene-pack zone hit-test (MPK1 build-time scene contract,
+         * design/13). Runs BEFORE the corner-quadrant fallback so
+         * an authored zone wins over the coarse zone_to_*. Cell-local
+         * coordinates: panel x → scene x directly, panel y → scene
+         * y after subtracting the status bar. Skipped while a
+         * thought bubble is up (its tap target owns the screen).
+         *
+         * Naming taxonomy carried by SPRITE·FORGE today:
+         *   food                     → EVENT_FED
+         *   heart                    → EVENT_COMFORTED
+         *   ball                     → EVENT_PLAYED
+         *   ornament / light / star  → EVENT_CHEERED
+         *   door / stairs            → next scene (advance +1)
+         *   window / view / plant /
+         *   plants / shelf / box /
+         *   container                → EVENT_TAPPED + talk-seed cue
+         *
+         * The talk-seed wiring is M11.5-shaped — not done in this
+         * commit. For now unmapped zones still log + persist as
+         * EVENT_TAPPED so their existence is at least observable. */
+        const char *scene_zone_name = nullptr;
+        if (!tapped_thought) {
+            /* Cell is now blitted at panel row 0, so cell-local y
+             * matches panel y directly. Suppress hits in the status
+             * bar area so a tap on the time/battery glyphs doesn't
+             * accidentally fire a zone underneath. */
+            if ((int)ev.y >= STATUS_BAR_H) {
+                (void)scene_pack_zone_at(
+                    (int16_t)ev.x, (int16_t)ev.y, &scene_zone_name);
+            }
+        }
+
+        /* Forgiving snap: if the direct hit-test missed but the tap
+         * is within ZONE_SLOP_PX of an authored zone, treat it as a
+         * hit on that zone. Touch panels are noisy near the bezel
+         * (right-edge taps land at x=199 even when aimed inside),
+         * and authored zone rects don't always cover what reads as
+         * tappable. The pet-body case is checked first below so a
+         * deliberate pet pat near a zone doesn't get snapped away. */
+        constexpr int ZONE_SLOP_PX = 16;
+        const bool tapped_pet =
+            (int)ev.x >= PET_DX && (int)ev.x <  PET_DX + (int)PET_CELL_W &&
+            (int)ev.y >= PET_DY && (int)ev.y <  PET_DY + (int)PET_CELL_H;
+        if (!scene_zone_name && !tapped_thought && !tapped_pet &&
+            (int)ev.y >= STATUS_BAR_H) {
+            (void)scene_pack_zone_near(
+                (int16_t)ev.x, (int16_t)ev.y, ZONE_SLOP_PX,
+                &scene_zone_name);
+            if (scene_zone_name) {
+                ESP_LOGI(TAG, "zone snap to '%s' from (%u,%u)",
+                    scene_zone_name, (unsigned)ev.x, (unsigned)ev.y);
+            }
+        }
+
         const char *expr = tapped_thought
             ? thought_action_to_expr(tapped_thought)
             : zone_to_expr(z);
-        ESP_LOGI(TAG, "touch (%u,%u) zone=%u expr=%s",
+        ESP_LOGI(TAG, "touch (%u,%u) zone=%u scene_zone=%s expr=%s",
             (unsigned)ev.x, (unsigned)ev.y, (unsigned)z,
+            scene_zone_name ? scene_zone_name : "(none)",
             expr ? expr : "(gutter)");
+
+        /* When the current scene has authored zones, the corner-
+         * quadrant fallback is suppressed: a tap that misses every
+         * zone (after the snap fallback above) resolves to either
+         * "comforted" (tap landed on the pet body — a pat) or
+         * "curious" (empty scene background). tapped_pet was
+         * computed earlier so the snap path could skip pet taps. */
+        const bool zoned = scene_pack_current_has_zones();
+        if (zoned && !scene_zone_name && !tapped_thought) {
+            expr = tapped_pet ? "comforted" : "curious";
+        }
+
+        /* If the tap fell inside a named scene zone, route by name
+         * instead of by corner quadrant. Scene navigation
+         * (door/stairs) advances the index, re-blits the scene,
+         * full-refreshes, and skips the rest of the per-tap care
+         * pipeline. */
+        if (scene_zone_name) {
+            if (strcmp(scene_zone_name, "door") == 0 ||
+                strcmp(scene_zone_name, "stairs") == 0) {
+                uint16_t to = scene_pack_advance(+1);
+                ESP_LOGI(TAG, "scene navigate '%s' → idx=%u",
+                    scene_zone_name, (unsigned)to);
+                /* Rebuild scene_fb from the pack and force a full
+                 * render via render_with_expression's neutral pose
+                 * — partial refresh would leave residue from the
+                 * previous scene. */
+                scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H);
+                render_with_expression("neutral", true, nullptr);
+                continue;
+            }
+            /* Care zones — map name → expr/kind so the rest of the
+             * dispatch pipeline behaves as if the user had tapped
+             * the corresponding corner. */
+            if      (strcmp(scene_zone_name, "food") == 0)      expr = "eating";
+            else if (strcmp(scene_zone_name, "heart") == 0)     expr = "comforted";
+            else if (strcmp(scene_zone_name, "ball") == 0)      expr = "excited";
+            else if (strcmp(scene_zone_name, "ornament") == 0 ||
+                     strcmp(scene_zone_name, "light") == 0 ||
+                     strcmp(scene_zone_name, "star") == 0)      expr = "cheerful_wave";
+            else                                                expr = "curious";
+        }
         if (!expr) continue;
 
         /* M11/M12: persist the touch as an event and refresh the dev
@@ -1604,11 +1768,28 @@ extern "C" void app_main(void) {
          * what we'd render IF M11.5 was wired up (it isn't yet —
          * the M8.5 corner-icon UI keeps using `expr` directly).
          *
-         * For thought-bubble taps the kind comes from the bubble's
-         * action_event rather than the static zone map. */
-        event_kind_t kind = tapped_thought
-            ? tapped_thought->action_event
-            : zone_to_event(z);
+         * Kind resolution priority:
+         *   1. Thought-bubble taps carry their own action_event.
+         *   2. Scene-zone taps (MPK1) map by name.
+         *   3. Else fall through to the corner-quadrant zone map. */
+        event_kind_t kind;
+        if (tapped_thought) {
+            kind = tapped_thought->action_event;
+        } else if (scene_zone_name) {
+            if      (strcmp(scene_zone_name, "food") == 0)     kind = EVENT_FED;
+            else if (strcmp(scene_zone_name, "heart") == 0)    kind = EVENT_COMFORTED;
+            else if (strcmp(scene_zone_name, "ball") == 0)     kind = EVENT_PLAYED;
+            else if (strcmp(scene_zone_name, "ornament") == 0 ||
+                     strcmp(scene_zone_name, "light") == 0 ||
+                     strcmp(scene_zone_name, "star") == 0)     kind = EVENT_CHEERED;
+            else                                               kind = EVENT_TAPPED;
+        } else if (zoned) {
+            /* Zoned scene + tap missed all zones. Pet body =
+             * comfort (a pat); empty scene = curious tap. */
+            kind = tapped_pet ? EVENT_COMFORTED : EVENT_TAPPED;
+        } else {
+            kind = zone_to_event(z);
+        }
         int64_t now_ms = now_ms_wall();
         if (kind != EVENT_NONE) {
             /* M12 local log — kept as the source for engagement

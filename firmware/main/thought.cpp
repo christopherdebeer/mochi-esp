@@ -19,11 +19,14 @@
 
 /* ─── M1 predicate constants — mirrored from shared/thoughts.ts ───
  *
- * Energy below this threshold while awake surfaces a SLEEPY thought.
- * Server-side `c15r/mochi:shared/thoughts.ts` uses the same number;
- * keep these in lock-step when tuning, or device and web will
- * disagree on what counts as "really needs sleep." */
-static const uint8_t SLEEPY_ENERGY_THRESHOLD = 28;
+ * Energy at or below this floor while awake surfaces a SLEEPY thought.
+ * Tuned low so the bubble feels like a real "needs sleep" signal,
+ * not a routine state — most of the day mochi quietly gets on with
+ * life and the bubble only appears when something is genuinely off.
+ * Server-side `c15r/mochi:shared/thoughts.ts` should track the
+ * same number; if they drift, device and web will disagree on
+ * what counts as "really needs sleep." */
+static const uint8_t SLEEPY_ENERGY_FLOOR = 10;
 /* Reserved for M2 (hungry need):
  *   static const uint8_t HUNGRY_FULLNESS_THRESHOLD = 35; */
 
@@ -132,14 +135,26 @@ static void blit_text_centered(uint8_t *dst, size_t dst_w, size_t dst_h,
 extern "C" bool thought_generate(const pet_t *pet, int64_t /*now_ms*/,
                                  pet_thought_t *out) {
     if (!pet || !out) return false;
-    if (pet->asleep) return false;
 
-    /* SLEEPY — energy below threshold, awake. Tapping = put mochi
-     * to sleep. The visible action on the device is symmetric with
-     * the web side's care_direct{kind:"slept"} path: substrate
+    /* WAKE — pet is currently asleep. Tapping = wake mochi up.
+     * Symmetric with the web side's care_direct{kind:"woke"} path:
+     * substrate sets asleep=false on its next mutate, and the
+     * resting sprite flips back to its waking projection. */
+    if (pet->asleep) {
+        out->action_kind   = THOUGHT_ACTION_CARE_EVENT;
+        out->action_event  = EVENT_WOKE;
+        out->line1         = "zzz...";
+        out->line2         = "tap wake";
+        out->expires_at_ms = 0;
+        return true;
+    }
+
+    /* SLEEPY — energy at or below the floor, awake. Tapping = put
+     * mochi to sleep. The visible action on the device is symmetric
+     * with the web side's care_direct{kind:"slept"} path: substrate
      * sets asleep=true on its next mutate, and the resting sprite
      * flips to SPRITE_SLEEPING on the following render. */
-    if (pet->stats.energy < SLEEPY_ENERGY_THRESHOLD) {
+    if (pet->stats.energy <= SLEEPY_ENERGY_FLOOR) {
         out->action_kind   = THOUGHT_ACTION_CARE_EVENT;
         out->action_event  = EVENT_SLEPT;
         out->line1         = "sleepy...";

@@ -22,6 +22,20 @@ that first. The short version, as it relates to firmware:
   assembles the scene contract for the current pet state and
   emits it alongside the scene image.
 
+## Build-time contracts (new — see design/13)
+
+`13-build-time-asset-packs.md` adds a *second source* for the same
+contract shape: tap zones authored in SPRITE·FORGE and bundled in
+the firmware image (`<pack>_meta.h`, an array of `{x,y,w,h,name}`
+zones with the same hit-test the server path will use). This reframes
+the loader below as "resolve zones from the server contract if
+present and fresh, else fall back to the bundled pack" — a precedence
+chain (mirroring the splash chain in `05`), not an either/or. It also
+lets the corner zones (below) be *authored now* rather than
+special-cased until the server side exists, so the eventual migration
+swaps the zone *provider* rather than the dispatch code. See design/13
+§ "How this changes scene contracts".
+
 ## What the device side will need
 
 Not built yet. M11.5 work, in rough order:
@@ -31,7 +45,9 @@ Not built yet. M11.5 work, in rough order:
    Format TBD — likely a small JSON or CBOR blob with named
    regions, bounding shapes (rect or polygon), and the intents
    each region accepts. Lives next to or appended to the scene
-   bitmap; one wire fetch per scene change.
+   bitmap; one wire fetch per scene change. (design/13 argues for
+   making this an MPK1 extension so fetched + bundled contracts share
+   one parser.)
 2. **Intent router.** Replaces the current hardcoded
    `find_zone(x, y)` switch in `main.cpp`'s touch handler. Looks
    up a tap point against the active scene's contract regions,
@@ -90,5 +106,9 @@ other scenes. M11.5 unfreezes all of that.
   side of the same loop scene contracts run on)
 - `05-sprite-format.md` — the wire format scene contracts will
   ride alongside; "Future direction" section there points here
+- `13-build-time-asset-packs.md` — bundled packs + the build-time
+  source of contract zones; precedence with server contracts
+- `12-thought-bubble.md` — another `{x,y,w,h}` hit-rect that folds
+  into the unified zone model
 - `02-boot-sequence.md` — boot eventually grows a "fetch current
   scene contract" step in the WARM BOOT branch
