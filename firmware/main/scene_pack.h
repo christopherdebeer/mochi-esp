@@ -78,11 +78,18 @@ bool scene_pack_current_has_zones(void);
 /* Iterate the current scene's zone set. Returns the count via
  * *out_count and a pointer to the zones array (borrowed, lives for
  * the program's lifetime). Returns NULL if the current scene has
- * no zones. Used by the dev-only outline overlay so callers can
- * visualise what hit-tests against what — invaluable when authored
- * zone rects don't line up with what reads as tappable on the
- * hardware panel. */
+ * no zones. */
 const mpk_zone_t *scene_pack_current_zones(uint8_t *out_count);
+
+/* Forgiving hit-test: returns the zone whose rectangle is nearest
+ * (Chebyshev distance in cell-local pixels) to (x, y), provided that
+ * distance is ≤ slop_px. Direct hits return distance 0. Returns true
+ * when a zone matched within slop, setting *out_name to its name.
+ * Used after scene_pack_zone_at fails so a near-miss can still
+ * resolve to the intended zone — touch panels are noisy and authored
+ * rects don't always cover what reads as tappable. */
+bool scene_pack_zone_near(int16_t x, int16_t y, int slop_px,
+                          const char **out_name);
 
 #ifdef __cplusplus
 }

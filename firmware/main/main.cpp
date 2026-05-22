@@ -1053,39 +1053,6 @@ extern "C" void app_main(void) {
                     ICON_W, ICON_H,
                     icon_pos_x[i], icon_pos_y[i]);
             }
-        } else {
-            /* Dev affordance: outline every authored zone with a 1-px
-             * black rectangle so a tester can see exactly where the
-             * hit-test rects live and adjust author-time placement
-             * (or device-side tuning) when they don't line up with
-             * what reads as tappable on the panel. Zones are
-             * cell-local, same coordinate space as the composite
-             * after the full-cell blit (status bar paints over the
-             * top STATUS_BAR_H rows). Stride is 25 bytes/row.
-             *
-             * Caveat: outlines are also visible to end users today.
-             * Easy to gate on a debug flag once the zone authoring
-             * settles — for now visibility is the point. */
-            uint8_t n_zones = 0;
-            const mpk_zone_t *zones = scene_pack_current_zones(&n_zones);
-            for (uint8_t z = 0; z < n_zones; z++) {
-                int x0 = zones[z].x;
-                int y0 = zones[z].y;
-                int x1 = x0 + zones[z].w - 1;
-                int y1 = y0 + zones[z].h - 1;
-                if (x0 < 0) x0 = 0;
-                if (y0 < 0) y0 = 0;
-                if (x1 >= MOCHI_EPD_WIDTH)  x1 = MOCHI_EPD_WIDTH  - 1;
-                if (y1 >= MOCHI_EPD_HEIGHT) y1 = MOCHI_EPD_HEIGHT - 1;
-                auto put = [&](int px, int py) {
-                    if (px < 0 || py < 0 ||
-                        px >= MOCHI_EPD_WIDTH || py >= MOCHI_EPD_HEIGHT) return;
-                    size_t off = (size_t)py * 25 + ((size_t)px >> 3);
-                    composite[off] &= (uint8_t)~(1u << (7 - ((size_t)px & 7)));
-                };
-                for (int x = x0; x <= x1; x++) { put(x, y0); put(x, y1); }
-                for (int y = y0; y <= y1; y++) { put(x0, y); put(x1, y); }
-            }
         }
     };
 
@@ -1673,6 +1640,28 @@ extern "C" void app_main(void) {
             }
         }
 
+        /* Forgiving snap: if the direct hit-test missed but the tap
+         * is within ZONE_SLOP_PX of an authored zone, treat it as a
+         * hit on that zone. Touch panels are noisy near the bezel
+         * (right-edge taps land at x=199 even when aimed inside),
+         * and authored zone rects don't always cover what reads as
+         * tappable. The pet-body case is checked first below so a
+         * deliberate pet pat near a zone doesn't get snapped away. */
+        constexpr int ZONE_SLOP_PX = 16;
+        const bool tapped_pet =
+            (int)ev.x >= PET_DX && (int)ev.x <  PET_DX + (int)PET_CELL_W &&
+            (int)ev.y >= PET_DY && (int)ev.y <  PET_DY + (int)PET_CELL_H;
+        if (!scene_zone_name && !tapped_thought && !tapped_pet &&
+            (int)ev.y >= STATUS_BAR_H) {
+            (void)scene_pack_zone_near(
+                (int16_t)ev.x, (int16_t)ev.y, ZONE_SLOP_PX,
+                &scene_zone_name);
+            if (scene_zone_name) {
+                ESP_LOGI(TAG, "zone snap to '%s' from (%u,%u)",
+                    scene_zone_name, (unsigned)ev.x, (unsigned)ev.y);
+            }
+        }
+
         const char *expr = tapped_thought
             ? thought_action_to_expr(tapped_thought)
             : zone_to_expr(z);
@@ -1683,20 +1672,10 @@ extern "C" void app_main(void) {
 
         /* When the current scene has authored zones, the corner-
          * quadrant fallback is suppressed: a tap that misses every
-         * zone resolves to a generic curious tap rather than a
-         * corner care action. Scenes own intent on zoned scenes;
-         * unzoned scenes keep the legacy corner UX. */
-        /* Pet body hit-test for tap-feedback disambiguation. Two
-         * "miss-the-zone" cases need to feel different:
-         *   - tapped on the pet itself      → "comforted" (a pat)
-         *   - tapped empty scene background → "curious"   (a glance)
-         * The mid-test reads against the pet sprite's bounding box.
-         * Strict rect, no alpha test: close enough for now and
-         * cheap. */
-        const bool tapped_pet =
-            (int)ev.x >= PET_DX && (int)ev.x <  PET_DX + (int)PET_CELL_W &&
-            (int)ev.y >= PET_DY && (int)ev.y <  PET_DY + (int)PET_CELL_H;
-
+         * zone (after the snap fallback above) resolves to either
+         * "comforted" (tap landed on the pet body — a pat) or
+         * "curious" (empty scene background). tapped_pet was
+         * computed earlier so the snap path could skip pet taps. */
         const bool zoned = scene_pack_current_has_zones();
         if (zoned && !scene_zone_name && !tapped_thought) {
             expr = tapped_pet ? "comforted" : "curious";

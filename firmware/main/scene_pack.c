@@ -115,3 +115,34 @@ const mpk_zone_t *scene_pack_current_zones(uint8_t *out_count) {
     }
     return NULL;
 }
+
+bool scene_pack_zone_near(int16_t x, int16_t y, int slop_px,
+                          const char **out_name) {
+    if (!s_open) return false;
+    uint8_t n = 0;
+    const mpk_zone_t *zones = scene_pack_current_zones(&n);
+    if (!zones || n == 0) return false;
+
+    int best_d = -1;
+    const mpk_zone_t *best = NULL;
+    for (uint8_t i = 0; i < n; i++) {
+        const mpk_zone_t *r = &zones[i];
+        /* Chebyshev distance from (x,y) to the zone rect: 0 inside,
+         * else max(dx, dy) where dx/dy are the per-axis gaps. Cheaper
+         * than Euclidean and behaves intuitively on a square panel. */
+        int dx = 0, dy = 0;
+        if      (x < r->x)               dx = r->x - x;
+        else if (x >= r->x + r->w)       dx = x - (r->x + r->w - 1);
+        if      (y < r->y)               dy = r->y - y;
+        else if (y >= r->y + r->h)       dy = y - (r->y + r->h - 1);
+        int d = dx > dy ? dx : dy;
+        if (best_d < 0 || d < best_d) {
+            best_d = d;
+            best   = r;
+            if (d == 0) break;  /* direct hit; can't beat zero */
+        }
+    }
+    if (!best || best_d > slop_px) return false;
+    if (out_name) *out_name = best->name;
+    return true;
+}
