@@ -72,6 +72,13 @@ static const char *TAG = "imagine";
 #define PNG_MAX          (768u  * 1024)   /* decoded 1504x720 PNG       */
 #define PACK_MAX         (320u  * 1024)
 
+/* Device scene geometry. Place sheets are authored at web geometry
+ * (360x336); we fetch their pack at the panel's cell size so the
+ * verbatim-row-copy blit accepts them (design/17). Matches main.cpp
+ * SCENE_W/SCENE_H. */
+#define IMAGINE_CELL_W 200
+#define IMAGINE_CELL_H 200
+
 #define MP_BOUNDARY "----mochiimagineKLuaBOUNDARY"
 
 static QueueHandle_t s_queue;
@@ -489,12 +496,24 @@ static void run_imagine(const imagine_req_t *req) {
     if (!rresp) { fail_reason("mark-ready failed", pet_id, failed_url); return; }
     free(rresp);
 
+    /* Travel: make this place the pet's current location so substrate +
+     * device agree, and it persists across reboot (design/17). Best-effort
+     * — the local swap below is the primary effect; web coherence is
+     * secondary, so a failure here doesn't fail the imagine. */
+    {
+        char enter_rel[96];
+        snprintf(enter_rel, sizeof(enter_rel), "/api/places/%s/enter", s_place_id);
+        char *en = api_post_json(enter_rel, pet_id, "{}");
+        free(en);
+    }
+
     /* 7 — fetch the assembled pack (server crops day/night cells) -- */
     set_phase(IMAGINE_FETCHING_PACK);
     uint8_t *pack = (uint8_t *)heap_caps_malloc(PACK_MAX, MALLOC_CAP_SPIRAM);
     if (!pack) { fail_reason("pack alloc failed", pet_id, failed_url); return; }
     size_t pack_len = 0;
-    snprintf(url, sizeof(url), "%s%s", MOCHI_BASE, pack_url);
+    snprintf(url, sizeof(url), "%s%s?cw=%d&ch=%d",
+        MOCHI_BASE, pack_url, IMAGINE_CELL_W, IMAGINE_CELL_H);
     if (!sprite_fetch_blob(url, pack, PACK_MAX, &pack_len, &ms)) {
         heap_caps_free(pack);
         fail_reason("pack fetch failed", pet_id, failed_url);
