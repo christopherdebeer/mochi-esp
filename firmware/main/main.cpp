@@ -69,6 +69,7 @@ extern "C" {
 #include "thought.h"
 #include "event_log.h"
 #include "time_sync.h"
+#include "scene_pack.h"
 }
 #include "pet_sync.h"
 
@@ -801,22 +802,22 @@ extern "C" void app_main(void) {
      * paper-white background so the pet is still visible.
      */
     {
-        size_t got = 0;
-        if (cache_ok && sprite_cache::load("scene-v1", "fill_200x172",
-                scene_fb, SCENE_BYTES, &got) && got == SCENE_BYTES) {
-            ESP_LOGI(TAG, "scene loaded from cache");
+        /* MPK1 — bundled at build time via EMBED_FILES, see
+         * design/13-build-time-asset-packs.md. Replaces the previous
+         * /devsprite/scene-v1 HTTPS fetch entirely: zero-network,
+         * zero-latency, fixed working set, and the scene comes with
+         * named tap zones authored by SPRITE·FORGE rather than
+         * coarse corner quadrants. The runtime fetch path is kept
+         * compiled (sprite_fetch / sprite_cache::load both still
+         * exist) only for the unused MOCHI_SCENE_URL define and as
+         * a future fallback for non-bundled scenes. */
+        if (scene_pack_init() &&
+            scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H)) {
+            ESP_LOGI(TAG, "scene from pack idx=%u",
+                (unsigned)scene_pack_current());
         } else {
-            uint32_t ms = 0;
-            if (sprite_fetch(MOCHI_SCENE_URL, scene_fb, SCENE_BYTES, &ms)) {
-                ESP_LOGI(TAG, "scene fetched in %lu ms", (unsigned long)ms);
-                if (cache_ok) {
-                    sprite_cache::store("scene-v1", "fill_200x172",
-                        scene_fb, SCENE_BYTES);
-                }
-            } else {
-                ESP_LOGW(TAG, "scene fetch failed; using blank backdrop");
-                compositor::clear_to_paper(scene_fb, SCENE_W, SCENE_H);
-            }
+            ESP_LOGW(TAG, "scene_pack unavailable; blank backdrop");
+            compositor::clear_to_paper(scene_fb, SCENE_W, SCENE_H);
         }
     }
 
@@ -1590,12 +1591,71 @@ extern "C" void app_main(void) {
          * etc. — see design/12-thought-bubble.md). */
         const pet_thought_t *tapped_thought =
             (z == Zone::Thought && s_thought_active) ? &s_active_thought : nullptr;
+
+        /* Scene-pack zone hit-test (MPK1 build-time scene contract,
+         * design/13). Runs BEFORE the corner-quadrant fallback so
+         * an authored zone wins over the coarse zone_to_*. Cell-local
+         * coordinates: panel x → scene x directly, panel y → scene
+         * y after subtracting the status bar. Skipped while a
+         * thought bubble is up (its tap target owns the screen).
+         *
+         * Naming taxonomy carried by SPRITE·FORGE today:
+         *   food                     → EVENT_FED
+         *   heart                    → EVENT_COMFORTED
+         *   ball                     → EVENT_PLAYED
+         *   ornament / light / star  → EVENT_CHEERED
+         *   door / stairs            → next scene (advance +1)
+         *   window / view / plant /
+         *   plants / shelf / box /
+         *   container                → EVENT_TAPPED + talk-seed cue
+         *
+         * The talk-seed wiring is M11.5-shaped — not done in this
+         * commit. For now unmapped zones still log + persist as
+         * EVENT_TAPPED so their existence is at least observable. */
+        const char *scene_zone_name = nullptr;
+        if (!tapped_thought) {
+            int16_t cell_y = (int16_t)((int)ev.y - SCENE_TOP_Y);
+            (void)scene_pack_zone_at((int16_t)ev.x, cell_y, &scene_zone_name);
+        }
+
         const char *expr = tapped_thought
             ? thought_action_to_expr(tapped_thought)
             : zone_to_expr(z);
-        ESP_LOGI(TAG, "touch (%u,%u) zone=%u expr=%s",
+        ESP_LOGI(TAG, "touch (%u,%u) zone=%u scene_zone=%s expr=%s",
             (unsigned)ev.x, (unsigned)ev.y, (unsigned)z,
+            scene_zone_name ? scene_zone_name : "(none)",
             expr ? expr : "(gutter)");
+
+        /* If the tap fell inside a named scene zone, route by name
+         * instead of by corner quadrant. Scene navigation
+         * (door/stairs) advances the index, re-blits the scene,
+         * full-refreshes, and skips the rest of the per-tap care
+         * pipeline. */
+        if (scene_zone_name) {
+            if (strcmp(scene_zone_name, "door") == 0 ||
+                strcmp(scene_zone_name, "stairs") == 0) {
+                uint16_t to = scene_pack_advance(+1);
+                ESP_LOGI(TAG, "scene navigate '%s' → idx=%u",
+                    scene_zone_name, (unsigned)to);
+                /* Rebuild scene_fb from the pack and force a full
+                 * render via render_with_expression's neutral pose
+                 * — partial refresh would leave residue from the
+                 * previous scene. */
+                scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H);
+                render_with_expression("neutral", true, nullptr);
+                continue;
+            }
+            /* Care zones — map name → expr/kind so the rest of the
+             * dispatch pipeline behaves as if the user had tapped
+             * the corresponding corner. */
+            if      (strcmp(scene_zone_name, "food") == 0)      expr = "eating";
+            else if (strcmp(scene_zone_name, "heart") == 0)     expr = "comforted";
+            else if (strcmp(scene_zone_name, "ball") == 0)      expr = "excited";
+            else if (strcmp(scene_zone_name, "ornament") == 0 ||
+                     strcmp(scene_zone_name, "light") == 0 ||
+                     strcmp(scene_zone_name, "star") == 0)      expr = "cheerful_wave";
+            else                                                expr = "curious";
+        }
         if (!expr) continue;
 
         /* M11/M12: persist the touch as an event and refresh the dev
@@ -1604,11 +1664,24 @@ extern "C" void app_main(void) {
          * what we'd render IF M11.5 was wired up (it isn't yet —
          * the M8.5 corner-icon UI keeps using `expr` directly).
          *
-         * For thought-bubble taps the kind comes from the bubble's
-         * action_event rather than the static zone map. */
-        event_kind_t kind = tapped_thought
-            ? tapped_thought->action_event
-            : zone_to_event(z);
+         * Kind resolution priority:
+         *   1. Thought-bubble taps carry their own action_event.
+         *   2. Scene-zone taps (MPK1) map by name.
+         *   3. Else fall through to the corner-quadrant zone map. */
+        event_kind_t kind;
+        if (tapped_thought) {
+            kind = tapped_thought->action_event;
+        } else if (scene_zone_name) {
+            if      (strcmp(scene_zone_name, "food") == 0)     kind = EVENT_FED;
+            else if (strcmp(scene_zone_name, "heart") == 0)    kind = EVENT_COMFORTED;
+            else if (strcmp(scene_zone_name, "ball") == 0)     kind = EVENT_PLAYED;
+            else if (strcmp(scene_zone_name, "ornament") == 0 ||
+                     strcmp(scene_zone_name, "light") == 0 ||
+                     strcmp(scene_zone_name, "star") == 0)     kind = EVENT_CHEERED;
+            else                                               kind = EVENT_TAPPED;
+        } else {
+            kind = zone_to_event(z);
+        }
         int64_t now_ms = now_ms_wall();
         if (kind != EVENT_NONE) {
             /* M12 local log — kept as the source for engagement

@@ -39,6 +39,7 @@ idf_component_register(
         "event_log.c"
         "time_sync.c"
         "pet_sync.cpp"
+        "scene_pack.c"
         "voice.cpp"
         "voice/voice_https.c"
         "voice/openai_signaling.c"
@@ -60,6 +61,7 @@ idf_component_register(
         "../vendor/qrcodegen"
     EMBED_FILES
         "assets/splash.bin"
+        "assets/scenes_a.mpk"
     REQUIRES
         driver
         esp_timer
