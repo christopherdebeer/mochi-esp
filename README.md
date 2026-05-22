@@ -1,4 +1,4 @@
-# eink-pet
+# mochi-esp
 
 [![firmware build](https://github.com/christopherdebeer/mochi-esp/actions/workflows/firmware-build.yml/badge.svg?branch=main)](https://github.com/christopherdebeer/mochi-esp/actions/workflows/firmware-build.yml)
 
@@ -33,18 +33,19 @@ Waveshare ESP32-S3-Touch-ePaper-1.54 V2:
 ## Repository shape
 
 ```
-eink-pet/
+mochi-esp/
 ├── README.md            this file
 ├── AGENTS.md            val.town code-gen guidelines (server side)
 ├── main.tsx             server-side root (HTTP val; currently a stub)
-├── design/              architecture + per-decision design docs
-│   ├── 00-architecture.md     device vs server partition
-│   ├── 01-bring-up-plan.md    M1..M8.5..M11+ milestones (see Status below)
-│   ├── 02-boot-sequence.md    runtime state machine
-│   ├── 03-provisioning.md     SoftAP + captive portal (M3)
-│   ├── 04-pairing.md          device-to-pet bind (M5)
-│   ├── 05-sprite-format.md    panel + cell + scene wire formats
-│   └── 06-scene-contracts.md  M11.5 stub: diegetic-interfaces device side
+├── design/              architecture + per-decision design docs (00–16)
+│   ├── 00–06                   architecture · bring-up · boot seq · provisioning · pairing · sprite format · scene contracts
+│   ├── 07-voice-architecture.md   device → OpenAI Realtime, BYO key in NVS (M9–M10)
+│   ├── 08-ota-updates.md          A/B partitions + GitHub Releases manifest (M14)
+│   ├── 09–12                   deep review · QR codes · pet-state-in-C · thought bubble
+│   ├── 13-build-time-asset-packs.md  MPK1 embedded sprite packs
+│   ├── 14-mpk1-edges-and-actions.md  format=1 inline zones + typed actions
+│   ├── 15-device-sprite-consolidation.md  one encoder/studio/format + boot-sync packs
+│   └── 16-on-device-imagine.md    speak a place into being (gpt-image-2, BYO key)
 └── firmware/            ESP-IDF firmware project (built locally with idf.py)
     ├── README.md        toolchain setup + build/flash instructions
     ├── CMakeLists.txt
@@ -56,11 +57,15 @@ eink-pet/
         └── waveshare-eink/    frozen vendor SSD1681 driver + provenance
 ```
 
-The val.town side hosts: a `/devsprite/*` family of endpoints (panel
-bitmaps, native cells with mask plane, panel-area scenes), a
-`/api/device/pair-*` flow, and HTML for `mochi.val.run/pair-device`. The
-realtime voice proxy is on the M9–M10 horizon. See `design/00-architecture.md`
-for the device-vs-server partition.
+The val.town side (`c15r/mochi` at mochi.val.run, plus the
+`c15r/mochi-device` studio + canonical encoder) hosts: the `/devsprite/*`
+family (panel bitmaps, native cells with mask plane, scenes, and MPK1
+`/devsprite/pack/<sheet>`), the device-pairing flow, the on-device
+imagine endpoints (`/api/places/:id/orchestration`, `/sheets/:id/guide.png`),
+and the realtime-voice token mint. The realtime voice path (device →
+OpenAI Realtime, BYO key on-device) has landed — see
+`design/07-voice-architecture.md`. See `design/00-architecture.md` for
+the device-vs-server partition.
 
 ## Building and flashing
 
@@ -78,39 +83,37 @@ idf.py -p /dev/cu.usbmodem* flash monitor       # build + flash + tail
 Full toolchain setup, port-name conventions per OS, and troubleshooting:
 **`firmware/README.md`**.
 
-## Status (as of 2026-05-18)
+## Status (as of 2026-05-22, release v0.0.17)
 
-The architectural spine — toolchain → display → WiFi → network sprite →
-pairing → touch → RTC → temp/humidity → on-device compositor + sprite
-cache — is complete. M9 (audio loopback) is the next bring-up step,
-and M9–M11.5 is where the diegetic-interfaces vision starts landing on
-device.
+The architectural spine through realtime voice, OTA, and on-device pet
+state is complete. The current track is the **device-sprite pipeline** —
+one encoder/studio/format, build-time MPK1 packs that boot-sync from the
+server, and on-device scene generation (`design/13`–`16`).
 
 | Milestone | Status | What it delivered |
 |---|---|---|
-| M1 — LED + USB serial | ✅ 05-18 | Toolchain validated, USB CDC heartbeat |
-| M2 — E-paper hello | ✅ 05-18 | SSD1681 driver vendored, full + partial refresh |
-| M3 — Provisioning | ✅ 05-18 | SoftAP + captive portal, NVS WiFi creds, WPA3-SAE verified |
-| M4 — First sprite | ✅ 05-18 | HTTPS GET → 5000-byte panel bitmap → memcpy framebuffer (~1.0–1.2 s) |
-| M5 — Pairing | ✅ 05-18 | `(name, PIN)` bind via `mochi.val.run/pair-device`, `pet_id` in NVS |
-| M6 — Touch | ✅ 05-18 | FT6336 capacitive, ISR + queue, 5-zone routing |
-| M7 — RTC | ✅ 05-18 | PCF85063 hand-rolled, coin-cell-backed across reflashes |
-| M8 — Temp/humidity | ✅ 05-18 | SHTC3 hand-rolled, polling-mode (avoids ESP-IDF v5 stretch trap) |
-| M8.5 — "Feels like Mochi" | ✅ 05-18 | Compositor (2-plane), scene + cell endpoints, status bar, LittleFS sprite cache w/ ETag invalidation, sleep gesture, factory reset, battery sense |
-| M9 — Audio loopback | next | ES8311 codec; input side of the realtime agent loop |
-| M10 — Realtime voice proxy | | Server-side realtime agent that holds the live scene contract |
-| M11 — Pet state in C | | Port `decay.ts` + `engagement.ts` + `mood.ts` |
-| M11.5 — Scene contracts | | Replaces hardcoded corner-icon UI; see `design/06-scene-contracts.md` |
-| M12 — Event log | | LittleFS-backed |
-| M13 — Sync model | | Push events / pull deltas |
-| M14 — OTA updates | ✅ 05-19 | A/B partition table, `esp_https_ota` against GitHub Releases manifest, daily check + idle reboot, rollback on boot failure (`design/08-ota-updates.md`) |
+| M1–M8 | ✅ 05-18 | Toolchain → e-paper (SSD1681) → SoftAP provisioning → first HTTPS sprite → `(name,PIN)` pairing → FT6336 touch → PCF85063 RTC → SHTC3 temp/humidity |
+| M8.5 — "Feels like Mochi" | ✅ 05-18 | 2-plane compositor, scene + cell endpoints, status bar, LittleFS sprite cache w/ ETag invalidation, sleep gesture, factory reset, battery sense |
+| M9 — Audio loopback | ✅ | ES8311 codec; input side of the realtime agent loop |
+| M10 — Realtime voice | ✅ | Device → OpenAI Realtime over WebRTC, BYO key on-device (`design/07`) |
+| M11 — Pet state in C | ✅ | Ported `decay` + `engagement` + `mood`; `design/11` |
+| M12 — Event log | ✅ | LittleFS-backed on-device event log |
+| M13 — Sync model | ✅ | Push events / pull deltas (`pet_sync`) |
+| M14 — OTA updates | ✅ 05-19 | A/B partitions, `esp_https_ota` against the GitHub Releases manifest, daily check + idle reboot, rollback on boot failure (`design/08`) |
 
-> **The M8.5 corner-icon UI is scaffolding.** Care actions are fixed
-> tap-zones in firmware today; the long-term shape is per-scene
-> semantic regions supplied by the server (see
-> `c15r/mochi:design/diegetic-interfaces.md` and our stub at
-> `design/06-scene-contracts.md`). Expect M11.5 to retire the corner
-> icons and the iOS-style status bar chrome.
+### Device-sprite pipeline (design/13–16)
+
+| Track | Status | What it delivered |
+|---|---|---|
+| Build-time packs | ✅ | MPK1 packs embedded via `EMBED_FILES`, byte-identical to `/devsprite/cell` (`design/13`) |
+| Format=1 zones | ✅ | Inline tap zones + typed actions (event / nav / talk-seed) in the pack (`design/14`) |
+| Consolidation | ✅ | One canonical encoder + the Device Sprite Studio; SPRITE·FORGE retired (`design/15`) |
+| Boot-sync packs | ✅ v0.0.16 | `pack_cache` pulls substrate-authored packs at boot (server → cache → embedded fail-safe) — studio edits reach the device with no reflash |
+| On-device imagine | ✅ v0.0.17* | Voice tool runs gpt-image-2 with the BYO key on-device, uploads the PNG, swaps the new scene in (`design/16`). *Pending on-device validation + the re-render-on-DONE wire. |
+
+> **The corner-icon UI is being retired.** Scenes now carry authored
+> tap zones with typed actions (MPK1 `format=1`, `design/14`); the fixed
+> corner quadrants remain only as a fallback for unzoned scenes.
 
 ## Editing the codebase
 
@@ -132,8 +135,8 @@ device.
 
 ## Cross-references
 
+- workspace `1d6a2a83d3194f` — proj_eink_pet / mochi-esp (project node)
+- workspace `71770d4f810341` — device-sprite consolidation + imagine shipped receipt
 - workspace `c6a8376def6946` — hardware delivery + decision shape
-- workspace `6985ca591aaa4e` — proj_eink_pet anchor
 - workspace `c86d955c774340` — proj_mochi
-- mochi.val.run / `c15r/mochi` — the web prototype this device embodies
-- `c15r/mochi:design/diegetic-interfaces.md` — vision driving M9+
+- mochi.val.run / `c15r/mochi` — the web prototype this device embodies; `c15r/mochi-device` — studio + canonical encoder
