@@ -230,9 +230,8 @@ static int64_t            s_thought_suppress_until_ms = 0;
  * web side's TRANSIENT_FOR_KIND map; "slept" doesn't have a
  * transient sprite there, so we use "sleeping" here to give the kid
  * visible feedback while the substrate round-trip lands. */
-static const char *thought_action_to_expr(const pet_thought_t *t) {
-    if (!t || t->action_kind != THOUGHT_ACTION_CARE_EVENT) return nullptr;
-    switch (t->action_event) {
+static const char *event_kind_to_expr(event_kind_t k) {
+    switch (k) {
         case EVENT_SLEPT:     return "sleeping";
         case EVENT_FED:       return "eating";
         case EVENT_PLAYED:    return "excited";
@@ -240,8 +239,14 @@ static const char *thought_action_to_expr(const pet_thought_t *t) {
         case EVENT_CHEERED:   return "cheerful_wave";
         case EVENT_HUGGED:    return "blushing";
         case EVENT_WOKE:      return "waking_up";
+        case EVENT_TAPPED:    return "curious";
         default:              return nullptr;
     }
+}
+
+static const char *thought_action_to_expr(const pet_thought_t *t) {
+    if (!t || t->action_kind != THOUGHT_ACTION_CARE_EVENT) return nullptr;
+    return event_kind_to_expr(t->action_event);
 }
 
 /* Wall-clock ms since epoch — what the server uses for its
@@ -1658,131 +1663,113 @@ extern "C" void app_main(void) {
             (z == Zone::Thought && s_thought_active) ? &s_active_thought : nullptr;
 
         /* Scene-pack zone hit-test (MPK1 build-time scene contract,
-         * design/13). Runs BEFORE the corner-quadrant fallback so
-         * an authored zone wins over the coarse zone_to_*. Cell-local
-         * coordinates: panel x → scene x directly, panel y → scene
-         * y after subtracting the status bar. Skipped while a
-         * thought bubble is up (its tap target owns the screen).
+         * design/13/14). The pack itself decides what each tap means
+         * via a typed action payload (event / nav_scene / nav_relative
+         * / talk_seed) — the firmware no longer keeps a name→action
+         * strcmp ladder here. Format=0 packs synthesise the same
+         * payload from the static name table inside scene_pack.c,
+         * so this code path is uniform across formats.
          *
-         * Naming taxonomy carried by SPRITE·FORGE today:
-         *   food                     → EVENT_FED
-         *   heart                    → EVENT_COMFORTED
-         *   ball                     → EVENT_PLAYED
-         *   ornament / light / star  → EVENT_CHEERED
-         *   door / stairs            → next scene (advance +1)
-         *   window / view / plant /
-         *   plants / shelf / box /
-         *   container                → EVENT_TAPPED + talk-seed cue
+         * Skipped while a thought bubble is up (its tap target owns
+         * the screen) or while the tap landed in the status-bar
+         * stripe (no zones up there).
          *
-         * The talk-seed wiring is M11.5-shaped — not done in this
-         * commit. For now unmapped zones still log + persist as
-         * EVENT_TAPPED so their existence is at least observable. */
-        const char *scene_zone_name = nullptr;
-        if (!tapped_thought) {
-            /* Cell is now blitted at panel row 0, so cell-local y
-             * matches panel y directly. Suppress hits in the status
-             * bar area so a tap on the time/battery glyphs doesn't
-             * accidentally fire a zone underneath. */
-            if ((int)ev.y >= STATUS_BAR_H) {
-                (void)scene_pack_zone_at(
-                    (int16_t)ev.x, (int16_t)ev.y, &scene_zone_name);
-            }
-        }
-
-        /* Forgiving snap: if the direct hit-test missed but the tap
-         * is within ZONE_SLOP_PX of an authored zone, treat it as a
-         * hit on that zone. Touch panels are noisy near the bezel
-         * (right-edge taps land at x=199 even when aimed inside),
-         * and authored zone rects don't always cover what reads as
-         * tappable. The pet-body case is checked first below so a
-         * deliberate pet pat near a zone doesn't get snapped away. */
+         * Forgiving snap: ZONE_SLOP_PX widens each rect by 16 px
+         * before we give up and fall through to corner-quadrant
+         * dispatch. The pet-body case is checked first so a pat near
+         * a zone doesn't get hijacked. */
         constexpr int ZONE_SLOP_PX = 16;
         const bool tapped_pet =
             (int)ev.x >= PET_DX && (int)ev.x <  PET_DX + (int)PET_CELL_W &&
             (int)ev.y >= PET_DY && (int)ev.y <  PET_DY + (int)PET_CELL_H;
-        if (!scene_zone_name && !tapped_thought && !tapped_pet &&
-            (int)ev.y >= STATUS_BAR_H) {
-            (void)scene_pack_zone_near(
-                (int16_t)ev.x, (int16_t)ev.y, ZONE_SLOP_PX,
-                &scene_zone_name);
-            if (scene_zone_name) {
-                ESP_LOGI(TAG, "zone snap to '%s' from (%u,%u)",
-                    scene_zone_name, (unsigned)ev.x, (unsigned)ev.y);
-            }
+
+        scene_pack_action_t scene_act = {};
+        bool scene_hit = false;
+        if (!tapped_thought && (int)ev.y >= STATUS_BAR_H) {
+            const int slop = tapped_pet ? 0 : ZONE_SLOP_PX;
+            scene_hit = scene_pack_action_at(
+                (int16_t)ev.x, (int16_t)ev.y, slop, &scene_act);
         }
 
         const char *expr = tapped_thought
             ? thought_action_to_expr(tapped_thought)
             : zone_to_expr(z);
-        ESP_LOGI(TAG, "touch (%u,%u) zone=%u scene_zone=%s expr=%s",
+        ESP_LOGI(TAG, "touch (%u,%u) zone=%u scene_act=%s expr=%s",
             (unsigned)ev.x, (unsigned)ev.y, (unsigned)z,
-            scene_zone_name ? scene_zone_name : "(none)",
+            scene_hit
+                ? (scene_act.kind == MPK_ACTION_NAV_SCENE    ? "nav_scene"
+                 : scene_act.kind == MPK_ACTION_NAV_RELATIVE ? "nav_relative"
+                 : scene_act.kind == MPK_ACTION_TALK_SEED    ? "talk_seed"
+                 : scene_act.kind == MPK_ACTION_EVENT        ? "event"
+                 :                                             "none")
+                : "(none)",
             expr ? expr : "(gutter)");
+
+        /* Scene-navigation actions short-circuit the rest of the
+         * touch pipeline: re-blit the scene cell, force a full
+         * refresh (partial would leave residue from the previous
+         * scene), and bail before the per-tap care pipeline runs. */
+        if (scene_hit && scene_act.kind == MPK_ACTION_NAV_RELATIVE) {
+            int delta = scene_act.data;
+            uint16_t to = scene_pack_advance(delta);
+            ESP_LOGI(TAG, "scene nav rel %+d → idx=%u", delta, (unsigned)to);
+            scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H);
+            render_with_expression("neutral", true, nullptr);
+            continue;
+        }
+        if (scene_hit && scene_act.kind == MPK_ACTION_NAV_SCENE) {
+            uint16_t to = scene_pack_set((uint16_t)scene_act.data);
+            ESP_LOGI(TAG, "scene nav abs → idx=%u", (unsigned)to);
+            scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H);
+            render_with_expression("neutral", true, nullptr);
+            continue;
+        }
+
+        /* talk_seed zones don't land an event in the substrate yet —
+         * the M11.5 intent-router work that consumes the seed text
+         * isn't here. For now log the seed so the authoring round-
+         * trip is observable, and dispatch as a generic curious tap
+         * so the kid still gets feedback. */
+        if (scene_hit && scene_act.kind == MPK_ACTION_TALK_SEED) {
+            ESP_LOGI(TAG, "talk_seed: '%.*s'",
+                (int)scene_act.seed_len,
+                scene_act.seed_text ? scene_act.seed_text : "");
+            expr = "curious";
+        }
 
         /* When the current scene has authored zones, the corner-
          * quadrant fallback is suppressed: a tap that misses every
          * zone (after the snap fallback above) resolves to either
          * "comforted" (tap landed on the pet body — a pat) or
-         * "curious" (empty scene background). tapped_pet was
-         * computed earlier so the snap path could skip pet taps. */
+         * "curious" (empty scene background). */
         const bool zoned = scene_pack_current_has_zones();
-        if (zoned && !scene_zone_name && !tapped_thought) {
+        if (zoned && !scene_hit && !tapped_thought) {
             expr = tapped_pet ? "comforted" : "curious";
         }
 
-        /* If the tap fell inside a named scene zone, route by name
-         * instead of by corner quadrant. Scene navigation
-         * (door/stairs) advances the index, re-blits the scene,
-         * full-refreshes, and skips the rest of the per-tap care
-         * pipeline. */
-        if (scene_zone_name) {
-            if (strcmp(scene_zone_name, "door") == 0 ||
-                strcmp(scene_zone_name, "stairs") == 0) {
-                uint16_t to = scene_pack_advance(+1);
-                ESP_LOGI(TAG, "scene navigate '%s' → idx=%u",
-                    scene_zone_name, (unsigned)to);
-                /* Rebuild scene_fb from the pack and force a full
-                 * render via render_with_expression's neutral pose
-                 * — partial refresh would leave residue from the
-                 * previous scene. */
-                scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H);
-                render_with_expression("neutral", true, nullptr);
-                continue;
-            }
-            /* Care zones — map name → expr/kind so the rest of the
-             * dispatch pipeline behaves as if the user had tapped
-             * the corresponding corner. */
-            if      (strcmp(scene_zone_name, "food") == 0)      expr = "eating";
-            else if (strcmp(scene_zone_name, "heart") == 0)     expr = "comforted";
-            else if (strcmp(scene_zone_name, "ball") == 0)      expr = "excited";
-            else if (strcmp(scene_zone_name, "ornament") == 0 ||
-                     strcmp(scene_zone_name, "light") == 0 ||
-                     strcmp(scene_zone_name, "star") == 0)      expr = "cheerful_wave";
-            else                                                expr = "curious";
+        /* event-kind zones: derive expr from the pack-supplied
+         * event_kind_t. Falls back to "curious" if the kind doesn't
+         * have a registered expression. */
+        if (scene_hit && scene_act.kind == MPK_ACTION_EVENT) {
+            const char *e = event_kind_to_expr((event_kind_t)scene_act.data);
+            expr = e ? e : "curious";
         }
         if (!expr) continue;
 
-        /* M11/M12: persist the touch as an event and refresh the dev
-         * pet's last_interaction_at so the lonely threshold resets.
-         * Then project mood + sprite over the recent slice and log
-         * what we'd render IF M11.5 was wired up (it isn't yet —
-         * the M8.5 corner-icon UI keeps using `expr` directly).
-         *
-         * Kind resolution priority:
+        /* M11/M12: persist the touch as an event. Kind resolution
+         * priority:
          *   1. Thought-bubble taps carry their own action_event.
-         *   2. Scene-zone taps (MPK1) map by name.
+         *   2. Scene-zone EVENT actions read the kind from the pack.
          *   3. Else fall through to the corner-quadrant zone map. */
         event_kind_t kind;
         if (tapped_thought) {
             kind = tapped_thought->action_event;
-        } else if (scene_zone_name) {
-            if      (strcmp(scene_zone_name, "food") == 0)     kind = EVENT_FED;
-            else if (strcmp(scene_zone_name, "heart") == 0)    kind = EVENT_COMFORTED;
-            else if (strcmp(scene_zone_name, "ball") == 0)     kind = EVENT_PLAYED;
-            else if (strcmp(scene_zone_name, "ornament") == 0 ||
-                     strcmp(scene_zone_name, "light") == 0 ||
-                     strcmp(scene_zone_name, "star") == 0)     kind = EVENT_CHEERED;
-            else                                               kind = EVENT_TAPPED;
+        } else if (scene_hit && scene_act.kind == MPK_ACTION_EVENT) {
+            kind = (event_kind_t)scene_act.data;
+        } else if (scene_hit && scene_act.kind == MPK_ACTION_TALK_SEED) {
+            /* talk_seed zones still log a TAPPED event so the M12
+             * engagement projection picks up the interaction. */
+            kind = EVENT_TAPPED;
         } else if (zoned) {
             /* Zoned scene + tap missed all zones. Pet body =
              * comfort (a pat); empty scene = curious tap. */

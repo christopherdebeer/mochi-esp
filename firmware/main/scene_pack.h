@@ -91,6 +91,31 @@ const mpk_zone_t *scene_pack_current_zones(uint8_t *out_count);
 bool scene_pack_zone_near(int16_t x, int16_t y, int slop_px,
                           const char **out_name);
 
+/* Typed action resolved from a tap. Mirrors mpk_action_kind_t and
+ * works uniformly across format=0 and format=1 packs:
+ *   - format=1 reads inline zones via mpk_zone_get verbatim.
+ *   - format=0 looks up the matched zone name (door, food, …) in
+ *     a static name→action table inside scene_pack.c so callers
+ *     don't have to keep the strcmp ladder around.
+ *
+ * Lifetime: name + seed_text are borrowed pointers into the embedded
+ * pack or the meta header — they live for the program's lifetime.
+ * seed_text is NOT NUL-terminated; use seed_len. */
+typedef struct {
+    int               kind;        /* mpk_action_kind_t value           */
+    int16_t           data;        /* event_kind_t / scene idx / delta  */
+    const char       *seed_text;   /* talk_seed only; may be NULL       */
+    uint8_t           seed_len;
+    const char       *name;        /* format=0 zone name; NULL on fmt 1 */
+} scene_pack_action_t;
+
+/* Resolve a tap (cell-local x,y) to an action. Tries the direct
+ * hit-test first; on miss, falls back to scene_pack_zone_near with
+ * `slop_px`. Returns true when a zone matched (direct or near).
+ * The caller dispatches on out->kind. */
+bool scene_pack_action_at(int16_t x, int16_t y, int slop_px,
+                          scene_pack_action_t *out);
+
 #ifdef __cplusplus
 }
 #endif
