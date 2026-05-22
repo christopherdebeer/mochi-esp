@@ -840,7 +840,7 @@ extern "C" void app_main(void) {
     }
 
     /* On-device scene generation pipeline. Idle until a voice tool
-     * call (`imagine_place`) lands; see design/15-on-device-imagine.md. */
+     * call (`imagine_place`) lands; see design/16-on-device-imagine.md. */
     if (!imagine_init()) {
         ESP_LOGW(TAG, "imagine pipeline unavailable; voice "
                       "imagine_place tool will refuse");

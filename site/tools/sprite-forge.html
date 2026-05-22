@@ -994,7 +994,16 @@ function HitAreaEditor({ sprite, hits, label, format, threshold, invert, effect,
     const ph = Math.max(1, Math.round(h * sh));
     if (pw < 2 && ph < 2) return; // ignore tap-without-drag
     const nx = px / sw, ny = py / sh, nw = pw / sw, nh = ph / sh;
-    onChange([...hits, { x: nx, y: ny, w: nw, h: nh, name: `hit_${hits.length}` }]);
+    onChange([...hits, {
+      x: nx, y: ny, w: nw, h: nh,
+      name: `hit_${hits.length}`,
+      // Format=1 zone action defaults — the export silently stays
+      // on format=0 when every hit's kind is 'none'. The kinds map
+      // 1:1 onto firmware/main/mochi_pack.h's MPK_ACTION_* enum.
+      action_kind: 'none',
+      action_data: 0,
+      seed_text: '',
+    }]);
   };
 
   const updateHit = (i, patch) => {
@@ -1079,6 +1088,69 @@ function HitAreaEditor({ sprite, hits, label, format, threshold, invert, effect,
                     <span className="text-zinc-700"> · </span>
                     nx={h.x.toFixed(3)} ny={h.y.toFixed(3)} nw={h.w.toFixed(3)} nh={h.h.toFixed(3)}
                   </div>
+                  {/* Format=1 action picker. Kind drives the data
+                    * input; the export silently stays on format=0
+                    * when every hit's kind is 'none'. See
+                    * design/14-mpk1-edges-and-actions.md. */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-zinc-600 uppercase tracking-wider">action</span>
+                    <select
+                      value={h.action_kind || 'none'}
+                      onChange={(e) => updateHit(i, { action_kind: e.target.value, action_data: 0, seed_text: '' })}
+                      className="bg-zinc-900 border border-zinc-700 px-2 py-1 text-[11px] text-zinc-200 outline-none"
+                    >
+                      <option value="none">none</option>
+                      <option value="event">event</option>
+                      <option value="nav_scene">nav_scene</option>
+                      <option value="nav_relative">nav_relative</option>
+                      <option value="talk_seed">talk_seed</option>
+                    </select>
+                    {h.action_kind === 'event' && (
+                      <select
+                        value={h.action_data ?? 0}
+                        onChange={(e) => updateHit(i, { action_data: parseInt(e.target.value, 10) })}
+                        className="bg-zinc-900 border border-zinc-700 px-2 py-1 text-[11px] text-zinc-200 outline-none"
+                      >
+                        {/* event_kind_t order; mirrors firmware/main/pet_state.h */}
+                        <option value={0}>fed</option>
+                        <option value={1}>played</option>
+                        <option value={2}>comforted</option>
+                        <option value={3}>cheered</option>
+                        <option value={4}>hugged</option>
+                        <option value={5}>slept</option>
+                        <option value={6}>woke</option>
+                        <option value={7}>talked</option>
+                        <option value={8}>tapped</option>
+                      </select>
+                    )}
+                    {h.action_kind === 'nav_scene' && (
+                      <input
+                        type="number"
+                        value={h.action_data ?? 0}
+                        min={0} max={255}
+                        onChange={(e) => updateHit(i, { action_data: parseInt(e.target.value, 10) || 0 })}
+                        className="bg-zinc-900 border border-zinc-700 px-2 py-1 text-[11px] text-zinc-200 w-16 outline-none"
+                      />
+                    )}
+                    {h.action_kind === 'nav_relative' && (
+                      <input
+                        type="number"
+                        value={h.action_data ?? 0}
+                        min={-128} max={127}
+                        onChange={(e) => updateHit(i, { action_data: parseInt(e.target.value, 10) || 0 })}
+                        className="bg-zinc-900 border border-zinc-700 px-2 py-1 text-[11px] text-zinc-200 w-16 outline-none"
+                      />
+                    )}
+                  </div>
+                  {h.action_kind === 'talk_seed' && (
+                    <textarea
+                      value={h.seed_text || ''}
+                      placeholder="what mochi says when this zone is tapped"
+                      onChange={(e) => updateHit(i, { seed_text: e.target.value })}
+                      rows={2}
+                      className="w-full bg-zinc-900 border border-zinc-700 px-2 py-1 text-[11px] text-zinc-200 outline-none resize-y"
+                    />
+                  )}
                 </div>
               );
             })
@@ -1465,29 +1537,176 @@ function App() {
     const enc = new TextEncoder();
 
     if (isMochi) {
-      // MPK1: device 2-plane cell pack (see design/13-build-time-asset-packs.md).
-      const buf = new Uint8Array(totalBytes);
+      // MPK1 emit. Picks format=1 when any authored zone has a
+      // non-NONE action (event / nav_scene / nav_relative / talk_seed)
+      // — see design/14-mpk1-edges-and-actions.md. format=0 stays
+      // for plain cells-only packs (the bundled scenes_a.mpk and
+      // pet_a.mpk today).
+      const useFmt1 = (hits || []).some(
+        (zs) => Array.isArray(zs) && zs.some((z) => z && z.action_kind && z.action_kind !== 'none'));
+
+      if (!useFmt1) {
+        const buf = new Uint8Array(totalBytes);
+        const dv = new DataView(buf.buffer);
+        buf[0] = 0x4d; buf[1] = 0x50; buf[2] = 0x4b; buf[3] = 0x31; // "MPK1"
+        buf[4] = 1;                       // version
+        buf[5] = 0;                       // format: 2-plane cell entries
+        dv.setUint16(6, outSize, true);   // cell_w LE
+        dv.setUint16(8, outSize, true);   // cell_h LE
+        dv.setUint16(10, sprites.length, true);
+        buf[12] = labelMaxLen;
+        buf[13] = 0x01;                   // flags: mask plane present
+        // 14..15 reserved (zero)
+
+        let off = 16;
+        for (let i = 0; i < sprites.length; i++) {
+          const lb = enc.encode(labels[i] || '');
+          const n = Math.min(lb.length, labelMaxLen);
+          for (let j = 0; j < n; j++) buf[off + j] = lb[j];
+          off += labelMaxLen;
+          const cell = packCellMochi(sprites[i], { threshold, invert, effect, maskSource, paperStroke, chromaHex, chromaTol });
+          buf.set(cell, off);
+          off += pixelBytes;             // == 8 + 2*planeBytes
+        }
+        return buf;
+      }
+
+      // ── format=1: per-entry zones + typed actions + label table ────
+      //
+      // Wire layout (envelope LE; cell-blob header big-endian as
+      // before):
+      //   16 B header (version=1, format=1)
+      //   directory: count × u32 LE entry offsets (absolute)
+      //   entries:  label(label_len) || cell(8 + 2*plane) ||
+      //             zone_count u8 || zones (count × 24 B)
+      //   label table: u16 LE count, then [u8 len + bytes] each
+      //
+      // Action kinds: see firmware/main/mochi_pack.h's
+      // MPK_ACTION_* enum. Talk-seed strings are pack-globally
+      // deduped here; an authored seed shared across N entries
+      // costs its bytes once and a u16 index N times.
+
+      const KIND_TO_BYTE = {
+        none: 0, event: 1, nav_scene: 2, nav_relative: 3, talk_seed: 4,
+      };
+      const NO_LABEL = 0xFFFF;
+
+      // Pre-encode each entry's cell blob so we can size the pack
+      // before we lay it out (directory needs absolute offsets).
+      const rowBytes = (outSize + 7) >> 3;
+      const planeBytes = rowBytes * outSize;
+      const cellBytes = 8 + 2 * planeBytes;
+
+      // Build the dedup'd seed table; track each (entry, zone)'s
+      // resolved label_idx alongside.
+      const seedIndex = new Map();
+      const seedList = [];
+      const resolveSeed = (text) => {
+        if (!text) return NO_LABEL;
+        const trimmed = text.slice(0, 255);
+        if (seedIndex.has(trimmed)) return seedIndex.get(trimmed);
+        const idx = seedList.length;
+        seedList.push(trimmed);
+        seedIndex.set(trimmed, idx);
+        return idx;
+      };
+
+      // Per-entry zones in wire order. Up to 15 per entry (zone_count
+      // is a u8 and authored use cases are tiny). Beyond 15 we silently
+      // drop the tail; SPRITE·FORGE doesn't yet enforce the limit at
+      // input time.
+      const entryZones = sprites.map((_, i) => {
+        const raw = (hits[i] || []).slice(0, 15);
+        return raw.map((z) => {
+          const kind = KIND_TO_BYTE[z.action_kind || 'none'] ?? 0;
+          let data = 0;
+          if (z.action_kind === 'nav_relative') {
+            // i8 sign-extended on the device side.
+            const v = (z.action_data | 0);
+            data = v < 0 ? (256 + v) & 0xff : (v & 0xff);
+          } else if (z.action_kind === 'event' || z.action_kind === 'nav_scene') {
+            data = (z.action_data | 0) & 0xff;
+          }
+          const labelIdx = z.action_kind === 'talk_seed' ? resolveSeed(z.seed_text) : NO_LABEL;
+          // Cell-local pixel rect — round normalised coords back
+          // into the device's pixel space. The device hit-test is
+          // integer-only.
+          const x = Math.max(0, Math.round(z.x * outSize));
+          const y = Math.max(0, Math.round(z.y * outSize));
+          const w = Math.max(1, Math.round(z.w * outSize));
+          const h = Math.max(1, Math.round(z.h * outSize));
+          return { x, y, w, h, kind, data, labelIdx };
+        });
+      });
+
+      // Compute total pack size to allocate one buffer.
+      let packBytes = 16 + sprites.length * 4; // header + directory
+      const entryBytes = entryZones.map((zs) => labelMaxLen + cellBytes + 1 + zs.length * 24);
+      for (const n of entryBytes) packBytes += n;
+      // Label table: u16 count + per-seed (u8 len + bytes).
+      let labelTableBytes = 2;
+      const seedBlobs = seedList.map((s) => enc.encode(s));
+      for (const b of seedBlobs) labelTableBytes += 1 + Math.min(255, b.length);
+      packBytes += labelTableBytes;
+
+      const buf = new Uint8Array(packBytes);
       const dv = new DataView(buf.buffer);
-      buf[0] = 0x4d; buf[1] = 0x50; buf[2] = 0x4b; buf[3] = 0x31; // "MPK1"
-      buf[4] = 1;                       // version
-      buf[5] = 0;                       // format: 2-plane cell entries
-      dv.setUint16(6, outSize, true);   // cell_w LE
-      dv.setUint16(8, outSize, true);   // cell_h LE
+
+      buf[0] = 0x4d; buf[1] = 0x50; buf[2] = 0x4b; buf[3] = 0x31;
+      buf[4] = 1; // version
+      buf[5] = 1; // format=1
+      dv.setUint16(6, outSize, true);
+      dv.setUint16(8, outSize, true);
       dv.setUint16(10, sprites.length, true);
       buf[12] = labelMaxLen;
-      buf[13] = 0x01;                   // flags: mask plane present
-      // 14..15 reserved (zero)
+      buf[13] = 0x01; // flags: mask plane present
+      // 14..15 reserved
 
-      let off = 16;
+      // Directory pass — entry offsets are absolute into the buffer.
+      let cursor = 16 + sprites.length * 4;
       for (let i = 0; i < sprites.length; i++) {
+        dv.setUint32(16 + i * 4, cursor, true);
+        cursor += entryBytes[i];
+      }
+
+      // Entry pass.
+      for (let i = 0; i < sprites.length; i++) {
+        let off = dv.getUint32(16 + i * 4, true);
         const lb = enc.encode(labels[i] || '');
-        const n = Math.min(lb.length, labelMaxLen);
-        for (let j = 0; j < n; j++) buf[off + j] = lb[j];
+        const ln = Math.min(lb.length, labelMaxLen);
+        for (let j = 0; j < ln; j++) buf[off + j] = lb[j];
         off += labelMaxLen;
         const cell = packCellMochi(sprites[i], { threshold, invert, effect, maskSource, paperStroke, chromaHex, chromaTol });
         buf.set(cell, off);
-        off += pixelBytes;             // == 8 + 2*planeBytes
+        off += cellBytes;
+        const zs = entryZones[i];
+        buf[off] = zs.length;
+        off += 1;
+        for (const z of zs) {
+          dv.setUint16(off + 0, z.x, true);
+          dv.setUint16(off + 2, z.y, true);
+          dv.setUint16(off + 4, z.w, true);
+          dv.setUint16(off + 6, z.h, true);
+          buf[off + 8] = z.kind;
+          buf[off + 9] = z.data;
+          dv.setUint16(off + 10, z.labelIdx, true);
+          // 12..23 reserved (already zero)
+          off += 24;
+        }
       }
+
+      // Label table.
+      let toff = cursor;
+      dv.setUint16(toff, seedBlobs.length, true);
+      toff += 2;
+      for (const b of seedBlobs) {
+        const len = Math.min(255, b.length);
+        buf[toff] = len;
+        toff += 1;
+        buf.set(b.subarray(0, len), toff);
+        toff += len;
+      }
+
       return buf;
     }
 
@@ -1514,7 +1733,7 @@ function App() {
       off += pixelBytes;
     }
     return buf;
-  }, [isMochi, sprites, labels, format, outSize, labelMaxLen, threshold, invert, effect, maskSource, paperStroke, chromaHex, chromaTol, pixelBytes, totalBytes]);
+  }, [isMochi, sprites, labels, hits, format, outSize, labelMaxLen, threshold, invert, effect, maskSource, paperStroke, chromaHex, chromaTol, pixelBytes, totalBytes]);
 
   const handleDownload = useCallback(() => {
     const buf = buildBinary();

@@ -1,4 +1,4 @@
-# 15 — on-device imagine (sketch)
+# 16 — on-device imagine (sketch)
 
 **Status:** sketch, 2026-05-22. Pre-implementation. Companion firmware
 skeleton lands in `firmware/main/imagine.{h,c}` so the moving pieces

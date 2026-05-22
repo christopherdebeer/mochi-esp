@@ -218,7 +218,7 @@ static void worker_task(void *arg) {
          * (e.g. "imagine_place" kicks off scene generation). The
          * model-facing reply still flows through the same
          * function_call_output path so the conversational shape is
-         * uniform. See design/15-on-device-imagine.md. */
+         * uniform. See design/16-on-device-imagine.md. */
         bool intercepted = false;
         if (strcmp(req->name, "imagine_place") == 0) {
             /* Args follow shared/voice-tools-spec.ts: { name, vibe,

@@ -3,7 +3,7 @@
  *
  * v0 scaffolding. The worker advances through phases but each
  * network step is a stub that logs and sleeps; later commits flesh
- * each one out (see design/15-on-device-imagine.md "v0 scope" for
+ * each one out (see design/16-on-device-imagine.md "v0 scope" for
  * the order). Wiring this up first lets us exercise the voice-tool
  * trigger and the UI hook (thought-bubble text driven off
  * imagine_phase()) end-to-end before the heavy network plumbing.
