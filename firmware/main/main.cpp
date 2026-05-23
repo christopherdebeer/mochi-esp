@@ -74,6 +74,7 @@ extern "C" {
 #include "imagine.h"
 }
 #include "pet_sync.h"
+#include "device_diag.h"
 
 /*
  * Endpoints for the on-device compositor. The scene is fetched once
@@ -390,6 +391,11 @@ extern "C" void app_main(void) {
     ESP_LOGI(TAG, "—— mochi M3: boot ——");
     log_chip_info();
 
+    /* Over-the-air diagnostics (design/18): captures the boot record
+     * (reset reason / heap) up front; flushed to substrate once WiFi +
+     * pairing are up so a field device is debuggable without serial. */
+    device_diag_init();
+
     led_init();
     boot_button_init();
     epd_power_on();
@@ -527,6 +533,14 @@ extern "C" void app_main(void) {
     }
 
     ESP_LOGI(TAG, "online; IP=%s, joined='%s'", ip_str, joined_ssid);
+    {
+        char ctx[120];
+        snprintf(ctx, sizeof(ctx), "{\"ssid\":\"%s\",\"ip\":\"%s\"}",
+            joined_ssid, ip_str);
+        device_diag_event(DIAG_INFO, "wifi", "joined", ctx);
+    }
+    /* First flush: lands the boot record + wifi result early. */
+    device_diag_flush();
 
     /*
      * OTA bookkeeping. If this boot is the first one after an OTA
@@ -1496,6 +1510,8 @@ extern "C" void app_main(void) {
     /* Worn-costume state (design/17): re-render the pet when it changes.
      * Empty = base species, which is the boot render. */
     char last_costume[40] = "";
+    /* Diagnostic flush cadence (design/18). */
+    int64_t last_diag_flush_us = esp_timer_get_time();
 
     /* Auto-trigger key portal if NVS has no OpenAI key. The user
      * landed here either by skipping the optional key field during
@@ -1616,6 +1632,7 @@ extern "C" void app_main(void) {
             voice::stop_session();
             render_with_expression("neutral", false, nullptr);
             last_voice_phase = voice::Phase::Idle;
+            device_diag_event(DIAG_INFO, "voice", "session end", nullptr);
             /* Travel responsiveness (design/17): a move_to_location said
              * during the session only changed pets.location server-side.
              * Pull once now so the travel block below renders the new
@@ -1669,6 +1686,18 @@ extern "C" void app_main(void) {
                 /* Record either way so a failed fetch doesn't thrash the
                  * loop every tick; a later re-travel retries. */
                 snprintf(last_location, sizeof(last_location), "%s", loc);
+            }
+        }
+
+        /* Periodic diagnostic flush (design/18): push buffered records to
+         * substrate every couple of minutes when idle, so a field device
+         * is debuggable without serial. Best-effort; no-op if nothing
+         * buffered or offline. */
+        {
+            int64_t now_us = esp_timer_get_time();
+            if (now_us - last_diag_flush_us > 120LL * 1000 * 1000) {
+                device_diag_flush();
+                last_diag_flush_us = now_us;
             }
         }
 

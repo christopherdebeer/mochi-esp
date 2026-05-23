@@ -54,6 +54,7 @@
 #include "sprite_fetch.h"
 #include "openai_key.h"
 #include "pair_creds.h"
+#include "device_diag.h"
 
 static const char *TAG = "imagine";
 
@@ -343,6 +344,11 @@ static void fail_reason(const char *reason, const char *pet_id,
                         const char *failed_url) {
     snprintf(s_reason, sizeof(s_reason), "%s", reason ? reason : "unknown");
     ESP_LOGW(TAG, "imagine failed: %s", s_reason);
+    {
+        char ctx[120];
+        snprintf(ctx, sizeof(ctx), "{\"place\":\"%s\"}", s_place_id);
+        device_diag_event(DIAG_WARN, "imagine", s_reason, ctx);
+    }
     if (pet_id && failed_url && failed_url[0]) {
         char body[160];
         snprintf(body, sizeof(body), "{\"reason\":\"%s\"}", s_reason);
@@ -524,6 +530,12 @@ static void run_imagine(const imagine_req_t *req) {
      * substrate's job (a pet thought set on ready), shared by web + device
      * — model proposes, substrate disposes. */
     snprintf(s_pack_path, sizeof(s_pack_path), "%s", sheet_id);
+    {
+        char ctx[160];
+        snprintf(ctx, sizeof(ctx), "{\"place\":\"%s\",\"sheet\":\"%s\"}",
+            s_place_id, sheet_id);
+        device_diag_event(DIAG_INFO, "imagine", "ready", ctx);
+    }
     set_phase(IMAGINE_DONE);
     atomic_store(&s_in_flight, false);
     ESP_LOGI(TAG, "imagine done (ready, not traveled): place=%s sheet=%s",
