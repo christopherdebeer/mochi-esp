@@ -100,7 +100,10 @@ later refinement.
    boot record + flush wiring (post-WiFi + every ~2 min).
 2. **Instrument** — *done* (pending validation). Emits at boot, wifi,
    pack_cache (server/cache/embedded + why), imagine (ready/fail), voice
-   (session end), ota (staged/failed).
+   (session end), ota (up-to-date / update / staged / failed), sleep,
+   pair, render (cell-fetch fail), low battery, plus a periodic **health
+   heartbeat** (~5 min: internal heap free + min watermark, PSRAM free,
+   battery mv/pct, temp, uptime) so slow degradation has context.
 3. **Voice cost** — *session-level done* (pending validation). On every
    voice-session end, `main.cpp` brackets the session off `is_active()`
    transitions and POSTs `/api/device/voice-session` → a
@@ -110,7 +113,12 @@ later refinement.
    — needs parsing `response.usage` in the data-channel handler (the
    delicate, hardware-validation-only bit) and a turn counter.
 4. **Crash detail** — surface the ESP-IDF core-dump summary (panic PC /
-   backtrace) on the next boot, beyond the reset reason.
+   backtrace) on the next boot, beyond the reset reason. **Gated on a
+   `coredump` partition** (CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH) — a
+   partitions.csv change, which is *not* OTA-safe (the partition table
+   isn't OTA'd), so it needs a one-time USB reflash. Deferred until the
+   next USB session; the boot record's reset reason (panic/watchdog/
+   brownout) already gives the crash *class* over the air.
 
 ## Cross-references
 

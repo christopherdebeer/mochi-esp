@@ -776,6 +776,8 @@ extern "C" void app_main(void) {
         epd->EPD_DisplayPart();
 
         ESP_LOGI(TAG, "pairing complete; rebooting to clean post-pair boot");
+        device_diag_event(DIAG_INFO, "pair", "paired", nullptr);
+        device_diag_flush();   /* push before the post-pair reboot */
         vTaskDelay(pdMS_TO_TICKS(1500));
         esp_restart();
     }
@@ -1581,6 +1583,8 @@ extern "C" void app_main(void) {
          * — never returns. */
         if (sleep_gesture::requested()) {
             sleep_gesture::mark_handled();
+            device_diag_event(DIAG_INFO, "sleep", "long-press → sleep", nullptr);
+            device_diag_flush();   /* push before we power down */
             render_asleep();
             sleep_gesture::commit_sleep();
         }

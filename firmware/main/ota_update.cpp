@@ -239,10 +239,14 @@ void ota_task(void *) {
         if (cmp >= 0) {
             ESP_LOGI(TAG, "no upgrade: running=%s remote=%s (cmp=%d); sleeping",
                 running, remote_version, cmp);
+            device_diag_eventf(DIAG_INFO, "ota", NULL,
+                "up to date %s", running);
             vTaskDelay(pdMS_TO_TICKS(OTA_CHECK_INTERVAL_MS));
             continue;
         }
         ESP_LOGI(TAG, "update available: %s → %s", running, remote_version);
+        device_diag_eventf(DIAG_INFO, "ota", NULL,
+            "update %s -> %s", running, remote_version);
 
         if (perform_update(bin_url)) {
             ESP_LOGI(TAG, "update staged; signalling main to reboot at idle");
