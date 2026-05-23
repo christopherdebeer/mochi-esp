@@ -75,6 +75,11 @@ void pet_sync_touch(int64_t at_ms);
 void pet_sync_current_location(char *id_out, size_t id_cap,
                                char *sheet_out, size_t sheet_cap);
 
+/* Current costume id from the latest /api/state ("" = base species).
+ * The device renders the pet from costume-<petId>-<costumeId>-v1 when
+ * set, else the embedded/pet-v1 base. See design/17. */
+void pet_sync_current_costume(char *id_out, size_t id_cap);
+
 /* Travel to a place by id (design/17): POST /api/places/:id/enter, and on
  * success optimistically set the local location + sheetId so the device's
  * location-follow render swaps to it on the next tick. Returns true on a

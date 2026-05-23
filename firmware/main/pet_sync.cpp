@@ -44,6 +44,9 @@ static bool  s_have_snapshot;
  * at device geometry (design/17). Guarded by s_mtx like s_pet. */
 static char s_location[40];
 static char s_location_sheet[64];
+/* Current costume id ("" = base species). The device renders the pet
+ * from costume-<petId>-<costumeId>-v1 when set (design/17). */
+static char s_costume_id[40];
 
 /* Push queue + worker. */
 typedef struct {
@@ -83,7 +86,8 @@ static bool parse_state_response(const char *body, int len,
                                  pet_event_t *out_events, size_t cap,
                                  size_t *out_count,
                                  char *out_loc, size_t loc_cap,
-                                 char *out_loc_sheet, size_t sheet_cap) {
+                                 char *out_loc_sheet, size_t sheet_cap,
+                                 char *out_costume, size_t costume_cap) {
     cJSON *root = cJSON_ParseWithLength(body, (size_t)len);
     if (!root) {
         ESP_LOGW(TAG, "json parse failed");
@@ -159,6 +163,13 @@ static bool parse_state_response(const char *body, int len,
             snprintf(out_loc, loc_cap, "%s", loc->valuestring);
         }
     }
+    if (out_costume && costume_cap) {
+        out_costume[0] = '\0';
+        cJSON *cc = cJSON_GetObjectItemCaseSensitive(pet, "currentCostumeId");
+        if (cJSON_IsString(cc) && cc->valuestring) {
+            snprintf(out_costume, costume_cap, "%s", cc->valuestring);
+        }
+    }
     if (out_loc_sheet && sheet_cap) {
         out_loc_sheet[0] = '\0';
         cJSON *places = cJSON_GetObjectItemCaseSensitive(root, "places");
@@ -220,16 +231,18 @@ static bool do_state_pull(pet_t *out_pet,
         return false;
     }
 
-    char loc[40] = {0}, sheet[64] = {0};
+    char loc[40] = {0}, sheet[64] = {0}, cost[40] = {0};
     bool ok = parse_state_response(cap_state.body, cap_state.len,
                                    out_pet, out_events, cap, out_count,
-                                   loc, sizeof(loc), sheet, sizeof(sheet));
+                                   loc, sizeof(loc), sheet, sizeof(sheet),
+                                   cost, sizeof(cost));
     free(cap_state.body);
     if (ok) {
         if (!s_mtx) s_mtx = xSemaphoreCreateMutex();
         xSemaphoreTake(s_mtx, portMAX_DELAY);
         snprintf(s_location, sizeof(s_location), "%s", loc);
         snprintf(s_location_sheet, sizeof(s_location_sheet), "%s", sheet);
+        snprintf(s_costume_id, sizeof(s_costume_id), "%s", cost);
         xSemaphoreGive(s_mtx);
     }
     return ok;
@@ -293,6 +306,14 @@ void pet_sync_current_location(char *id_out, size_t id_cap,
     xSemaphoreTake(s_mtx, portMAX_DELAY);
     if (id_out && id_cap) snprintf(id_out, id_cap, "%s", s_location);
     if (sheet_out && sheet_cap) snprintf(sheet_out, sheet_cap, "%s", s_location_sheet);
+    xSemaphoreGive(s_mtx);
+}
+
+void pet_sync_current_costume(char *id_out, size_t id_cap) {
+    if (id_out && id_cap) id_out[0] = '\0';
+    if (!s_mtx || !id_out || !id_cap) return;
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    snprintf(id_out, id_cap, "%s", s_costume_id);
     xSemaphoreGive(s_mtx);
 }
 
@@ -375,10 +396,11 @@ static bool do_mutate_post(event_kind_t kind, int64_t at_ms) {
     pet_t tmp;
     pet_event_t evs[12];
     size_t n = 0;
-    char loc[40] = {0}, sheet[64] = {0};
+    char loc[40] = {0}, sheet[64] = {0}, cost[40] = {0};
     bool ok = parse_state_response(cap_mut.body, cap_mut.len, &tmp,
                                    evs, sizeof(evs)/sizeof(evs[0]), &n,
-                                   loc, sizeof(loc), sheet, sizeof(sheet));
+                                   loc, sizeof(loc), sheet, sizeof(sheet),
+                                   cost, sizeof(cost));
     free(cap_mut.body);
     if (!ok) return false;
 
@@ -388,6 +410,7 @@ static bool do_mutate_post(event_kind_t kind, int64_t at_ms) {
     s_have_snapshot = true;
     snprintf(s_location, sizeof(s_location), "%s", loc);
     snprintf(s_location_sheet, sizeof(s_location_sheet), "%s", sheet);
+    snprintf(s_costume_id, sizeof(s_costume_id), "%s", cost);
     xSemaphoreGive(s_mtx);
     (void)at_ms;  /* server stamps its own at; we don't need ours */
     ESP_LOGI(TAG,

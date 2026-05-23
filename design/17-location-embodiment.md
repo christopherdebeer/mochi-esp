@@ -187,8 +187,16 @@ visual tuning knob.
 - **Substrate travel hint.** `markPlaceReady` should set a pet thought
   ("somewhere new…") with a travel action, so imagine's notify surfaces on
   web + device via the shared thought-bubble path.
-- **Costumes on device.** Render `current_costume_id` via the costume
-  sheet's device cells (the pet-overlay analogue of place rendering).
+- **Costumes on device** — *done* (pending on-device validation). The pet
+  render path keys its cells on the worn costume: `pet_sync` parses
+  `currentCostumeId`; `render_with_expression` swaps the cell source to
+  `costume-<petId>-<costumeId>-v1` (same 96×96 pet geometry, skips the
+  base-only embedded pack); a loop costume-follow re-renders on
+  wear/take-off, and the post-voice pull refreshes it. Server:
+  `devsprite.effectiveTemplate` now resolves costume-dyn sheets so
+  `/devsprite/cell/<costume-sheet>/<expr>` serves them. Dormant while the
+  wardrobe is empty. (The tap-to-wear `wear_costume` zone action — kinds
+  6/7 — is still future; this is the render half only.)
 - **Variant meta link.** Generalise day/night (today a 2-cell RTC
   convention) to the non-tappable meta link in the `format=1` trailer —
   extensible to non-binary, non-time conditions.

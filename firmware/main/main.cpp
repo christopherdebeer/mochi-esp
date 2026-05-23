@@ -1111,9 +1111,31 @@ extern "C" void app_main(void) {
          * expressions the pack doesn't carry, and for the
          * pet_pack-unavailable case.
          */
+        /* Pet sheet selection (design/17): a worn costume swaps the pet's
+         * cells to costume-<petId>-<costumeId>-v1 (same 96×96 pet
+         * geometry); null = base species. The base path is unchanged
+         * (embedded pack → cache → pet-v1 fetch). The costume path skips
+         * the embedded pack (it only holds base cells) and keys the cache
+         * + fetch on the costume sheet. Dormant while the wardrobe is
+         * empty (current_costume_id == ""). */
+        char pet_sheet[120] = "pet-v1";
+        bool costumed = false;
+        {
+            char costume[40];
+            pet_sync_current_costume(costume, sizeof(costume));
+            if (costume[0]) {
+                struct mochi_pair_creds pc;
+                if (pair_creds_load(&pc) && pc.pet_id[0]) {
+                    snprintf(pet_sheet, sizeof(pet_sheet),
+                        "costume-%s-%s-v1", pc.pet_id, costume);
+                    costumed = true;
+                }
+            }
+        }
+
         const char *cell_source = nullptr;
         uint32_t ms = 0;
-        {
+        if (!costumed) {
             uint16_t pw = 0, ph = 0;
             if (pet_pack_load(expr, pet_ink, pet_mask,
                               PET_CELL_BYTES, &pw, &ph)) {
@@ -1135,22 +1157,24 @@ extern "C" void app_main(void) {
             size_t got_ink = 0, got_mask = 0;
             bool from_cache =
                 cache_ok &&
-                sprite_cache::load("pet-v1", ink_suffix,
+                sprite_cache::load(pet_sheet, ink_suffix,
                     pet_ink, PET_CELL_BYTES, &got_ink) &&
                 got_ink == PET_CELL_BYTES &&
-                sprite_cache::load("pet-v1", mask_suffix,
+                sprite_cache::load(pet_sheet, mask_suffix,
                     pet_mask, PET_CELL_BYTES, &got_mask) &&
                 got_mask == PET_CELL_BYTES;
             if (from_cache) cell_source = "cache";
         }
 
         if (!cell_source) {
-            char url[160];
-            snprintf(url, sizeof(url), "%s%s", MOCHI_PET_CELL_URL_BASE, expr);
+            char url[224];
+            snprintf(url, sizeof(url),
+                "https://mochi.val.run/devsprite/cell/%s/%s", pet_sheet, expr);
             uint16_t w = 0, h = 0;
             if (!sprite_fetch_cell(url, pet_ink, pet_mask, PET_CELL_BYTES,
                                    &w, &h, &ms)) {
-                ESP_LOGW(TAG, "pet cell fetch failed for '%s'", expr);
+                ESP_LOGW(TAG, "pet cell fetch failed for '%s' (sheet %s)",
+                    expr, pet_sheet);
                 return false;
             }
             if (w != PET_CELL_W || h != PET_CELL_H) {
@@ -1159,8 +1183,8 @@ extern "C" void app_main(void) {
                 return false;
             }
             if (cache_ok) {
-                sprite_cache::store("pet-v1", ink_suffix,  pet_ink,  PET_CELL_BYTES);
-                sprite_cache::store("pet-v1", mask_suffix, pet_mask, PET_CELL_BYTES);
+                sprite_cache::store(pet_sheet, ink_suffix,  pet_ink,  PET_CELL_BYTES);
+                sprite_cache::store(pet_sheet, mask_suffix, pet_mask, PET_CELL_BYTES);
             }
             cell_source = "fetch";
         }
@@ -1469,6 +1493,9 @@ extern "C" void app_main(void) {
      * rendering. Boot rendered the home bundle, so we start at "home".
      * The loop below follows pets.location and re-renders on change. */
     char last_location[40] = "home";
+    /* Worn-costume state (design/17): re-render the pet when it changes.
+     * Empty = base species, which is the boot render. */
+    char last_costume[40] = "";
 
     /* Auto-trigger key portal if NVS has no OpenAI key. The user
      * landed here either by skipping the optional key field during
@@ -1642,6 +1669,19 @@ extern "C" void app_main(void) {
                 /* Record either way so a failed fetch doesn't thrash the
                  * loop every tick; a later re-travel retries. */
                 snprintf(last_location, sizeof(last_location), "%s", loc);
+            }
+        }
+
+        /* Costume follow (design/17): re-render the pet when the worn
+         * costume changes (wear / take-off via voice). render_with_
+         * expression picks the costume sheet automatically. Deferred
+         * while voice is live, like travel. */
+        if (!voice::is_active()) {
+            char cur_costume[40];
+            pet_sync_current_costume(cur_costume, sizeof(cur_costume));
+            if (strcmp(cur_costume, last_costume) != 0) {
+                snprintf(last_costume, sizeof(last_costume), "%s", cur_costume);
+                render_with_expression("neutral", true, nullptr);
             }
         }
 
