@@ -57,6 +57,15 @@
 
 #define TAG "voice_peer"
 
+/* Voice cost telemetry (design/18 ph3b): per-session token + turn
+ * accumulators. Reset at voice_peer_start, accumulated from response.done
+ * usage in the data-channel handler, read at session end for the
+ * realtime_sessions row. */
+static atomic_int s_sess_turns;
+static atomic_int s_sess_in_tok;
+static atomic_int s_sess_out_tok;
+static atomic_int s_sess_total_tok;
+
 /* Mirror an ESP_LOGI to both serial and the voice diag buffer.
  * voice_diag is a no-op until reset() is called by start, and
  * survives USB disconnect via flush() in stop. */
@@ -562,6 +571,29 @@ static int pc_on_data(esp_peer_data_frame_t *frame, void *ctx) {
         }
     }
 
+    /* Voice cost telemetry (design/18 ph3b): accumulate per-turn token
+     * usage from response.done. One assistant turn per event; infrequent,
+     * so the cJSON parse is cheap (same pattern the tool-call block uses).
+     * Defensive on shape; always deletes. */
+    if (strcmp(type_buf, "response.done") == 0) {
+        atomic_fetch_add(&s_sess_turns, 1);
+        cJSON *uroot = cJSON_Parse(body);
+        if (uroot) {
+            cJSON *resp = cJSON_GetObjectItemCaseSensitive(uroot, "response");
+            cJSON *usage = resp
+                ? cJSON_GetObjectItemCaseSensitive(resp, "usage") : NULL;
+            if (cJSON_IsObject(usage)) {
+                cJSON *it = cJSON_GetObjectItemCaseSensitive(usage, "input_tokens");
+                cJSON *ot = cJSON_GetObjectItemCaseSensitive(usage, "output_tokens");
+                cJSON *tt = cJSON_GetObjectItemCaseSensitive(usage, "total_tokens");
+                if (cJSON_IsNumber(it)) atomic_fetch_add(&s_sess_in_tok, (int)it->valuedouble);
+                if (cJSON_IsNumber(ot)) atomic_fetch_add(&s_sess_out_tok, (int)ot->valuedouble);
+                if (cJSON_IsNumber(tt)) atomic_fetch_add(&s_sess_total_tok, (int)tt->valuedouble);
+            }
+            cJSON_Delete(uroot);
+        }
+    }
+
     /* ── Tool call routing (M9.h) ──
      *
      * Three event types matter:
@@ -980,12 +1012,24 @@ static void worker_task(void *arg) {
 
 /* ─── public API ──────────────────────────────────────────────── */
 
+void voice_peer_get_session_stats(int *turns, int *in_tok,
+                                  int *out_tok, int *total_tok) {
+    if (turns)     *turns     = atomic_load(&s_sess_turns);
+    if (in_tok)    *in_tok    = atomic_load(&s_sess_in_tok);
+    if (out_tok)   *out_tok   = atomic_load(&s_sess_out_tok);
+    if (total_tok) *total_tok = atomic_load(&s_sess_total_tok);
+}
+
 int voice_peer_start(const char *openai_key, const char *instructions,
                      const char *tools_json) {
     if (atomic_load(&s_peer.running)) {
         ESP_LOGW(TAG, "already running");
         return -1;
     }
+    atomic_store(&s_sess_turns, 0);
+    atomic_store(&s_sess_in_tok, 0);
+    atomic_store(&s_sess_out_tok, 0);
+    atomic_store(&s_sess_total_tok, 0);
     if (!openai_key || !*openai_key) {
         ESP_LOGE(TAG, "no openai key");
         return -1;

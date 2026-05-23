@@ -55,6 +55,7 @@
 #include "battery.h"
 #include "sleep_gesture.h"
 #include "voice.h"
+#include "voice/voice_peer.h"   /* voice_peer_get_session_stats (design/18 ph3b) */
 extern "C" {
 #include "voice/voice_diag.h"
 }
@@ -1753,7 +1754,10 @@ extern "C" void app_main(void) {
             } else if (!v_active && voice_sess_start_us != 0) {
                 int dur_s = (int)((esp_timer_get_time() - voice_sess_start_us) / 1000000);
                 voice_sess_start_us = 0;
-                pet_sync_post_voice_session(dur_s, "gpt-realtime", "marin", "ended");
+                int turns = 0, in_tok = 0, out_tok = 0, total_tok = 0;
+                voice_peer_get_session_stats(&turns, &in_tok, &out_tok, &total_tok);
+                pet_sync_post_voice_session(dur_s, "gpt-realtime", "marin",
+                    "ended", turns, in_tok, out_tok, total_tok);
             }
         }
 

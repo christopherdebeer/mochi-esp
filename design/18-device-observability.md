@@ -108,10 +108,15 @@ later refinement.
    voice-session end, `main.cpp` brackets the session off `is_active()`
    transitions and POSTs `/api/device/voice-session` → a
    `realtime_sessions` row (model `gpt-realtime`, voice `marin`, duration,
-   end_reason; `config_snapshot.source="device"`). Zero changes to the
-   WebRTC voice path. **3b** (deferred): per-turn token totals + est cost
-   — needs parsing `response.usage` in the data-channel handler (the
-   delicate, hardware-validation-only bit) and a turn counter.
+   end_reason; `config_snapshot.source="device"`). **3b done** (pending
+   validation): `voice_peer` accumulates `turn_count` + aggregate
+   input/output/total tokens from each `response.done` usage (same
+   cJSON-on-matched-event pattern the tool-call path uses; reset at
+   session start, read at end); `turn_count` lands in the column, the
+   token aggregates in `config_snapshot` (query via
+   `json_extract(config_snapshot,'$.total_tok')`). Remaining: the
+   audio-vs-text token breakdown + est cost (typed columns) — needs the
+   `input_token_details`/`output_token_details` parse.
 4. **Crash detail** — surface the ESP-IDF core-dump summary (panic PC /
    backtrace) on the next boot, beyond the reset reason. **Gated on a
    `coredump` partition** (CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH) — a

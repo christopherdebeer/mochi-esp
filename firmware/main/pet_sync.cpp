@@ -319,20 +319,25 @@ void pet_sync_current_costume(char *id_out, size_t id_cap) {
 }
 
 void pet_sync_post_voice_session(int duration_s, const char *model,
-                                 const char *voice, const char *end_reason) {
+                                 const char *voice, const char *end_reason,
+                                 int turns, int in_tok, int out_tok,
+                                 int total_tok) {
     struct mochi_pair_creds creds;
     if (!pair_creds_load(&creds) || !creds.pet_id[0]) return;
 
     char sid[40];
     snprintf(sid, sizeof(sid), "dev-%08lx%08lx",
         (unsigned long)esp_random(), (unsigned long)esp_random());
-    char body[256];
+    char body[320];
     snprintf(body, sizeof(body),
-        "{\"session_id\":\"%s\",\"duration_s\":%d,\"model\":\"%s\",\"voice\":\"%s\",\"end_reason\":\"%s\"}",
+        "{\"session_id\":\"%s\",\"duration_s\":%d,\"model\":\"%s\",\"voice\":\"%s\","
+        "\"end_reason\":\"%s\",\"turn_count\":%d,\"in_tok\":%d,\"out_tok\":%d,"
+        "\"total_tok\":%d}",
         sid, duration_s,
         model ? model : "gpt-realtime",
         voice ? voice : "marin",
-        end_reason ? end_reason : "ended");
+        end_reason ? end_reason : "ended",
+        turns, in_tok, out_tok, total_tok);
 
     char hdr_pet[96];
     snprintf(hdr_pet, sizeof(hdr_pet), "X-Pet-Id: %s", creds.pet_id);

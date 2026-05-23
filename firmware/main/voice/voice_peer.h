@@ -146,6 +146,12 @@ bool voice_peer_first_event_seen(void);
  */
 void voice_peer_stop(void);
 
+/* Per-session token + turn totals accumulated from response.done usage
+ * (design/18 ph3b). Reset at voice_peer_start; read at session end for
+ * the realtime_sessions row. Any out-pointer may be NULL. */
+void voice_peer_get_session_stats(int *turns, int *in_tok,
+                                  int *out_tok, int *total_tok);
+
 #ifdef __cplusplus
 }
 #endif

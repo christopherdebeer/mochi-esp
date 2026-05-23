@@ -84,7 +84,9 @@ void pet_sync_current_costume(char *id_out, size_t id_cap);
  * Session-level: duration + model/voice/end_reason; per-turn tokens are
  * deferred (ph3b). Best-effort; no-op without pairing. */
 void pet_sync_post_voice_session(int duration_s, const char *model,
-                                 const char *voice, const char *end_reason);
+                                 const char *voice, const char *end_reason,
+                                 int turns, int in_tok, int out_tok,
+                                 int total_tok);
 
 /* Travel to a place by id (design/17): POST /api/places/:id/enter, and on
  * success optimistically set the local location + sheetId so the device's
