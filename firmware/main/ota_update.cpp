@@ -17,6 +17,8 @@
 
 #include "cJSON.h"
 
+#include "device_diag.h"
+
 static const char *TAG = "ota";
 
 /* Boot-to-first-check delay. WiFi + sprite + pairing all settle in
@@ -184,9 +186,12 @@ bool perform_update(const char *bin_url) {
     esp_err_t err = esp_https_ota(&ota_cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_https_ota failed: %s", esp_err_to_name(err));
+        device_diag_eventf(DIAG_ERROR, "ota", NULL,
+            "https_ota failed: %s", esp_err_to_name(err));
         return false;
     }
     ESP_LOGI(TAG, "OTA image written + activated");
+    device_diag_event(DIAG_INFO, "ota", "image staged", NULL);
     return true;
 }
 
@@ -234,10 +239,14 @@ void ota_task(void *) {
         if (cmp >= 0) {
             ESP_LOGI(TAG, "no upgrade: running=%s remote=%s (cmp=%d); sleeping",
                 running, remote_version, cmp);
+            device_diag_eventf(DIAG_INFO, "ota", NULL,
+                "up to date %s", running);
             vTaskDelay(pdMS_TO_TICKS(OTA_CHECK_INTERVAL_MS));
             continue;
         }
         ESP_LOGI(TAG, "update available: %s → %s", running, remote_version);
+        device_diag_eventf(DIAG_INFO, "ota", NULL,
+            "update %s -> %s", running, remote_version);
 
         if (perform_update(bin_url)) {
             ESP_LOGI(TAG, "update staged; signalling main to reboot at idle");

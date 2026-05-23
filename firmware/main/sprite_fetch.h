@@ -20,9 +20,24 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 bool sprite_fetch(const char *url, uint8_t *out, size_t expected_len,
                   uint32_t *elapsed_ms);
+
+/*
+ * Variable-length GET. Fetches up to max_bytes into `out` and reports
+ * the actual body length via *out_size. Returns false on transport
+ * error, non-200, empty body, or a body that exceeds max_bytes.
+ * Used by the pack cache (pack_cache.cpp) where the MPK1 size isn't
+ * known ahead of time.
+ */
+bool sprite_fetch_blob(const char *url, uint8_t *out, size_t max_bytes,
+                       size_t *out_size, uint32_t *elapsed_ms);
 
 /*
  * Variant that fetches /devsprite/cell/<sheet>/<cell> responses.
@@ -60,3 +75,7 @@ bool sprite_fetch_cell(const char *url,
  * locally-stored bytes are still valid.
  */
 bool sprite_fetch_head_etag(const char *url, char *out, size_t out_cap);
+
+#ifdef __cplusplus
+}
+#endif

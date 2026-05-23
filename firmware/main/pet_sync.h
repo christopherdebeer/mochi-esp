@@ -67,6 +67,34 @@ bool pet_sync_get_snapshot(pet_t *out_pet);
  * the authoritative server value. */
 void pet_sync_touch(int64_t at_ms);
 
+/* Current location (place id) + its resolved device sheetId, from the
+ * latest /api/state. Both NUL-terminated; empty strings before the
+ * first successful pull or if the pet has no location. The device
+ * renders pets.location: "home" → the bundle, else the place's pack
+ * at device geometry. See design/17. */
+void pet_sync_current_location(char *id_out, size_t id_cap,
+                               char *sheet_out, size_t sheet_cap);
+
+/* Current costume id from the latest /api/state ("" = base species).
+ * The device renders the pet from costume-<petId>-<costumeId>-v1 when
+ * set, else the embedded/pet-v1 base. See design/17. */
+void pet_sync_current_costume(char *id_out, size_t id_cap);
+
+/* Post a realtime_sessions row on voice session end (design/18 ph3).
+ * Session-level: duration + model/voice/end_reason; per-turn tokens are
+ * deferred (ph3b). Best-effort; no-op without pairing. */
+void pet_sync_post_voice_session(int duration_s, const char *model,
+                                 const char *voice, const char *end_reason,
+                                 int turns, int in_tok, int out_tok,
+                                 int total_tok);
+
+/* Travel to a place by id (design/17): POST /api/places/:id/enter, and on
+ * success optimistically set the local location + sheetId so the device's
+ * location-follow render swaps to it on the next tick. Returns true on a
+ * successful enter. The device→substrate travel write behind a tapped
+ * nav_place zone. */
+bool pet_sync_enter_place(const char *place_id);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif

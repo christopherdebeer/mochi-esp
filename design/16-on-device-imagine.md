@@ -1,10 +1,20 @@
-# 15 — on-device imagine (sketch)
+# 16 — on-device imagine (sketch)
 
-**Status:** sketch, 2026-05-22. Pre-implementation. Companion firmware
-skeleton lands in `firmware/main/imagine.{h,c}` so the moving pieces
-have a home and can be filled in piece-by-piece. Server side is
-mostly already there (the val.run dashboard does the same orchestration
-from the browser today).
+**Status:** v0 implemented, 2026-05-22. **Server half landed + verified
+live** (see "Server changes — as built"). **Firmware pipeline landed**
+(`imagine.c` fleshed out from scaffold; builds clean idf v5.3, shipped in
+release `v0.0.17`) — pending on-device validation (needs hardware + BYO
+key + a real generation spend). One polish item remains: the
+re-render-on-DONE wire in `main.cpp` (step 7 below).
+
+> **Update 2026-05-22 — reconciliation.** The first pass of this doc
+> assumed the imagine flow lived in `backend/devsprite-dashboard.ts` and
+> generated at 1024×1536. Both wrong. The real flow is
+> `frontend/places-client.ts` `generatePlace()`, and it generates at
+> **1504×720** (2× the canonical 752×360 day/night scene sheet). There
+> is **no per-place guide builder** — every place reuses the canonical
+> `scene-v1` grid guide, rasterised client-side. `GET /api/places/:id`
+> never existed. The sections below are corrected to the as-built code.
 
 **Predecessors:** [05](./05-sprite-format.md) (the cell wire format
 that bundled and generated cells share), [06](./06-scene-contracts.md)
@@ -192,48 +202,51 @@ A single worker task handles one request at a time (bounded resources;
 one OpenAI call costs ~25 s and ~600 KB of PSRAM staging — we don't
 want to overlap them).
 
-The pipeline:
+The pipeline (as-built server contract):
 
-1. **Queue** — POST `/api/places/queue` with `seed_name` /
-   `seed_vibe` / `from_place_id`. val.run replies with
-   `{ ok: true, place_id, gen_w, gen_h, exemplar_sheet_id,
-   prompt }` — the orchestration metadata it would otherwise hand
-   to its dashboard.
+1. **Queue** — POST `/api/places/queue` (`X-Pet-Id` header) with
+   `seedName` / `seedVibe` / optional `fromPlaceId`. Replies
+   `{ ok, placeId }`.
 
-2. **Fetch guide** — `GET /api/places/:id/guide.png`. Tiny PNG
-   (the cell-layout overlay for OpenAI). Need a new server
-   endpoint that exposes what `buildGuidePng()` returns in the
-   dashboard today.
+2. **Orchestration** — `GET /api/places/:id/orchestration`. One call
+   returns everything: `prompt` (server builds the versioned style
+   preamble — firmware never hardcodes it), `gen_w`/`gen_h`
+   (1504×720), `exemplar_sheet_id`, `sheet_id`, and the relative
+   URLs (`guide_url`, `exemplar_url`, `upload_url`, `pack_url`,
+   `ready_url`, `failed_url`). The device prefixes its
+   `mochi.val.run` base and follows them — no URL construction in C.
 
-3. **Fetch exemplar** — `GET /sheets/:exemplar/source.png`.
-   Larger (~80 KB) but already a public endpoint.
+3. **Fetch references** — GET `guide_url`
+   (`/sheets/scene-v1/guide.png`, ~12 KB, server-rasterised) and
+   `exemplar_url` (`/sheets/<exemplar>/source.png`, ~80 KB) into
+   PSRAM.
 
 4. **Generate** — multipart POST to
    `https://api.openai.com/v1/images/edits` with `model=gpt-image-2`,
-   `image[]=guide.png`, `image[]=exemplar.png`, `prompt`, `n=1`,
-   `size=GEN_WxGEN_H`, `quality=low`, BYO key in
-   `Authorization`. Response: `{ data: [{ b64_json }] }`.
-   Decode the base64 into a PSRAM buffer.
+   `image[]=guide.png` (first), `image[]=exemplar.png` (second),
+   `prompt`, `n=1`, `size=1504x720`, `quality=low`, BYO key in
+   `Authorization: Bearer`. Response: `{ data: [{ b64_json }] }`.
+   Decode the base64 into a PSRAM buffer (~600 KB).
 
-5. **Upload** — POST `/sheets/scene-dyn-:place_id-v1/png` with
-   raw PNG bytes (val.run accepts `Content-Type: image/png` directly,
-   no need for the JSON wrapper the dashboard uses).
+5. **Upload** — POST `upload_url` (`/sheets/<sheet_id>/png`) with
+   `Content-Type: image/png` and the raw decoded PNG bytes. The val
+   stores `:source`, derives, and re-ETags.
 
-6. **Mark ready** — POST `/api/places/:id/ready`. val.run flips the
-   row, runs extraction, builds cells.
+6. **Mark ready** — POST `ready_url`. The val flips the row to ready.
 
-7. **Fetch pack** — `GET /api/places/:id/pack.mpk`. New server
-   endpoint that returns the assembled MPK1 binary (one cell per
-   sprite slot). Device writes to littlefs at
-   `/littlefs/imagined/<place_id>.mpk`.
+7. **Fetch pack** — GET `pack_url`
+   (`/devsprite/pack/<sheet_id>`). The val crops the day/night cells
+   server-side and returns the assembled MPK1. This is the **same
+   route `pack_cache` already understands**, so the existing
+   boot-sync cache machinery (design/15) handles fetch + validate +
+   persist; no new on-device download path.
 
 8. **Swap source** — `scene_pack_load_path(littlefs_path)` (new
-   accessor) opens the on-disk pack and replaces the embedded one
-   for this device. Re-render.
+   accessor) opens the on-disk pack and replaces the active source.
+   Re-render.
 
-9. **Cleanup** — failure at any point POSTs
-   `/api/places/:id/failed` with a short reason (mirrors the
-   dashboard).
+9. **Cleanup** — failure at any point POSTs `failed_url` with a
+   short reason so the row goes terminal.
 
 The first four steps are network-heavy; the rest are local. The model
 should hold off on speaking again until step 4 starts; the existing
@@ -264,23 +277,46 @@ overlap.** Either:
 
 Sketch picks the first.
 
-## Server changes (val.run)
+## Server changes (val.run) — as built
 
-Three new endpoints, all small:
+Landed in `c15r/mochi` and verified live (2026-05-22). The reused
+endpoints already existed; the three additions are the device's hooks.
 
+**Reused as-is:**
 ```
-POST /api/places/queue           (already exists — see backend/api.ts:964)
-POST /api/places/:id/ready       (already exists — backend/api.ts:1026)
-POST /api/places/:id/failed      (already exists — backend/api.ts:1055)
-
-GET  /api/places/:id/guide.png   NEW — what buildGuidePng() returns in the dashboard
-GET  /api/places/:id/orchestration  NEW — { gen_w, gen_h, prompt, exemplar_sheet_id }
-GET  /api/places/:id/pack.mpk    NEW — assembled MPK1 from the extracted cells
+POST /api/places/queue           seedName/seedVibe/origin → { ok, placeId }
+POST /api/places/:id/ready       flips pending → ready, runs extraction
+POST /api/places/:id/failed      { reason } → terminal
+POST /sheets/:id/png             raw image/png OR { base64 } → stores + derives
+GET  /sheets/:id/source.png      the exemplar style anchor
 ```
 
-The dashboard's flow already knows how to compute every byte these
-endpoints would return; it's a refactor — pulling browser-side glue
-into shared backend functions — not new logic.
+**Added (this work):**
+```
+GET /api/places/:id/orchestration   backend/places-device.ts (NEW module,
+    mounted /api). Everything the firmware needs in one shot, computed
+    server-side so the device stays dumb:
+      { ok, place_id, sheet_id, status, gen_w:1504, gen_h:720,
+        prompt,                ← buildPlacePrompt (versioned style preamble)
+        style_version, exemplar_sheet_id,
+        guide_url, exemplar_url, upload_url, pack_url, ready_url, failed_url }
+
+GET /sheets/:id/guide.png           backend/sheets.ts. Server-side SVG→PNG
+    of the grid-only guide via @resvg/resvg-wasm, rendered at scale×
+    (default 2× → scene-v1 752×360 ⇒ 1504×720) on a #F5F0E6 paper field.
+    Replaces the browser's <canvas> rasterise; the device can't do that.
+
+GET /devsprite/pack/:sheet          UNCHANGED route, but devsprite.ts's
+    effectiveTemplate now resolves scene-dyn place sheets (it only knew
+    static + user sheets before), so the pack/cell routes serve a
+    generated place's day/night cells. The firmware fetches the MPK1
+    from here (pack_cache already understands /devsprite/pack/<sheet>).
+```
+
+So the device never sees `buildPlacePrompt`, the style version, or the
+guide geometry — it asks `/orchestration` and follows the URLs. The
+key-off-server invariant holds: only the generated PNG crosses to the
+val (via `upload_url`); the OpenAI key stays on the device.
 
 ## Network etiquette
 
@@ -311,25 +347,36 @@ already enforces a daily budget (`day_cap` reason in
 - **Pack fetch fails.** As above; pack is on disk server-side,
   retry-friendly.
 
-## v0 scope (what I'd build first)
+## v0 scope — progress
 
-1. Add the three voice tool specs to val.run's `voice-tools-spec-route.ts`.
-2. Add `imagine_place` handler in `voice-tools.ts` that just calls
-   `queuePlaceBirth` and returns the orchestration metadata.
-3. Add the three new `GET` endpoints (`guide.png`, `orchestration`,
-   `pack.mpk`).
-4. Skeleton `firmware/main/imagine.{h,c}` with `imagine_start()`
-   logging each phase but not actually fetching anything (lets us
-   wire the voice-tool path end-to-end before bringing up TLS to
-   api.openai.com a second time).
-5. Fill in step 4 (real OpenAI multipart). This is the load-bearing
-   bit; the rest is plumbing.
-6. Fill in steps 5–8 (upload, ready, pack download, swap).
-7. UX: a "thinking" expression (already exists as a sprite) +
-   bubble text that updates with phase ("painting…", "almost…").
+- [x] **`imagine_place` voice-tool spec** — in `shared/voice-tools-spec.ts`
+  (`buildVoiceToolSpecs`), served per-pet via `/api/voice/tools`. Carries
+  `name` / `vibe` / optional `revising`.
+- [x] **On-device dispatch** — `voice/voice_tools.c` intercepts
+  `imagine_place` and calls `imagine_start()` (effect is on-device, not a
+  val.run round-trip).
+- [x] **Server endpoints** — `/api/places/:id/orchestration`,
+  `/sheets/:id/guide.png` (resvg-wasm), and dynamic-place resolution in
+  `/devsprite/pack/:sheet`. Live + verified. (The original sketch's
+  `pack.mpk` endpoint was unnecessary — the existing pack route serves it
+  once `effectiveTemplate` resolves place sheets.)
+- [x] **Firmware skeleton** — `imagine.{h,c}` phase machine + worker.
+- [x] **OpenAI multipart generate** — `imagine.c` `openai_edit()`:
+  multipart body in PSRAM, BYO-key Bearer auth, b64 extracted by scan +
+  mbedtls (no cJSON on the ~900 KB body). The load-bearing step.
+- [x] **Upload / ready / pack-fetch / swap** — `upload_png()`, ready POST,
+  `sprite_fetch_blob` of the MPK1, `scene_pack_load_bytes()`.
+- [ ] **UX polish** — re-render the panel the moment `imagine_phase()`
+  hits DONE (and surface phase text — "painting…", "almost…" — via the
+  thought bubble). Today the swap lands but paints on the next render
+  tick/tap. The phase enum + accessors are already exposed for this.
+- [ ] **On-device validation** — flash, trigger via voice, confirm the
+  round-trip and the visible scene swap. Owner: device holder.
 
-Steps 1–4 are independently shippable as a no-op feature; steps 5–6
-are the meat; step 7 is polish.
+Not in v0 (deferred): cross-reboot persistence of the active imagined
+place (in-session swap only today), and `imagine_costume` (scene path
+first; the costume flow exists server-side but the device doesn't render
+costume sprites yet).
 
 ## Open questions
 

@@ -1,6 +1,12 @@
 # 14 — MPK1 edges + per-zone actions (sketch)
 
-**Status:** sketch, 2026-05-22. Pre-implementation. Triggered by the
+**Status:** sketch, 2026-05-22. Update 2026-05-22: the `format=1` reader
+(`mochi_pack.h` — format guard + entry-offset directory +
+`mpk_zone_count`/`mpk_zone_get`/`mpk_zone_hit` + talk_seed label table),
+the val producer (`c15r/mochi-device` `packMpkV1`), and host + validator
+conformance have all landed and pass. SPRITE·FORGE authoring of zones and
+consumer rewiring (deleting the name→action `strcmp` switch) remain.
+Triggered by the
 first real consumer of an MPK1 pack landing
 ([13-build-time-asset-packs.md](./13-build-time-asset-packs.md)) and
 hitting the obvious next gap: zone names alone don't carry intent.
@@ -108,7 +114,21 @@ Start with five and reserve the rest:
 | 2             | `nav_scene`       | absolute scene index (`u8`, packs cap at 256)    |
 | 3             | `nav_relative`    | signed delta (`i8`, e.g. +1 for `door`)          |
 | 4             | `talk_seed`       | (see "labels" — `label_idx` points to the seed)  |
-| 5..255        | reserved          |                                                  |
+| 5             | `nav_place`       | (see "labels" — `label_idx` points to a place id)|
+| 6..255        | reserved          |                                                  |
+
+### `nav_place` — travel between substrate places (design/17)
+
+`nav_relative` / `nav_scene` navigate *within a pack* (the bundle's 16
+cells). `nav_place` is the cross-place jump: a tappable zone whose target
+is a **place id** in the per-pet `places` graph (`"kitchen"`, `"home"`, an
+imagined `scene-dyn-…` place's id). Because place ids are variable-length
+strings (and a dynamic place's id is per-pet), the target rides the same
+pack-global **label table** as `talk_seed` — `label_idx` points at the
+place id; `action_data` is unused. The device resolves the id → `sheetId`
+from its cached `places[]` (from `/api/state`), swaps the scene at device
+geometry, and `POST`s `/api/places/:id/enter` so substrate follows
+(`pets.location`). This is the non-voice travel path; see design/17.
 
 Reasons for the shape:
 

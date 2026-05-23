@@ -5,7 +5,7 @@
  * the OpenAI image-edit endpoint paints the sheet using the user's
  * BYO key (kept on-device), val.run extracts the cells, the device
  * downloads the resulting .mpk pack and swaps it in as the live
- * scene source. See design/15-on-device-imagine.md for the full
+ * scene source. See design/16-on-device-imagine.md for the full
  * walk-through.
  *
  * v0 scope: scaffolding + phase tracking. The OpenAI multipart POST

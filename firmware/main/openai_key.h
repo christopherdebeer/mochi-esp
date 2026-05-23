@@ -13,6 +13,11 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* OpenAI keys today: 'sk-' (3) + project segment + '-' + ~150 chars
  * of opaque token. Max observed ~190 chars; 256 is comfortable. */
@@ -21,3 +26,7 @@
 bool openai_key_load(char *out, size_t out_len);
 bool openai_key_save(const char *key);
 bool openai_key_clear(void);
+
+#ifdef __cplusplus
+}
+#endif

@@ -55,6 +55,7 @@
 #include "battery.h"
 #include "sleep_gesture.h"
 #include "voice.h"
+#include "voice/voice_peer.h"   /* voice_peer_get_session_stats (design/18 ph3b) */
 extern "C" {
 #include "voice/voice_diag.h"
 }
@@ -74,6 +75,7 @@ extern "C" {
 #include "imagine.h"
 }
 #include "pet_sync.h"
+#include "device_diag.h"
 
 /*
  * Endpoints for the on-device compositor. The scene is fetched once
@@ -107,7 +109,21 @@ extern "C" {
 static constexpr size_t SCENE_W = 200;
 static constexpr size_t SCENE_H = 200;
 static constexpr size_t SCENE_BYTES = (SCENE_W / 8) * SCENE_H;  /* 5000 */
+
+/* Scene-navigation e-ink refresh policy (design/17). A scene swap is a
+ * whole-screen change, so a partial refresh leaves residue from the
+ * previous scene; a full refresh is clean but ~1 s and flashes. We use
+ * a hybrid: partial on each navigate (fast), with a clean full refresh
+ * every Nth to clear the ghosting partial accumulates. Tune against the
+ * panel's ghosting tolerance — 1 = always full (pre-design/17 behaviour). */
+#define SCENE_NAV_FULL_EVERY 4
 #define MOCHI_PET_CELL_URL_BASE "https://mochi.val.run/devsprite/cell/pet-v1/"
+
+/* Travel (design/17): a place's device pack fetched into PSRAM and held
+ * live (scene_pack points into it). One reused buffer — travel is
+ * sequential and fetch→swap→blit is atomic on the render thread. */
+#define TRAVEL_PACK_BYTES (320u * 1024u)
+#define MOCHI_BASE_URL    "https://mochi.val.run"
 
 /* OTA — manifest is uploaded as a release asset by the GitHub
  * Actions workflow on every tag push. The `/releases/latest/download/`
@@ -230,9 +246,8 @@ static int64_t            s_thought_suppress_until_ms = 0;
  * web side's TRANSIENT_FOR_KIND map; "slept" doesn't have a
  * transient sprite there, so we use "sleeping" here to give the kid
  * visible feedback while the substrate round-trip lands. */
-static const char *thought_action_to_expr(const pet_thought_t *t) {
-    if (!t || t->action_kind != THOUGHT_ACTION_CARE_EVENT) return nullptr;
-    switch (t->action_event) {
+static const char *event_kind_to_expr(event_kind_t k) {
+    switch (k) {
         case EVENT_SLEPT:     return "sleeping";
         case EVENT_FED:       return "eating";
         case EVENT_PLAYED:    return "excited";
@@ -240,8 +255,14 @@ static const char *thought_action_to_expr(const pet_thought_t *t) {
         case EVENT_CHEERED:   return "cheerful_wave";
         case EVENT_HUGGED:    return "blushing";
         case EVENT_WOKE:      return "waking_up";
+        case EVENT_TAPPED:    return "curious";
         default:              return nullptr;
     }
+}
+
+static const char *thought_action_to_expr(const pet_thought_t *t) {
+    if (!t || t->action_kind != THOUGHT_ACTION_CARE_EVENT) return nullptr;
+    return event_kind_to_expr(t->action_event);
 }
 
 /* Wall-clock ms since epoch — what the server uses for its
@@ -370,6 +391,11 @@ static void peripheral_rails_on(void) {
 extern "C" void app_main(void) {
     ESP_LOGI(TAG, "—— mochi M3: boot ——");
     log_chip_info();
+
+    /* Over-the-air diagnostics (design/18): captures the boot record
+     * (reset reason / heap) up front; flushed to substrate once WiFi +
+     * pairing are up so a field device is debuggable without serial. */
+    device_diag_init();
 
     led_init();
     boot_button_init();
@@ -508,6 +534,14 @@ extern "C" void app_main(void) {
     }
 
     ESP_LOGI(TAG, "online; IP=%s, joined='%s'", ip_str, joined_ssid);
+    {
+        char ctx[120];
+        snprintf(ctx, sizeof(ctx), "{\"ssid\":\"%s\",\"ip\":\"%s\"}",
+            joined_ssid, ip_str);
+        device_diag_event(DIAG_INFO, "wifi", "joined", ctx);
+    }
+    /* First flush: lands the boot record + wifi result early. */
+    device_diag_flush();
 
     /*
      * OTA bookkeeping. If this boot is the first one after an OTA
@@ -743,6 +777,8 @@ extern "C" void app_main(void) {
         epd->EPD_DisplayPart();
 
         ESP_LOGI(TAG, "pairing complete; rebooting to clean post-pair boot");
+        device_diag_event(DIAG_INFO, "pair", "paired", nullptr);
+        device_diag_flush();   /* push before the post-pair reboot */
         vTaskDelay(pdMS_TO_TICKS(1500));
         esp_restart();
     }
@@ -772,6 +808,9 @@ extern "C" void app_main(void) {
      * remains full-panel size. */
     uint8_t *scene_fb  = (uint8_t *)heap_caps_malloc(SCENE_BYTES, MALLOC_CAP_SPIRAM);
     uint8_t *composite = (uint8_t *)heap_caps_malloc(FB_LEN, MALLOC_CAP_SPIRAM);
+    /* Travel destination pack (design/17). Non-fatal if it fails — the
+     * device just can't follow pets.location to non-home places. */
+    uint8_t *travel_pack = (uint8_t *)heap_caps_malloc(TRAVEL_PACK_BYTES, MALLOC_CAP_SPIRAM);
     /* Pet cell uses the two-plane format: ink (line work) + mask
      * (silhouette). Both same size; allocated separately so we can
      * pass them to blit_two_plane without packing. */
@@ -840,7 +879,7 @@ extern "C" void app_main(void) {
     }
 
     /* On-device scene generation pipeline. Idle until a voice tool
-     * call (`imagine_place`) lands; see design/15-on-device-imagine.md. */
+     * call (`imagine_place`) lands; see design/16-on-device-imagine.md. */
     if (!imagine_init()) {
         ESP_LOGW(TAG, "imagine pipeline unavailable; voice "
                       "imagine_place tool will refuse");
@@ -1089,9 +1128,31 @@ extern "C" void app_main(void) {
          * expressions the pack doesn't carry, and for the
          * pet_pack-unavailable case.
          */
+        /* Pet sheet selection (design/17): a worn costume swaps the pet's
+         * cells to costume-<petId>-<costumeId>-v1 (same 96×96 pet
+         * geometry); null = base species. The base path is unchanged
+         * (embedded pack → cache → pet-v1 fetch). The costume path skips
+         * the embedded pack (it only holds base cells) and keys the cache
+         * + fetch on the costume sheet. Dormant while the wardrobe is
+         * empty (current_costume_id == ""). */
+        char pet_sheet[120] = "pet-v1";
+        bool costumed = false;
+        {
+            char costume[40];
+            pet_sync_current_costume(costume, sizeof(costume));
+            if (costume[0]) {
+                struct mochi_pair_creds pc;
+                if (pair_creds_load(&pc) && pc.pet_id[0]) {
+                    snprintf(pet_sheet, sizeof(pet_sheet),
+                        "costume-%s-%s-v1", pc.pet_id, costume);
+                    costumed = true;
+                }
+            }
+        }
+
         const char *cell_source = nullptr;
         uint32_t ms = 0;
-        {
+        if (!costumed) {
             uint16_t pw = 0, ph = 0;
             if (pet_pack_load(expr, pet_ink, pet_mask,
                               PET_CELL_BYTES, &pw, &ph)) {
@@ -1113,22 +1174,26 @@ extern "C" void app_main(void) {
             size_t got_ink = 0, got_mask = 0;
             bool from_cache =
                 cache_ok &&
-                sprite_cache::load("pet-v1", ink_suffix,
+                sprite_cache::load(pet_sheet, ink_suffix,
                     pet_ink, PET_CELL_BYTES, &got_ink) &&
                 got_ink == PET_CELL_BYTES &&
-                sprite_cache::load("pet-v1", mask_suffix,
+                sprite_cache::load(pet_sheet, mask_suffix,
                     pet_mask, PET_CELL_BYTES, &got_mask) &&
                 got_mask == PET_CELL_BYTES;
             if (from_cache) cell_source = "cache";
         }
 
         if (!cell_source) {
-            char url[160];
-            snprintf(url, sizeof(url), "%s%s", MOCHI_PET_CELL_URL_BASE, expr);
+            char url[224];
+            snprintf(url, sizeof(url),
+                "https://mochi.val.run/devsprite/cell/%s/%s", pet_sheet, expr);
             uint16_t w = 0, h = 0;
             if (!sprite_fetch_cell(url, pet_ink, pet_mask, PET_CELL_BYTES,
                                    &w, &h, &ms)) {
-                ESP_LOGW(TAG, "pet cell fetch failed for '%s'", expr);
+                ESP_LOGW(TAG, "pet cell fetch failed for '%s' (sheet %s)",
+                    expr, pet_sheet);
+                device_diag_eventf(DIAG_WARN, "render", NULL,
+                    "cell fetch fail %s/%s", pet_sheet, expr);
                 return false;
             }
             if (w != PET_CELL_W || h != PET_CELL_H) {
@@ -1137,8 +1202,8 @@ extern "C" void app_main(void) {
                 return false;
             }
             if (cache_ok) {
-                sprite_cache::store("pet-v1", ink_suffix,  pet_ink,  PET_CELL_BYTES);
-                sprite_cache::store("pet-v1", mask_suffix, pet_mask, PET_CELL_BYTES);
+                sprite_cache::store(pet_sheet, ink_suffix,  pet_ink,  PET_CELL_BYTES);
+                sprite_cache::store(pet_sheet, mask_suffix, pet_mask, PET_CELL_BYTES);
             }
             cell_source = "fetch";
         }
@@ -1443,6 +1508,21 @@ extern "C" void app_main(void) {
     int64_t last_event_us = 0;
     constexpr int64_t DEBOUNCE_US = 200 * 1000;
 
+    /* Travel state (design/17): the place the device is currently
+     * rendering. Boot rendered the home bundle, so we start at "home".
+     * The loop below follows pets.location and re-renders on change. */
+    char last_location[40] = "home";
+    /* Worn-costume state (design/17): re-render the pet when it changes.
+     * Empty = base species, which is the boot render. */
+    char last_costume[40] = "";
+    /* Diagnostic flush cadence (design/18). */
+    int64_t last_diag_flush_us = esp_timer_get_time();
+    /* Voice session bracket (design/18 ph3): nonzero while a session is
+     * live; the start timestamp for the realtime_sessions row on end. */
+    int64_t voice_sess_start_us = 0;
+    /* Health heartbeat (design/18): first fires shortly after boot. */
+    int64_t last_health_us = 0;
+
     /* Auto-trigger key portal if NVS has no OpenAI key. The user
      * landed here either by skipping the optional key field during
      * provisioning, or by an OTA from a build where it was set on a
@@ -1504,6 +1584,8 @@ extern "C" void app_main(void) {
          * — never returns. */
         if (sleep_gesture::requested()) {
             sleep_gesture::mark_handled();
+            device_diag_event(DIAG_INFO, "sleep", "long-press → sleep", nullptr);
+            device_diag_flush();   /* push before we power down */
             render_asleep();
             sleep_gesture::commit_sleep();
         }
@@ -1562,6 +1644,139 @@ extern "C" void app_main(void) {
             voice::stop_session();
             render_with_expression("neutral", false, nullptr);
             last_voice_phase = voice::Phase::Idle;
+            device_diag_event(DIAG_INFO, "voice", "session end", nullptr);
+            /* Travel responsiveness (design/17): a move_to_location said
+             * during the session only changed pets.location server-side.
+             * Pull once now so the travel block below renders the new
+             * place this tick, instead of waiting for the next tap or the
+             * 5-min resync. */
+            pet_t ps; pet_event_t pe[4]; size_t pn = 0;
+            pet_sync_pull_now(&ps, pe, 4, &pn);
+        }
+
+        /* Travel (design/17): follow pets.location. pet_sync refreshes it
+         * on every pull/mutate, so a tap or the periodic resync picks up
+         * a voice move_to_location / idle drift / travel-to-an-imagined-
+         * place. On change we swap the device scene: "home" restores the
+         * embedded bundle, any other place renders its server pack at
+         * device geometry. Deferred while voice is live (avoid a mid-call
+         * full refresh + a blocking fetch on the render thread); picked up
+         * the tick after the session ends. */
+        if (!voice::is_active()) {
+            char loc[40], lsheet[64];
+            pet_sync_current_location(loc, sizeof(loc), lsheet, sizeof(lsheet));
+            if (loc[0] && strcmp(loc, last_location) != 0) {
+                bool swapped = false;
+                if (strcmp(loc, "home") == 0) {
+                    swapped = scene_pack_load_home();
+                } else if (lsheet[0] && travel_pack) {
+                    char purl[160];
+                    snprintf(purl, sizeof(purl),
+                        "%s/devsprite/pack/%s?cw=%u&ch=%u",
+                        MOCHI_BASE_URL, lsheet,
+                        (unsigned)SCENE_W, (unsigned)SCENE_H);
+                    size_t plen = 0; uint32_t pms = 0;
+                    if (sprite_fetch_blob(purl, travel_pack,
+                            TRAVEL_PACK_BYTES, &plen, &pms)) {
+                        swapped = scene_pack_load_bytes(travel_pack);
+                    } else {
+                        ESP_LOGW(TAG, "travel: pack fetch failed for %s", lsheet);
+                        device_diag_eventf(DIAG_WARN, "travel", NULL,
+                            "pack fetch fail %s", lsheet);
+                    }
+                }
+                if (swapped) {
+                    /* Day/night for 2-cell place packs: pick the cell by
+                     * RTC hour. Meta-link resolution is design/17 phase 4. */
+                    if (scene_pack_count() == 2) {
+                        mochi_datetime dt = {};
+                        bool night = rtc_get(&dt) && (dt.hour < 7 || dt.hour >= 19);
+                        scene_pack_set(night ? 1 : 0);
+                    }
+                    scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H);
+                    render_with_expression("neutral", true, nullptr);
+                    ESP_LOGI(TAG, "traveled → %s", loc);
+                    device_diag_eventf(DIAG_INFO, "travel", NULL,
+                        "to %s (%s)", loc,
+                        (strcmp(loc, "home") == 0) ? "bundle" : lsheet);
+                }
+                /* Record either way so a failed fetch doesn't thrash the
+                 * loop every tick; a later re-travel retries. */
+                snprintf(last_location, sizeof(last_location), "%s", loc);
+            }
+        }
+
+        /* Periodic diagnostic flush (design/18): push buffered records to
+         * substrate every couple of minutes when idle, so a field device
+         * is debuggable without serial. Best-effort; no-op if nothing
+         * buffered or offline. */
+        {
+            int64_t now_us = esp_timer_get_time();
+            if (now_us - last_diag_flush_us > 120LL * 1000 * 1000) {
+                device_diag_flush();
+                last_diag_flush_us = now_us;
+            }
+        }
+
+        /* Health heartbeat (design/18): periodic snapshot of heap / PSRAM /
+         * battery / temp so slow degradation + crashes have context when
+         * you read device_logs. No %f — newlib-nano printf drops it, so
+         * temp is decidegrees C. */
+        {
+            int64_t now_us = esp_timer_get_time();
+            if (now_us - last_health_us > 300LL * 1000 * 1000) {
+                last_health_us = now_us;
+                uint16_t mv = 0; uint8_t pct = 0;
+                battery_read(&mv, &pct);
+                float t = 0.0f, rh = 0.0f;
+                shtc3_read(&t, &rh);
+                char ctx[200];
+                snprintf(ctx, sizeof(ctx),
+                    "{\"heap\":%u,\"heap_min\":%u,\"psram\":%u,\"batt_mv\":%u,"
+                    "\"batt_pct\":%u,\"temp_dc\":%d,\"rh\":%d,\"up_s\":%lld}",
+                    (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                    (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                    (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                    (unsigned)mv, (unsigned)pct,
+                    (int)(t * 10.0f), (int)rh,
+                    (long long)(now_us / 1000000));
+                device_diag_event(DIAG_INFO, "health", "snapshot", ctx);
+                if (pct > 0 && pct < 15) {
+                    device_diag_eventf(DIAG_WARN, "battery", ctx,
+                        "low %u%%", (unsigned)pct);
+                }
+            }
+        }
+
+        /* Voice session telemetry (design/18 ph3): bracket the session
+         * from is_active() transitions (covers every stop path) and POST
+         * a realtime_sessions row on end. Duration + end_reason only;
+         * per-turn tokens are ph3b (needs response.usage parsing). */
+        {
+            bool v_active = voice::is_active();
+            if (v_active && voice_sess_start_us == 0) {
+                voice_sess_start_us = esp_timer_get_time();
+            } else if (!v_active && voice_sess_start_us != 0) {
+                int dur_s = (int)((esp_timer_get_time() - voice_sess_start_us) / 1000000);
+                voice_sess_start_us = 0;
+                int turns = 0, in_tok = 0, out_tok = 0, total_tok = 0;
+                voice_peer_get_session_stats(&turns, &in_tok, &out_tok, &total_tok);
+                pet_sync_post_voice_session(dur_s, "gpt-realtime", "marin",
+                    "ended", turns, in_tok, out_tok, total_tok);
+            }
+        }
+
+        /* Costume follow (design/17): re-render the pet when the worn
+         * costume changes (wear / take-off via voice). render_with_
+         * expression picks the costume sheet automatically. Deferred
+         * while voice is live, like travel. */
+        if (!voice::is_active()) {
+            char cur_costume[40];
+            pet_sync_current_costume(cur_costume, sizeof(cur_costume));
+            if (strcmp(cur_costume, last_costume) != 0) {
+                snprintf(last_costume, sizeof(last_costume), "%s", cur_costume);
+                render_with_expression("neutral", true, nullptr);
+            }
         }
 
         /* Phase-driven expression update. Runs on every loop tick
@@ -1658,131 +1873,195 @@ extern "C" void app_main(void) {
             (z == Zone::Thought && s_thought_active) ? &s_active_thought : nullptr;
 
         /* Scene-pack zone hit-test (MPK1 build-time scene contract,
-         * design/13). Runs BEFORE the corner-quadrant fallback so
-         * an authored zone wins over the coarse zone_to_*. Cell-local
-         * coordinates: panel x → scene x directly, panel y → scene
-         * y after subtracting the status bar. Skipped while a
-         * thought bubble is up (its tap target owns the screen).
+         * design/13/14). The pack itself decides what each tap means
+         * via a typed action payload (event / nav_scene / nav_relative
+         * / talk_seed) — the firmware no longer keeps a name→action
+         * strcmp ladder here. Format=0 packs synthesise the same
+         * payload from the static name table inside scene_pack.c,
+         * so this code path is uniform across formats.
          *
-         * Naming taxonomy carried by SPRITE·FORGE today:
-         *   food                     → EVENT_FED
-         *   heart                    → EVENT_COMFORTED
-         *   ball                     → EVENT_PLAYED
-         *   ornament / light / star  → EVENT_CHEERED
-         *   door / stairs            → next scene (advance +1)
-         *   window / view / plant /
-         *   plants / shelf / box /
-         *   container                → EVENT_TAPPED + talk-seed cue
+         * Skipped while a thought bubble is up (its tap target owns
+         * the screen) or while the tap landed in the status-bar
+         * stripe (no zones up there).
          *
-         * The talk-seed wiring is M11.5-shaped — not done in this
-         * commit. For now unmapped zones still log + persist as
-         * EVENT_TAPPED so their existence is at least observable. */
-        const char *scene_zone_name = nullptr;
-        if (!tapped_thought) {
-            /* Cell is now blitted at panel row 0, so cell-local y
-             * matches panel y directly. Suppress hits in the status
-             * bar area so a tap on the time/battery glyphs doesn't
-             * accidentally fire a zone underneath. */
-            if ((int)ev.y >= STATUS_BAR_H) {
-                (void)scene_pack_zone_at(
-                    (int16_t)ev.x, (int16_t)ev.y, &scene_zone_name);
-            }
-        }
-
-        /* Forgiving snap: if the direct hit-test missed but the tap
-         * is within ZONE_SLOP_PX of an authored zone, treat it as a
-         * hit on that zone. Touch panels are noisy near the bezel
-         * (right-edge taps land at x=199 even when aimed inside),
-         * and authored zone rects don't always cover what reads as
-         * tappable. The pet-body case is checked first below so a
-         * deliberate pet pat near a zone doesn't get snapped away. */
+         * Forgiving snap: ZONE_SLOP_PX widens each rect by 16 px
+         * before we give up and fall through to corner-quadrant
+         * dispatch. The pet-body case is checked first so a pat near
+         * a zone doesn't get hijacked. */
         constexpr int ZONE_SLOP_PX = 16;
         const bool tapped_pet =
             (int)ev.x >= PET_DX && (int)ev.x <  PET_DX + (int)PET_CELL_W &&
             (int)ev.y >= PET_DY && (int)ev.y <  PET_DY + (int)PET_CELL_H;
-        if (!scene_zone_name && !tapped_thought && !tapped_pet &&
-            (int)ev.y >= STATUS_BAR_H) {
-            (void)scene_pack_zone_near(
-                (int16_t)ev.x, (int16_t)ev.y, ZONE_SLOP_PX,
-                &scene_zone_name);
-            if (scene_zone_name) {
-                ESP_LOGI(TAG, "zone snap to '%s' from (%u,%u)",
-                    scene_zone_name, (unsigned)ev.x, (unsigned)ev.y);
-            }
+
+        scene_pack_action_t scene_act = {};
+        bool scene_hit = false;
+        if (!tapped_thought && (int)ev.y >= STATUS_BAR_H) {
+            const int slop = tapped_pet ? 0 : ZONE_SLOP_PX;
+            scene_hit = scene_pack_action_at(
+                (int16_t)ev.x, (int16_t)ev.y, slop, &scene_act);
         }
 
         const char *expr = tapped_thought
             ? thought_action_to_expr(tapped_thought)
             : zone_to_expr(z);
-        ESP_LOGI(TAG, "touch (%u,%u) zone=%u scene_zone=%s expr=%s",
+        ESP_LOGI(TAG, "touch (%u,%u) zone=%u scene_act=%s expr=%s",
             (unsigned)ev.x, (unsigned)ev.y, (unsigned)z,
-            scene_zone_name ? scene_zone_name : "(none)",
+            scene_hit
+                ? (scene_act.kind == MPK_ACTION_NAV_SCENE    ? "nav_scene"
+                 : scene_act.kind == MPK_ACTION_NAV_RELATIVE ? "nav_relative"
+                 : scene_act.kind == MPK_ACTION_TALK_SEED    ? "talk_seed"
+                 : scene_act.kind == MPK_ACTION_EVENT        ? "event"
+                 :                                             "none")
+                : "(none)",
             expr ? expr : "(gutter)");
+
+        /* Scene-navigation actions short-circuit the rest of the touch
+         * pipeline: re-blit the scene cell, refresh, and bail before the
+         * per-tap care pipeline runs. Refresh is hybrid partial/full —
+         * see SCENE_NAV_FULL_EVERY. */
+        if (scene_hit && (scene_act.kind == MPK_ACTION_NAV_RELATIVE ||
+                          scene_act.kind == MPK_ACTION_NAV_SCENE)) {
+            static uint32_t s_nav_n = 0;
+            uint16_t to = (scene_act.kind == MPK_ACTION_NAV_RELATIVE)
+                ? scene_pack_advance(scene_act.data)
+                : scene_pack_set((uint16_t)scene_act.data);
+            bool full = (++s_nav_n % SCENE_NAV_FULL_EVERY) == 0;
+            ESP_LOGI(TAG, "scene nav %s → idx=%u (%s)",
+                scene_act.kind == MPK_ACTION_NAV_RELATIVE ? "rel" : "abs",
+                (unsigned)to, full ? "full" : "partial");
+            scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H);
+            render_with_expression("neutral", full, nullptr);
+            continue;
+        }
+
+        /* nav_place zones — cross-place travel (design/17). The zone's
+         * seed_text is the target place id. We hand it to the substrate
+         * (POST /enter, which also updates our local location); the
+         * travel block at the top of the loop renders it on the next
+         * tick — "home" restores the bundle, any other place fetches its
+         * pack at device geometry. This is the non-voice travel path. */
+        if (scene_hit && scene_act.kind == MPK_ACTION_NAV_PLACE &&
+            scene_act.seed_text && scene_act.seed_len > 0) {
+            char place_id[40] = {0};
+            size_t n = scene_act.seed_len < sizeof(place_id) - 1
+                ? scene_act.seed_len : sizeof(place_id) - 1;
+            memcpy(place_id, scene_act.seed_text, n);
+            ESP_LOGI(TAG, "scene nav_place → %s", place_id);
+            pet_sync_enter_place(place_id);
+            continue;
+        }
+
+        /* talk_seed zones — two paths depending on whether the
+         * voice session is up:
+         *
+         *   voice active:  inject the seed as a user-text message
+         *                  on the data channel. Mochi reads it and
+         *                  speaks back. The intent-router work
+         *                  becomes the model's job.
+         *
+         *   voice idle:    pop a transient thought bubble carrying
+         *                  the seed text (truncated to fit the
+         *                  bubble's ~22-character budget). No care
+         *                  event lands; the bubble just decorates
+         *                  the next render and stays through the
+         *                  THOUGHT_SUPPRESS_MS window so the kid
+         *                  has time to read it.
+         *
+         * The seed pointer is borrowed from the embedded pack and
+         * not NUL-terminated; copy it into a local buffer first. */
+        static char  s_seed_buf[256];
+        static char  s_seed_line1[24];
+        static char  s_seed_line2[24];
+        static pet_thought_t s_seed_thought;
+        const pet_thought_t *seed_thought_ptr = nullptr;
+        if (scene_hit && scene_act.kind == MPK_ACTION_TALK_SEED) {
+            const size_t n = scene_act.seed_len < sizeof(s_seed_buf) - 1
+                ? scene_act.seed_len
+                : sizeof(s_seed_buf) - 1;
+            if (scene_act.seed_text && n > 0) {
+                memcpy(s_seed_buf, scene_act.seed_text, n);
+            }
+            s_seed_buf[n] = '\0';
+            ESP_LOGI(TAG, "talk_seed: '%s' (voice %s)",
+                s_seed_buf, voice::is_active() ? "active" : "idle");
+
+            if (voice::is_active()) {
+                /* Inject as a user message; the model will respond
+                 * via its usual audio + delta path. */
+                voice::send_text(s_seed_buf);
+                expr = "thinking";
+            } else {
+                /* Word-wrap the seed across the two-line bubble.
+                 * Bubble interior is ~92 px = ~11 scale-1 glyphs per
+                 * line. Try to break on a space near col 11; spill
+                 * to line 2; ellipsise overflow. This is intentionally
+                 * naive — talk_seed strings are short evocations
+                 * authored to fit. */
+                const int kPerLine = 11;
+                const int total = (int)strlen(s_seed_buf);
+                int br = (total > kPerLine) ? kPerLine : total;
+                if (total > kPerLine) {
+                    for (int i = kPerLine; i > kPerLine - 5 && i > 0; i--) {
+                        if (s_seed_buf[i] == ' ') { br = i; break; }
+                    }
+                }
+                snprintf(s_seed_line1, sizeof(s_seed_line1),
+                         "%.*s", br, s_seed_buf);
+                int after = br + (s_seed_buf[br] == ' ' ? 1 : 0);
+                int rem = total - after;
+                if (rem <= 0) {
+                    s_seed_line2[0] = '\0';
+                } else if (rem <= kPerLine) {
+                    snprintf(s_seed_line2, sizeof(s_seed_line2),
+                             "%s", s_seed_buf + after);
+                } else {
+                    /* Truncate with a trailing ellipsis (single dot
+                     * to save a column). */
+                    snprintf(s_seed_line2, sizeof(s_seed_line2),
+                             "%.*s.", kPerLine - 1, s_seed_buf + after);
+                }
+                memset(&s_seed_thought, 0, sizeof(s_seed_thought));
+                s_seed_thought.action_kind = THOUGHT_ACTION_NONE;
+                s_seed_thought.line1       = s_seed_line1;
+                s_seed_thought.line2       = s_seed_line2;
+                seed_thought_ptr           = &s_seed_thought;
+                expr = "thinking";
+            }
+        }
 
         /* When the current scene has authored zones, the corner-
          * quadrant fallback is suppressed: a tap that misses every
          * zone (after the snap fallback above) resolves to either
          * "comforted" (tap landed on the pet body — a pat) or
-         * "curious" (empty scene background). tapped_pet was
-         * computed earlier so the snap path could skip pet taps. */
+         * "curious" (empty scene background). */
         const bool zoned = scene_pack_current_has_zones();
-        if (zoned && !scene_zone_name && !tapped_thought) {
+        if (zoned && !scene_hit && !tapped_thought) {
             expr = tapped_pet ? "comforted" : "curious";
         }
 
-        /* If the tap fell inside a named scene zone, route by name
-         * instead of by corner quadrant. Scene navigation
-         * (door/stairs) advances the index, re-blits the scene,
-         * full-refreshes, and skips the rest of the per-tap care
-         * pipeline. */
-        if (scene_zone_name) {
-            if (strcmp(scene_zone_name, "door") == 0 ||
-                strcmp(scene_zone_name, "stairs") == 0) {
-                uint16_t to = scene_pack_advance(+1);
-                ESP_LOGI(TAG, "scene navigate '%s' → idx=%u",
-                    scene_zone_name, (unsigned)to);
-                /* Rebuild scene_fb from the pack and force a full
-                 * render via render_with_expression's neutral pose
-                 * — partial refresh would leave residue from the
-                 * previous scene. */
-                scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H);
-                render_with_expression("neutral", true, nullptr);
-                continue;
-            }
-            /* Care zones — map name → expr/kind so the rest of the
-             * dispatch pipeline behaves as if the user had tapped
-             * the corresponding corner. */
-            if      (strcmp(scene_zone_name, "food") == 0)      expr = "eating";
-            else if (strcmp(scene_zone_name, "heart") == 0)     expr = "comforted";
-            else if (strcmp(scene_zone_name, "ball") == 0)      expr = "excited";
-            else if (strcmp(scene_zone_name, "ornament") == 0 ||
-                     strcmp(scene_zone_name, "light") == 0 ||
-                     strcmp(scene_zone_name, "star") == 0)      expr = "cheerful_wave";
-            else                                                expr = "curious";
+        /* event-kind zones: derive expr from the pack-supplied
+         * event_kind_t. Falls back to "curious" if the kind doesn't
+         * have a registered expression. */
+        if (scene_hit && scene_act.kind == MPK_ACTION_EVENT) {
+            const char *e = event_kind_to_expr((event_kind_t)scene_act.data);
+            expr = e ? e : "curious";
         }
         if (!expr) continue;
 
-        /* M11/M12: persist the touch as an event and refresh the dev
-         * pet's last_interaction_at so the lonely threshold resets.
-         * Then project mood + sprite over the recent slice and log
-         * what we'd render IF M11.5 was wired up (it isn't yet —
-         * the M8.5 corner-icon UI keeps using `expr` directly).
-         *
-         * Kind resolution priority:
+        /* M11/M12: persist the touch as an event. Kind resolution
+         * priority:
          *   1. Thought-bubble taps carry their own action_event.
-         *   2. Scene-zone taps (MPK1) map by name.
+         *   2. Scene-zone EVENT actions read the kind from the pack.
          *   3. Else fall through to the corner-quadrant zone map. */
         event_kind_t kind;
         if (tapped_thought) {
             kind = tapped_thought->action_event;
-        } else if (scene_zone_name) {
-            if      (strcmp(scene_zone_name, "food") == 0)     kind = EVENT_FED;
-            else if (strcmp(scene_zone_name, "heart") == 0)    kind = EVENT_COMFORTED;
-            else if (strcmp(scene_zone_name, "ball") == 0)     kind = EVENT_PLAYED;
-            else if (strcmp(scene_zone_name, "ornament") == 0 ||
-                     strcmp(scene_zone_name, "light") == 0 ||
-                     strcmp(scene_zone_name, "star") == 0)     kind = EVENT_CHEERED;
-            else                                               kind = EVENT_TAPPED;
+        } else if (scene_hit && scene_act.kind == MPK_ACTION_EVENT) {
+            kind = (event_kind_t)scene_act.data;
+        } else if (scene_hit && scene_act.kind == MPK_ACTION_TALK_SEED) {
+            /* talk_seed zones still log a TAPPED event so the M12
+             * engagement projection picks up the interaction. */
+            kind = EVENT_TAPPED;
         } else if (zoned) {
             /* Zoned scene + tap missed all zones. Pet body =
              * comfort (a pat); empty scene = curious tap. */
@@ -1949,8 +2228,17 @@ extern "C" void app_main(void) {
          * on action-tap renders — the kid just acted on it, so the
          * 5 s response hold should be uncluttered. The next
          * render_resting() (after the hold) will recompute the
-         * thought from fresh state. */
-        if (!render_with_expression(expr, false, nullptr)) continue;
+         * thought from fresh state.
+         *
+         * Exception: a talk_seed tap with voice idle hands a
+         * transient bubble (seed_thought_ptr) so the kid can read
+         * what mochi would have heard. Suppression for the next
+         * substrate refresh keeps the SLEEPY bubble from re-firing
+         * over it. */
+        if (!render_with_expression(expr, false, seed_thought_ptr)) continue;
+        if (seed_thought_ptr) {
+            s_thought_suppress_until_ms = now_ms_wall() + THOUGHT_SUPPRESS_MS;
+        }
 
         /* Hold the expression for ~5 s. We block here rather than
          * scheduling a timer so the next touch event sees a quiet

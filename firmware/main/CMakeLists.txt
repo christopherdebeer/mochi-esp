@@ -30,6 +30,8 @@ idf_component_register(
         "battery.cpp"
         "sleep_gesture.cpp"
         "sprite_cache.cpp"
+        "pack_cache.cpp"
+        "device_diag.c"
         "ota_update.cpp"
         "key_portal.cpp"
         "decay.c"
@@ -86,6 +88,7 @@ idf_component_register(
         esp_https_ota
         espressif__esp_peer
         espressif__esp-sr
+        mbedtls
         log
 )
 

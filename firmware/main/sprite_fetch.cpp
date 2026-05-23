@@ -113,6 +113,64 @@ bool sprite_fetch(const char *url, uint8_t *out, size_t expected_len,
 }
 
 /*
+ * Variable-length GET into a caller buffer. Unlike sprite_fetch (which
+ * pins an exact length), this accepts any body up to max_bytes and
+ * reports the actual count via *out_size. Used by the pack cache to
+ * pull an MPK1 whose size we don't know up front (chunked transfer,
+ * no reliable Content-Length). Reuses the same overflow-guarded
+ * fetch_ctx assembly as sprite_fetch.
+ */
+bool sprite_fetch_blob(const char *url, uint8_t *out, size_t max_bytes,
+                       size_t *out_size, uint32_t *elapsed_ms) {
+    if (!url || !out || max_bytes == 0) return false;
+    if (out_size) *out_size = 0;
+
+    fetch_ctx ctx = { out, max_bytes, 0, false };
+
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    cfg.event_handler = on_event;
+    cfg.user_data = &ctx;
+    cfg.timeout_ms = 15000;
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.disable_auto_redirect = false;
+
+    int64_t t0 = esp_timer_get_time();
+    esp_http_client_handle_t cli = esp_http_client_init(&cfg);
+    if (!cli) {
+        ESP_LOGE(TAG, "blob init failed");
+        return false;
+    }
+    esp_err_t err = esp_http_client_perform(cli);
+    int status = esp_http_client_get_status_code(cli);
+    esp_http_client_cleanup(cli);
+
+    int64_t t1 = esp_timer_get_time();
+    if (elapsed_ms) *elapsed_ms = (uint32_t)((t1 - t0) / 1000);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "blob perform failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    if (status != 200) {
+        ESP_LOGE(TAG, "blob HTTP %d", status);
+        return false;
+    }
+    if (ctx.overflowed) {
+        ESP_LOGE(TAG, "blob exceeded max_bytes %u", (unsigned)max_bytes);
+        return false;
+    }
+    if (ctx.written == 0) {
+        ESP_LOGE(TAG, "blob empty body");
+        return false;
+    }
+    if (out_size) *out_size = ctx.written;
+    ESP_LOGI(TAG, "fetched blob %u bytes in %u ms",
+        (unsigned)ctx.written, elapsed_ms ? (unsigned)*elapsed_ms : 0u);
+    return true;
+}
+
+/*
  * /devsprite/cell/ variant. Fetches into a small staging buffer
  * (header + payload), validates header, then memcpys payload into
  * caller's buffer. We use a stack staging buffer sized for the
