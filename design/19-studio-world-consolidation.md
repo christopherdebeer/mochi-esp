@@ -78,12 +78,25 @@ Two concrete defects fall out and gate everything:
   post-process on the *selected sheet's* source art (preset auto-picked
   from category); custom upload (with configurable target dims) stays as
   the ad-hoc mode.
-- **Verified:** all studio files transpile; `scenes-spec.ts` normalises
-  the live kitchen plans post-change; format=1 conformance 57/57; the
-  exemplar `source.png` path is CORS-open. **In-browser smoke tests still
-  pending** (the MCP endpoint tester can't send `application/json`, which
-  the plan POST requires, and can't run a BYO-key gpt-image-2 call): the
-  plan save and a generation run need a 2-minute check in the studio.
+- **Plan-first / generative loop shipped** (P4 core). The keystone reframe:
+  **a sheet's source art is an *output*, not an input** — New Sheet needs no
+  image; authoring a plan declares the place; Generate materialises it.
+  Landed: a **planner** (`draftScenePlan`, client BYO, JSON-mode chat) that
+  drafts zones + intents + gestures + device actions **incl. `nav_place`
+  edges** from a seed; a `✨ draft plan` button in the Plan panel; an
+  **exemplar picker**; the panel order corrected to **Sheet → Plan → Zones
+  → Generate** (zones drive the guide, so they precede generation);
+  **author-without-art** (ZoneCanvas/Sheet tolerate a sourceless sheet);
+  and the **`cellZones` → guide/prompt bridge** so generation steers
+  per-cell. So: 100% generative with manual refinement — every step is an
+  editable draft.
+- **Verified:** all studio files transpile; `scenes-spec.ts` normalises the
+  live kitchen plans + `guide.svg` still renders post-bridge; format=1
+  conformance 57/57; the exemplar `source.png` path is CORS-open.
+  **In-browser smoke tests still pending** — the MCP endpoint tester can't
+  send `application/json` (plan POST) or run BYO-key OpenAI calls (planner
+  + image gen): drafting a plan, saving it, and a generation run each need
+  a check in the studio.
 
 ## The unified model
 
@@ -161,12 +174,12 @@ but-unused, world-building.md) becomes a real, authored adjacency.
 
 One surface, left-to-right, each stage already has a home to harvest:
 
-1. **Plan** — edit the `ScenePlan` for a sheet: zones (rect + role +
+1. **Plan** — author the `ScenePlan` for a sheet: zones (rect + role +
    intent + gesture vocab + `deviceAction`, **incl. nav_place**),
    `petAnchor`, `grammar`, per-cell `cellDirectives` (time-of-day /
-   weather). Manual now; **generative later** (a planner LLM drafts a plan
-   from seed name+vibe+grammar — `scene-plans.ts` already anticipates
-   this). Harvest `devsprite-dashboard.ts`'s existing plan widget.
+   weather). **Drafted by the planner** (`✨ draft plan`, client BYO) from
+   seed name+vibe+grammar, then refined by hand — the sheet needs no art
+   yet; the plan declares the place. (`scene-plans.ts` anticipated this.)
 2. **Generate source image** — `buildGuideSvg(plan)` → PNG; pick an
    exemplar sheet (style anchor); `buildScenePrompt(plan, grammar)`;
    `POST /v1/images/edits` with guide+exemplar, **BYO key in the browser**
@@ -209,9 +222,14 @@ One surface, left-to-right, each stage already has a home to harvest:
   cache-bust refreshes the cell thumbnails after a run. *Still to do:*
   `places`/imagine adopting the plan guide (replace the zoneless `scene-v1`
   guide in `places-device.ts:72`) so born places are zoned by construction.
-- **P4 — world graph + generative planner.** A places/edges view
-  (`nav_place` adjacency, `from_place_id`); planner LLM drafts plans from
-  seed+grammar. Costume zone kinds 6/7 (design/17) land here.
+- **P4 — generative planner + world graph.** ✓ *Planner shipped
+  2026-05-23* (`draftScenePlan`, client BYO; plan-first reorder;
+  author-without-art; `cellZones`→guide bridge; exemplar picker). *Still to
+  do:* auto-wire **reciprocal `nav_place` edges** (door A→B ⇒ door B→A) so
+  drafts build a real graph; a **places/edges view**; the **voice-imagine**
+  path running the planner (so born places are zoned, not single scenes);
+  per-cell multi-room planning (the planner currently drafts one room
+  applied across the selected cells); costume zone kinds 6/7 (design/17).
 
 ### Live-val safety
 
