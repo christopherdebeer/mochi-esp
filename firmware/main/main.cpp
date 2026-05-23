@@ -1681,6 +1681,8 @@ extern "C" void app_main(void) {
                         swapped = scene_pack_load_bytes(travel_pack);
                     } else {
                         ESP_LOGW(TAG, "travel: pack fetch failed for %s", lsheet);
+                        device_diag_eventf(DIAG_WARN, "travel", NULL,
+                            "pack fetch fail %s", lsheet);
                     }
                 }
                 if (swapped) {
@@ -1694,6 +1696,9 @@ extern "C" void app_main(void) {
                     scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H);
                     render_with_expression("neutral", true, nullptr);
                     ESP_LOGI(TAG, "traveled → %s", loc);
+                    device_diag_eventf(DIAG_INFO, "travel", NULL,
+                        "to %s (%s)", loc,
+                        (strcmp(loc, "home") == 0) ? "bundle" : lsheet);
                 }
                 /* Record either way so a failed fetch doesn't thrash the
                  * loop every tick; a later re-travel retries. */
