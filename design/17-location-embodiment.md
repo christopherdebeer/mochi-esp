@@ -190,9 +190,10 @@ visual tuning knob.
 - **Variant meta link.** Generalise day/night (today a 2-cell RTC
   convention) to the non-tappable meta link in the `format=1` trailer —
   extensible to non-binary, non-time conditions.
-- **Travel responsiveness.** Location currently refreshes on pull / mutate
-  (a tap or the periodic resync). A post-voice-session pull would make
-  voice `move_to_location` land promptly without waiting for the next tap.
+- **Travel responsiveness** — *landed* (pending on-device validation).
+  `main.cpp` pulls state once when a voice session ends, so a
+  `move_to_location` said mid-session renders that tick rather than
+  waiting for the next tap / 5-min resync. (Drift + taps already refresh.)
 
 ### Zone actions vs voice tools (audit)
 

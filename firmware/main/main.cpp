@@ -1589,6 +1589,13 @@ extern "C" void app_main(void) {
             voice::stop_session();
             render_with_expression("neutral", false, nullptr);
             last_voice_phase = voice::Phase::Idle;
+            /* Travel responsiveness (design/17): a move_to_location said
+             * during the session only changed pets.location server-side.
+             * Pull once now so the travel block below renders the new
+             * place this tick, instead of waiting for the next tap or the
+             * 5-min resync. */
+            pet_t ps; pet_event_t pe[4]; size_t pn = 0;
+            pet_sync_pull_now(&ps, pe, 4, &pn);
         }
 
         /* Travel (design/17): follow pets.location. pet_sync refreshes it
