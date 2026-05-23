@@ -68,6 +68,17 @@ Two concrete defects fall out and gate everything:
 
 ## Progress (2026-05-23)
 
+- **Planner is now a level designer.** Investigating `test-bundle-a` (forest,
+  pure-branch, 16 cells) showed every cell **byte-identical** (one zone set
+  broadcast to all) and the only exits were `nav_place` to *other* sheets —
+  **no `nav_scene` between the bundle's own cells**. Root cause: the planner
+  never saw the cell list. Now `draftScenePlan` takes the **cell grid**
+  (`/api/sheets` exposes `cols`/`rows`) and returns **per-cell** zones — a
+  distinct room per cell — and wires **intra-level `nav_scene`** edges
+  between grid-adjacent rooms (kind 2; `nav_relative` kind 3 also supported),
+  reserving `nav_place` for leaving to another world. Temperature raised for
+  variety. Re-draft an existing bundle to replace a broadcast plan.
+
 - **Authoring fixes (post-prompt-rewrite).** Three real issues surfaced when
   repurposing an existing sheet: (1) **Generate read the *stored* prompt** so
   unsaved seed/vibe edits were ignored — Generate now **saves the plan first**
