@@ -8,6 +8,7 @@
 
 #include "sprite_fetch.h"
 #include "sprite_cache.h"
+#include "device_diag.h"
 
 static const char *TAG = "pack_cache";
 
@@ -75,6 +76,10 @@ const uint8_t *pack_cache_active(const char *sheet, const uint8_t *embedded) {
     if (!sprite_fetch_head_etag(url, remote, sizeof(remote))) {
         ESP_LOGW(TAG, "'%s' pack ETag probe failed (offline?)", sheet);
         const uint8_t *cached = load_cached(cache_sheet);
+        device_diag_eventf(DIAG_WARN, "pack_cache",
+            cached ? "{\"src\":\"cache\",\"why\":\"offline\"}"
+                   : "{\"src\":\"embedded\",\"why\":\"offline\"}",
+            "%s", sheet);
         if (cached) return cached;
         ESP_LOGW(TAG, "'%s' no cache → embedded baseline", sheet);
         return embedded;
@@ -87,6 +92,8 @@ const uint8_t *pack_cache_active(const char *sheet, const uint8_t *embedded) {
         const uint8_t *cached = load_cached(cache_sheet);
         if (cached) {
             ESP_LOGI(TAG, "'%s' pack ETag unchanged (%s)", sheet, remote);
+            device_diag_eventf(DIAG_INFO, "pack_cache",
+                "{\"src\":\"cache\"}", "%s", sheet);
             return cached;
         }
         ESP_LOGW(TAG, "'%s' ETag matched but cache load failed — refetching",
@@ -110,6 +117,10 @@ const uint8_t *pack_cache_active(const char *sheet, const uint8_t *embedded) {
             sheet, (int)ok, (unsigned)got);
         heap_caps_free(buf);
         const uint8_t *cached = load_cached(cache_sheet);
+        device_diag_eventf(DIAG_WARN, "pack_cache",
+            cached ? "{\"src\":\"cache\",\"why\":\"fetch_invalid\"}"
+                   : "{\"src\":\"embedded\",\"why\":\"fetch_invalid\"}",
+            "%s", sheet);
         return cached ? cached : embedded;
     }
 
@@ -127,5 +138,7 @@ const uint8_t *pack_cache_active(const char *sheet, const uint8_t *embedded) {
     if (shrunk) buf = shrunk;
     ESP_LOGI(TAG, "'%s' pack fetched %u bytes in %u ms (ETag %s)",
         sheet, (unsigned)got, (unsigned)ms, remote);
+    device_diag_eventf(DIAG_INFO, "pack_cache",
+        "{\"src\":\"server\"}", "%s fetched", sheet);
     return buf;
 }

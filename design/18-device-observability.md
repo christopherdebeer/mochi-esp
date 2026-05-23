@@ -95,10 +95,15 @@ later refinement.
 
 ## Phases
 
-1. **Spine** — `device_logs` table + `/api/device/diag` + the
-   `device_diag` firmware module + boot record + flush wiring.
-2. **Instrument** — wifi / pack_cache / imagine / voice / ota emits.
-3. **Voice cost** — `realtime_sessions` row on session end.
+1. **Spine** — *done* (pending on-device validation). `device_logs` table
+   + `/api/device/diag` (verified) + the `device_diag` firmware module +
+   boot record + flush wiring (post-WiFi + every ~2 min).
+2. **Instrument** — *done* (pending validation). Emits at boot, wifi,
+   pack_cache (server/cache/embedded + why), imagine (ready/fail), voice
+   (session end), ota (staged/failed).
+3. **Voice cost** — `realtime_sessions` row on session end (model, voice,
+   duration, turn_count, end_reason). The `voice` diag event is the
+   lightweight stand-in until then.
 4. **Crash detail** — surface the ESP-IDF core-dump summary (panic PC /
    backtrace) on the next boot, beyond the reset reason.
 

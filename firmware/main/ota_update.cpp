@@ -17,6 +17,8 @@
 
 #include "cJSON.h"
 
+#include "device_diag.h"
+
 static const char *TAG = "ota";
 
 /* Boot-to-first-check delay. WiFi + sprite + pairing all settle in
@@ -184,9 +186,12 @@ bool perform_update(const char *bin_url) {
     esp_err_t err = esp_https_ota(&ota_cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_https_ota failed: %s", esp_err_to_name(err));
+        device_diag_eventf(DIAG_ERROR, "ota", NULL,
+            "https_ota failed: %s", esp_err_to_name(err));
         return false;
     }
     ESP_LOGI(TAG, "OTA image written + activated");
+    device_diag_event(DIAG_INFO, "ota", "image staged", NULL);
     return true;
 }
 
