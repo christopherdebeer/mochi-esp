@@ -68,6 +68,21 @@ Two concrete defects fall out and gate everything:
 
 ## Progress (2026-05-23)
 
+- **Authoring fixes (post-prompt-rewrite).** Three real issues surfaced when
+  repurposing an existing sheet: (1) **Generate read the *stored* prompt** so
+  unsaved seed/vibe edits were ignored — Generate now **saves the plan first**
+  (rebuilds the prompt from the live editor state). (2) `saveScenePlan`
+  preserved the old plan's `cellDirectives`/`zones`, leaking prior content
+  (a kitchen's window/sun directives) into new scenes — save is now
+  **authoritative** (the studio plan is the whole plan; stale data dropped).
+  (3) **Source + guide previews**: the Generate panel shows the full
+  pre-dither source result inline (not just the device 1-bit cells), the Plan
+  panel shows the layout guide (built from zones, reflects last save), and the
+  exemplar shows a thumbnail. Caveat: a registry sheet's **cell names are
+  fixed** (e.g. `scene-kitchen-eink-v1`'s 16 cells are `day…night`), so new
+  scenes/levels want a **new sheet** with its own cell names, not a repurpose.
+  Day/night variant authoring (per-cell directives) is a future studio editor.
+
 - **P0 + P1 + P3 shipped** to the live vals (see phases). The studio now
   authors `nav_place` world edges and the rich per-cell diegetic contract
   (`scene_plans`), generates source art from a plan (guide + exemplar →
