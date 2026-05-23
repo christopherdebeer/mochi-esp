@@ -54,6 +54,10 @@ router mounted at `/api` (api.ts is at the file ceiling — same pattern as
 places-device.ts). Body: `{ boot_id, fw_version, records: [...] }`, capped
 (≤64/POST). Best-effort insert; returns `{ ok, inserted }`.
 
+Read side: `GET /api/device/diag?limit=N` (X-Pet-Id) → recent records
+newest-first, so the loop is viewable without raw SQL. Voice cost rows go
+to `POST /api/device/voice-session` → `realtime_sessions` (see ph3).
+
 ### Firmware: `device_diag` module
 
 - `device_diag_init()` — alloc a small PSRAM ring buffer (≈64 records),
