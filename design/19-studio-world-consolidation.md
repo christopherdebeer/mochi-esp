@@ -68,14 +68,22 @@ Two concrete defects fall out and gate everything:
 
 ## Progress (2026-05-23)
 
-- **P0 + P1 shipped** to the live vals (see phases). The studio now
+- **P0 + P1 + P3 shipped** to the live vals (see phases). The studio now
   authors `nav_place` world edges and the rich per-cell diegetic contract
-  (`scene_plans`), persisting both the plan and the device zone store.
+  (`scene_plans`), generates source art from a plan (guide + exemplar →
+  gpt-image-2, BYO key), and the existing upload/extract/post-process/
+  serve/bundle path carries it the rest of the way. The full spine —
+  **Sheet → Plan → Generate → Zones → Export** — is in one surface.
+- **Dither workbench** reworked: defaults to previewing the per-type
+  post-process on the *selected sheet's* source art (preset auto-picked
+  from category); custom upload (with configurable target dims) stays as
+  the ad-hoc mode.
 - **Verified:** all studio files transpile; `scenes-spec.ts` normalises
-  the live kitchen plans post-change; format=1 conformance 57/57. The POST
-  save path needs an in-browser smoke test — the MCP endpoint tester can't
-  send `application/json` (which the `_scene/:sheet/plan` route requires),
-  but the studio's own `fetch` sets it.
+  the live kitchen plans post-change; format=1 conformance 57/57; the
+  exemplar `source.png` path is CORS-open. **In-browser smoke tests still
+  pending** (the MCP endpoint tester can't send `application/json`, which
+  the plan POST requires, and can't run a BYO-key gpt-image-2 call): the
+  plan save and a generation run need a 2-minute check in the studio.
 
 ## The unified model
 
@@ -191,11 +199,16 @@ One surface, left-to-right, each stage already has a home to harvest:
   `format=1` zones from `getScenePlan` via the projection table; ETag
   keys on projected zones; one-shot lift of existing thin blobs into
   `scene_plans`. Thin store retired. **The two stores are now one.**
-- **P3 — generation in the studio.** Guide-from-plan + exemplar →
-  gpt-image-2 (browser BYO key) → upload. "Speak a bundle into being"
-  inside the studio. `places`/imagine reuse this path (replaces the
-  zoneless `scene-v1` guide in `places-device.ts:72` with a real
-  plan guide so born places are zoned by construction).
+- **P3 — generation in the studio.** ✓ *Shipped 2026-05-23.* New Generate
+  panel (`panels/Generate.tsx`) + `generateSceneSheet` (`api.ts`): fetches
+  the plan recipe, rasterises the plan's `guide.svg` (built from its zones)
+  to PNG in-browser, fires gpt-image-2 with the BYO key (localStorage; key
+  only ever goes to OpenAI), uploads via `/sheets/:id/png`, marks the plan
+  ready. Reuses the proven `places-client.ts` multipart shape; the existing
+  keying/post-process/serve/bundle path carries it on. A `genVersion`
+  cache-bust refreshes the cell thumbnails after a run. *Still to do:*
+  `places`/imagine adopting the plan guide (replace the zoneless `scene-v1`
+  guide in `places-device.ts:72`) so born places are zoned by construction.
 - **P4 — world graph + generative planner.** A places/edges view
   (`nav_place` adjacency, `from_place_id`); planner LLM drafts plans from
   seed+grammar. Costume zone kinds 6/7 (design/17) land here.
