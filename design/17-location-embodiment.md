@@ -219,12 +219,14 @@ keeps a *local* `voice_diag` serial dump (never POSTed), and `imagine.c`
 discards the OpenAI `usage`. So `cost_events` / `realtime_sessions` /
 `realtime_turns` are web-only and under-count device spend. Closing it,
 cheapest → fullest:
-- **Imagine gen → `cost_events`** (in progress): `imagine.c` POSTs
-  `/api/usage/event` (the endpoint places-client uses) with
-  `kind:"image"`, `model`, `latency_ms`, `http_status`,
-  `context:{trigger,place_id,sheet_id}`, `fallback_quality:"low"`. Exact
-  tokens (parsing the buried `usage` object in the ~900 KB response) are a
-  follow-up.
+- **Imagine gen → `cost_events`** — *landed* (pending on-device
+  validation). `imagine.c` POSTs `/api/usage/event` (the endpoint
+  places-client uses) after a successful gen with `kind:"image"`,
+  `model`, `latency_ms`, `http_status`,
+  `context:{trigger,place_id,sheet_id}`, `fallback_quality:"low"` (server
+  estimates cost). Verified the endpoint accepts the minimal device shape
+  (`est_cost_usd` 0.02, `at` stamped server-side). Exact tokens (parsing
+  the buried `usage` object in the ~900 KB response) are a follow-up.
 - **Voice session summary → `realtime_sessions`**: on `stop_session`,
   POST the session row `voice_diag` already accumulates (model, voice,
   duration, turn_count, end_reason) instead of (or alongside) the serial

@@ -463,15 +463,45 @@ static void run_imagine(const imagine_req_t *req) {
 
     /* 4 — generate ------------------------------------------------- */
     set_phase(IMAGINE_GENERATING);
+    int64_t gen_t0 = esp_timer_get_time();
     bool gen_ok = openai_edit(key, prompt, size_str,
                               guide, glen, exemplar, elen,
                               png, PNG_MAX, &png_len);
+    uint32_t gen_ms = (uint32_t)((esp_timer_get_time() - gen_t0) / 1000);
     heap_caps_free(guide);
     heap_caps_free(exemplar);
     if (!gen_ok) {
         heap_caps_free(png);
         fail_reason("openai generation failed", pet_id, failed_url);
         return;
+    }
+
+    /* Telemetry: record this gen against cost_events so device BYO-key
+     * spend is visible to off-device SQL analysis alongside the web's
+     * (design/17). Fire-and-forget — the spend happened regardless of the
+     * later steps, and a telemetry failure must not fail the imagine.
+     * Minimal shape: the server estimates cost from fallback_quality
+     * ("low"); exact tokens (buried in the ~900 KB response) are a
+     * follow-up. */
+    {
+        cJSON *t = cJSON_CreateObject();
+        cJSON_AddStringToObject(t, "kind", "image");
+        cJSON_AddStringToObject(t, "model", "gpt-image-2");
+        cJSON_AddStringToObject(t, "fallback_quality", "low");
+        cJSON_AddNumberToObject(t, "latency_ms", (double)gen_ms);
+        cJSON_AddNumberToObject(t, "http_status", 200);
+        cJSON *ctx = cJSON_CreateObject();
+        cJSON_AddStringToObject(ctx, "trigger", "imagine_place");
+        cJSON_AddStringToObject(ctx, "place_id", s_place_id);
+        cJSON_AddStringToObject(ctx, "sheet_id", sheet_id);
+        cJSON_AddItemToObject(t, "context", ctx);
+        char *tstr = cJSON_PrintUnformatted(t);
+        cJSON_Delete(t);
+        if (tstr) {
+            char *r = api_post_json("/api/usage/event", pet_id, tstr);
+            free(r);
+            free(tstr);
+        }
     }
 
     /* 5 — upload --------------------------------------------------- */
