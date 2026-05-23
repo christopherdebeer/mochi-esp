@@ -66,6 +66,17 @@ Two concrete defects fall out and gate everything:
    follows it phase by phase, confirming before each change to the live
    `c15r/mochi` serving path.
 
+## Progress (2026-05-23)
+
+- **P0 + P1 shipped** to the live vals (see phases). The studio now
+  authors `nav_place` world edges and the rich per-cell diegetic contract
+  (`scene_plans`), persisting both the plan and the device zone store.
+- **Verified:** all studio files transpile; `scenes-spec.ts` normalises
+  the live kitchen plans post-change; format=1 conformance 57/57. The POST
+  save path needs an in-browser smoke test — the MCP endpoint tester can't
+  send `application/json` (which the `_scene/:sheet/plan` route requires),
+  but the studio's own `fetch` sets it.
+
 ## The unified model
 
 **A place = a `places` row (identity / location / world-graph node) +
@@ -94,6 +105,17 @@ art** and projected *together* with the pixels (same `cw`/`ch`
 transform), the diegetic-interfaces invariant — *the image suggests, the
 scene graph decides, and they must agree* — holds across web **and**
 device for free. No second alignment step.
+
+### Levels vs variants (per-cell zones)
+
+Two cell semantics must coexist: a **level** (the bundle — each cell is a
+*different room* with its own affordances) and a **variant scene** (places
+— one room, cells are day/night/weather, affordances shared).
+`scene_plans` modelled only the variant case (`plan.zones` shared across
+cells). P1 adds `ScenePlan.cellZones` (per-cell `SceneZone[]`): when a
+cell has an entry it wins for that cell's projection + guide; otherwise the
+shared `zones` broadcast to every cell. Bundles author `cellZones`; places
+keep `zones`. Both live in one `scene_plans` row.
 
 ### Collapsing the two zone stores
 
@@ -153,15 +175,18 @@ One surface, left-to-right, each stage already has a home to harvest:
 
 ## Phased migration (each independently shippable)
 
-- **P0 — unblock the world edge (smallest).** Add `nav_place` to
-  `studio/panels/Zones.tsx` `KIND_OPTS` + a place-id picker (from
-  `/api/sheets` place sheets); allow kind 5 in `user-sheets.ts:144`
-  `saveZones`; verify `/devsprite/pack` emits it. Directly attacks
-  "disconnected scenes" with no data-model change.
-- **P1 — studio reads/writes `scene_plans`.** Studio plan editor backed by
-  `scene_plans` (rich zones + petAnchor + grammar + cellDirectives).
-  `SceneZone.deviceAction` added to `scenes-spec.ts` + `normalisePlan`.
-  Thin store still authoritative for the pack (no device change yet).
+- **P0 — unblock the world edge (smallest).** ✓ *Shipped 2026-05-23.*
+  `nav_place` added to `studio/panels/Zones.tsx` `KIND_OPTS` + a target
+  place-id field; `user-sheets.ts` `saveZones` accepts kind 5 + persists
+  `place`; `Export.tsx`/`api.ts` thread it; `/devsprite/pack` already
+  spreads it into `packMpkV1`. (A place-id *picker* from `/api/sheets` is
+  later polish; a text field ships now.)
+- **P1 — studio reads/writes `scene_plans`.** ✓ *Shipped 2026-05-23.*
+  `SceneZone.deviceAction` + `ScenePlan.cellZones` added to
+  `scenes-spec.ts` (`normaliseZone`/`normalisePlan`). New studio Plan
+  panel (grammar · seed · pet anchor) + per-zone role/intent/gestures; one
+  save writes the rich `scene_plans` row (per-cell `cellZones`) AND the
+  thin device store. Thin store still authoritative for the pack.
 - **P2 — pack projects from the plan.** `/devsprite/pack` derives
   `format=1` zones from `getScenePlan` via the projection table; ETag
   keys on projected zones; one-shot lift of existing thin blobs into
