@@ -200,6 +200,17 @@ visual tuning knob.
 - **Variant meta link.** Generalise day/night (today a 2-cell RTC
   convention) to the non-tappable meta link in the `format=1` trailer —
   extensible to non-binary, non-time conditions.
+- **Place tap zones (content) + a fixed meta-zone leak.** Travelled-to
+  places (canonical seeds, imagined) are `format=0` with **no authored
+  zones**, so they have no diegetic affordances — interaction falls back
+  to the corner-care icons + voice. Found on hardware (v0.0.19, drifted to
+  kitchen): a bug suppressed even the corner-icon fallback because the
+  `format=0` zone helpers consulted the embedded bundle's `SCENES_A_ZONES`
+  meta *by index* against the foreign pack → "has zones" → icons hidden →
+  voice-only. Fixed with an `s_is_bundle` gate (meta applies only to the
+  embedded bundle). Remaining: author real per-place zones (care events /
+  `talk_seed` / `nav_place`) so places get diegetic affordances, not just
+  the corner-icon fallback.
 - **Travel responsiveness** — *landed* (pending on-device validation).
   `main.cpp` pulls state once when a voice session ends, so a
   `move_to_location` said mid-session renders that tick rather than

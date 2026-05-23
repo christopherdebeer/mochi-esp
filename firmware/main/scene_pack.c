@@ -27,6 +27,14 @@ static uint16_t  s_current;
  * swapped the active pack to a place (design/17). */
 static const uint8_t *s_home_bytes;
 
+/* True when the active pack IS the embedded scenes_a bundle, so the
+ * format=0 SCENES_A_ZONES meta table applies. False after a travel swap
+ * to a foreign pack (a place) — that pack's zones, if any, are inline
+ * (format=1); its format=0 cells have NO meta zones, so we must not
+ * match the bundle's zone table against its indices (design/17). Set by
+ * init / load_home (bundle) and cleared by load_bytes (foreign). */
+static bool      s_is_bundle;
+
 bool scene_pack_init(void) {
     if (s_open) return true;
     /* "Sync at boot": prefer the server pack (substrate-authored) over
@@ -40,6 +48,7 @@ bool scene_pack_init(void) {
         return false;
     }
     s_home_bytes = bytes;
+    s_is_bundle = true;
     if (s_pack.count != SCENES_A_COUNT) {
         ESP_LOGW(TAG, "pack count %u != meta count %u — meta header"
                       " out of sync with .mpk binary",
@@ -61,9 +70,10 @@ bool scene_pack_load_home(void) {
         ESP_LOGE(TAG, "scene_pack_load_home: mpk_open rc=%d", rc);
         return false;
     }
-    s_pack    = pack;
-    s_open    = true;
-    s_current = 0;
+    s_pack      = pack;
+    s_open      = true;
+    s_current   = 0;
+    s_is_bundle = true;
     ESP_LOGI(TAG, "scene_pack: restored home bundle (%u cells)",
         (unsigned)s_pack.count);
     return true;
@@ -77,9 +87,10 @@ bool scene_pack_load_bytes(const uint8_t *mpk) {
         ESP_LOGE(TAG, "scene_pack_load_bytes: mpk_open rc=%d", rc);
         return false;
     }
-    s_pack    = pack;
-    s_open    = true;
-    s_current = 0;
+    s_pack      = pack;
+    s_open      = true;
+    s_current   = 0;
+    s_is_bundle = false;   /* foreign pack — SCENES_A_ZONES meta no longer applies */
     ESP_LOGI(TAG, "scene_pack: swapped to %ux%u %u cells (fmt=%u) — imagined",
         (unsigned)s_pack.cell_w, (unsigned)s_pack.cell_h,
         (unsigned)s_pack.count, (unsigned)s_pack.format);
@@ -140,6 +151,7 @@ bool scene_pack_zone_at(int16_t x, int16_t y, const char **out_name) {
          * not a name string). Use scene_pack_action_at for fmt 1. */
         return false;
     }
+    if (!s_is_bundle) return false;   /* meta zones apply to the bundle only */
     return mpk_zone_test(SCENES_A_ZONES, SCENES_A_ZONES_COUNT,
                          s_current, x, y, out_name) >= 0;
 }
@@ -149,6 +161,7 @@ bool scene_pack_current_has_zones(void) {
     if (s_pack.format == 1) {
         return mpk_zone_count(&s_pack, s_current) > 0;
     }
+    if (!s_is_bundle) return false;   /* a travelled-to format=0 place has no meta zones */
     /* Linear scan — zone-set table is tiny (~4 entries). */
     for (size_t i = 0; i < SCENES_A_ZONES_COUNT; i++) {
         if (SCENES_A_ZONES[i].sprite_idx == s_current &&
@@ -161,7 +174,7 @@ bool scene_pack_current_has_zones(void) {
 
 const mpk_zone_t *scene_pack_current_zones(uint8_t *out_count) {
     if (out_count) *out_count = 0;
-    if (!s_open || s_pack.format == 1) return NULL;
+    if (!s_open || s_pack.format == 1 || !s_is_bundle) return NULL;
     for (size_t i = 0; i < SCENES_A_ZONES_COUNT; i++) {
         if (SCENES_A_ZONES[i].sprite_idx == s_current) {
             if (out_count) *out_count = SCENES_A_ZONES[i].count;
