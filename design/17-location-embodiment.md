@@ -164,6 +164,36 @@ visual tuning knob.
    travel (door-to-a-place, via `/enter`); the general meta-link variant
    resolver + studio support for meta links + tappable variants.
 
+## Outstanding (consolidated)
+
+- **`nav_place` — non-voice travel (in progress, this slice).** Tappable
+  place-link zone (design/14 kind 5; place id via the label table). Device
+  half: `mochi_pack.h` resolves the label for `nav_place`; `pet_sync`
+  caches the full `places[]` (id→sheetId) and gains `pet_sync_enter_place()`
+  (POST `/api/places/:id/enter` + optimistic local location update);
+  `main.cpp` touch dispatch routes a `nav_place` tap through it, and the
+  existing location-follow block renders it. Producer half: `mpk.ts`
+  encodes kind 5. Content: author the actual exit zones into
+  `scene-bundle-a` / places (studio) — deferred to authoring.
+- **`places-client.ts` → `/orchestration` dedup.** The `/dev` browser
+  flow recomputes the gen recipe (prompt / gen size / exemplar / guide
+  rasterisation) now centralised in `/api/places/:id/orchestration` +
+  `/sheets/:id/guide.png`. Repoint it so there's one recipe, two triggers
+  (browser + voice). Not urgent; removes drift. Wholesale port of `/dev`
+  imagine into the studio is *not* required — place authoring migrates to
+  the studio as the `nav_place`/meta-link authoring lands there.
+- **Substrate travel hint.** `markPlaceReady` should set a pet thought
+  ("somewhere new…") with a travel action, so imagine's notify surfaces on
+  web + device via the shared thought-bubble path.
+- **Costumes on device.** Render `current_costume_id` via the costume
+  sheet's device cells (the pet-overlay analogue of place rendering).
+- **Variant meta link.** Generalise day/night (today a 2-cell RTC
+  convention) to the non-tappable meta link in the `format=1` trailer —
+  extensible to non-binary, non-time conditions.
+- **Travel responsiveness.** Location currently refreshes on pull / mutate
+  (a tap or the periodic resync). A post-voice-session pull would make
+  voice `move_to_location` land promptly without waiting for the next tap.
+
 ## Cross-references
 
 - `06-scene-contracts.md` · `13`–`16` — the device-sprite pipeline this builds on
