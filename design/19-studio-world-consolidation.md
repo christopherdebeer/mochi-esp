@@ -97,6 +97,18 @@ Two concrete defects fall out and gate everything:
   send `application/json` (plan POST) or run BYO-key OpenAI calls (planner
   + image gen): drafting a plan, saving it, and a generation run each need
   a check in the studio.
+- **Generation refinements (2026-05-23, post first run):** default exemplar
+  → `scene-eink-exemplar-v1` (a dedicated e-ink style anchor) with a
+  **preview thumbnail** in the Plan panel; the V2 preamble's exemplar line
+  now says match **style only, not content/text**; new sheets default to
+  **8px gutters + margins** so the guide renders as a separated contact
+  sheet (5px isn't usable — gpt-image-2 gen edges must be ÷16). Cache-bust
+  now refreshes the zone editor too, not just the thumbnail grid.
+- **Open — prompt is variant-shaped, not level-shaped.** `buildScenePrompt`
+  still says "all cells depict the SAME scene, only the time/weather variant
+  differs" — correct for *places* (kitchen day/night) but wrong for *levels*
+  (bundle: each cell a different room). For per-cell-different rooms the
+  prompt needs per-cell scene descriptions; pending review/feedback.
 
 ## The unified model
 
