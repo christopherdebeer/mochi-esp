@@ -104,11 +104,17 @@ Two concrete defects fall out and gate everything:
   **8px gutters + margins** so the guide renders as a separated contact
   sheet (5px isn't usable — gpt-image-2 gen edges must be ÷16). Cache-bust
   now refreshes the zone editor too, not just the thumbnail grid.
-- **Open — prompt is variant-shaped, not level-shaped.** `buildScenePrompt`
-  still says "all cells depict the SAME scene, only the time/weather variant
-  differs" — correct for *places* (kitchen day/night) but wrong for *levels*
-  (bundle: each cell a different room). For per-cell-different rooms the
-  prompt needs per-cell scene descriptions; pending review/feedback.
+- **Prompt rewritten — style→exemplar, content→planner (2026-05-23).**
+  Viewing `scene-eink-exemplar-v1` showed it's soft grayscale pencil with
+  full shading/tone — the *opposite* of the old preamble's "pure black ink,
+  no halftone, solid black or white." The prompt was fighting the exemplar.
+  Now: the preamble **defers ALL visual style to the exemplar** (no textual
+  style prescription; "device dithers to 1-bit later, render full tone"),
+  and `buildScenePrompt` describes **each cell as its own scene from the
+  plan** (its `cellZones` + directive) — the "all cells = SAME scene" framing
+  is gone. The planner output drives content entirely. NB: generation reads
+  the *stored* `scene_plans.prompt`, so a plan must be **re-saved** (rebuilds
+  the prompt) before the new wording takes effect.
 
 ## The unified model
 
