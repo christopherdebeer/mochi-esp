@@ -1189,6 +1189,8 @@ extern "C" void app_main(void) {
                                    &w, &h, &ms)) {
                 ESP_LOGW(TAG, "pet cell fetch failed for '%s' (sheet %s)",
                     expr, pet_sheet);
+                device_diag_eventf(DIAG_WARN, "render", NULL,
+                    "cell fetch fail %s/%s", pet_sheet, expr);
                 return false;
             }
             if (w != PET_CELL_W || h != PET_CELL_H) {
@@ -1515,6 +1517,8 @@ extern "C" void app_main(void) {
     /* Voice session bracket (design/18 ph3): nonzero while a session is
      * live; the start timestamp for the realtime_sessions row on end. */
     int64_t voice_sess_start_us = 0;
+    /* Health heartbeat (design/18): first fires shortly after boot. */
+    int64_t last_health_us = 0;
 
     /* Auto-trigger key portal if NVS has no OpenAI key. The user
      * landed here either by skipping the optional key field during
@@ -1701,6 +1705,36 @@ extern "C" void app_main(void) {
             if (now_us - last_diag_flush_us > 120LL * 1000 * 1000) {
                 device_diag_flush();
                 last_diag_flush_us = now_us;
+            }
+        }
+
+        /* Health heartbeat (design/18): periodic snapshot of heap / PSRAM /
+         * battery / temp so slow degradation + crashes have context when
+         * you read device_logs. No %f — newlib-nano printf drops it, so
+         * temp is decidegrees C. */
+        {
+            int64_t now_us = esp_timer_get_time();
+            if (now_us - last_health_us > 300LL * 1000 * 1000) {
+                last_health_us = now_us;
+                uint16_t mv = 0; uint8_t pct = 0;
+                battery_read(&mv, &pct);
+                float t = 0.0f, rh = 0.0f;
+                shtc3_read(&t, &rh);
+                char ctx[200];
+                snprintf(ctx, sizeof(ctx),
+                    "{\"heap\":%u,\"heap_min\":%u,\"psram\":%u,\"batt_mv\":%u,"
+                    "\"batt_pct\":%u,\"temp_dc\":%d,\"rh\":%d,\"up_s\":%lld}",
+                    (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                    (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                    (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                    (unsigned)mv, (unsigned)pct,
+                    (int)(t * 10.0f), (int)rh,
+                    (long long)(now_us / 1000000));
+                device_diag_event(DIAG_INFO, "health", "snapshot", ctx);
+                if (pct > 0 && pct < 15) {
+                    device_diag_eventf(DIAG_WARN, "battery", ctx,
+                        "low %u%%", (unsigned)pct);
+                }
             }
         }
 
