@@ -101,9 +101,14 @@ later refinement.
 2. **Instrument** — *done* (pending validation). Emits at boot, wifi,
    pack_cache (server/cache/embedded + why), imagine (ready/fail), voice
    (session end), ota (staged/failed).
-3. **Voice cost** — `realtime_sessions` row on session end (model, voice,
-   duration, turn_count, end_reason). The `voice` diag event is the
-   lightweight stand-in until then.
+3. **Voice cost** — *session-level done* (pending validation). On every
+   voice-session end, `main.cpp` brackets the session off `is_active()`
+   transitions and POSTs `/api/device/voice-session` → a
+   `realtime_sessions` row (model `gpt-realtime`, voice `marin`, duration,
+   end_reason; `config_snapshot.source="device"`). Zero changes to the
+   WebRTC voice path. **3b** (deferred): per-turn token totals + est cost
+   — needs parsing `response.usage` in the data-channel handler (the
+   delicate, hardware-validation-only bit) and a turn counter.
 4. **Crash detail** — surface the ESP-IDF core-dump summary (panic PC /
    backtrace) on the next boot, beyond the reset reason.
 

@@ -1512,6 +1512,9 @@ extern "C" void app_main(void) {
     char last_costume[40] = "";
     /* Diagnostic flush cadence (design/18). */
     int64_t last_diag_flush_us = esp_timer_get_time();
+    /* Voice session bracket (design/18 ph3): nonzero while a session is
+     * live; the start timestamp for the realtime_sessions row on end. */
+    int64_t voice_sess_start_us = 0;
 
     /* Auto-trigger key portal if NVS has no OpenAI key. The user
      * landed here either by skipping the optional key field during
@@ -1698,6 +1701,21 @@ extern "C" void app_main(void) {
             if (now_us - last_diag_flush_us > 120LL * 1000 * 1000) {
                 device_diag_flush();
                 last_diag_flush_us = now_us;
+            }
+        }
+
+        /* Voice session telemetry (design/18 ph3): bracket the session
+         * from is_active() transitions (covers every stop path) and POST
+         * a realtime_sessions row on end. Duration + end_reason only;
+         * per-turn tokens are ph3b (needs response.usage parsing). */
+        {
+            bool v_active = voice::is_active();
+            if (v_active && voice_sess_start_us == 0) {
+                voice_sess_start_us = esp_timer_get_time();
+            } else if (!v_active && voice_sess_start_us != 0) {
+                int dur_s = (int)((esp_timer_get_time() - voice_sess_start_us) / 1000000);
+                voice_sess_start_us = 0;
+                pet_sync_post_voice_session(dur_s, "gpt-realtime", "marin", "ended");
             }
         }
 

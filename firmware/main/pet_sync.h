@@ -80,6 +80,12 @@ void pet_sync_current_location(char *id_out, size_t id_cap,
  * set, else the embedded/pet-v1 base. See design/17. */
 void pet_sync_current_costume(char *id_out, size_t id_cap);
 
+/* Post a realtime_sessions row on voice session end (design/18 ph3).
+ * Session-level: duration + model/voice/end_reason; per-turn tokens are
+ * deferred (ph3b). Best-effort; no-op without pairing. */
+void pet_sync_post_voice_session(int duration_s, const char *model,
+                                 const char *voice, const char *end_reason);
+
 /* Travel to a place by id (design/17): POST /api/places/:id/enter, and on
  * success optimistically set the local location + sheetId so the device's
  * location-follow render swaps to it on the next tick. Returns true on a

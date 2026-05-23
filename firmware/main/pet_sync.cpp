@@ -6,6 +6,7 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -315,6 +316,34 @@ void pet_sync_current_costume(char *id_out, size_t id_cap) {
     xSemaphoreTake(s_mtx, portMAX_DELAY);
     snprintf(id_out, id_cap, "%s", s_costume_id);
     xSemaphoreGive(s_mtx);
+}
+
+void pet_sync_post_voice_session(int duration_s, const char *model,
+                                 const char *voice, const char *end_reason) {
+    struct mochi_pair_creds creds;
+    if (!pair_creds_load(&creds) || !creds.pet_id[0]) return;
+
+    char sid[40];
+    snprintf(sid, sizeof(sid), "dev-%08lx%08lx",
+        (unsigned long)esp_random(), (unsigned long)esp_random());
+    char body[256];
+    snprintf(body, sizeof(body),
+        "{\"session_id\":\"%s\",\"duration_s\":%d,\"model\":\"%s\",\"voice\":\"%s\",\"end_reason\":\"%s\"}",
+        sid, duration_s,
+        model ? model : "gpt-realtime",
+        voice ? voice : "marin",
+        end_reason ? end_reason : "ended");
+
+    char hdr_pet[96];
+    snprintf(hdr_pet, sizeof(hdr_pet), "X-Pet-Id: %s", creds.pet_id);
+    char hdr_ct[] = "Content-Type: application/json";
+    char *headers[] = { hdr_pet, hdr_ct, NULL };
+    char url[] = "https://mochi.val.run/api/device/voice-session";
+
+    body_capture_t cap = { NULL, 0 };
+    int rc = https_post(url, headers, body, capture_body, &cap);
+    free(cap.body);
+    if (rc != 0) ESP_LOGW(TAG, "voice-session post rc=%d", rc);
 }
 
 bool pet_sync_enter_place(const char *place_id) {
