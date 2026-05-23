@@ -194,6 +194,46 @@ visual tuning knob.
   (a tap or the periodic resync). A post-voice-session pull would make
   voice `move_to_location` land promptly without waiting for the next tap.
 
+### Zone actions vs voice tools (audit)
+
+Zone actions are the *user-actionable subset* of mochi's agency; voice
+tools are the full set. Auditing the overlap, the vocabulary is complete
+except costumes: care → `event` (`event_kind_t`) ✓, travel → `nav_place`
+✓, conversation → `talk_seed` ✓, within-room → `nav_scene`/`nav_relative`
+✓. **Reserve kinds 6 = `wear_costume` (costume id via the label table,
+shape-identical to `nav_place`) and 7 = `take_off_costume`** — land them
+*with* costumes-on-device, not before. Sleep/wake stay device gestures
+(an `event(SLEPT)` only logs, it doesn't transition state). `imagine_*` /
+`note` / `observation` / `settle_to_sleep` are intentionally voice-only
+(mochi-initiated / param-heavy); `request_care`'s tap surface is the
+thought bubble, not a scene zone. Don't add a generic "dispatch any voice
+tool" zone — it would mostly expose tools that don't render or can't be
+parameterised by a tap; stay with typed kinds.
+
+### Device telemetry → substrate (off-device analysis)
+
+The device records **nothing** to the substrate telemetry tables — only
+care/state events reach it (`/api/mutate` → `events`). The cost-bearing
+work it does on the BYO key is invisible to SQL analysis: voice realtime
+keeps a *local* `voice_diag` serial dump (never POSTed), and `imagine.c`
+discards the OpenAI `usage`. So `cost_events` / `realtime_sessions` /
+`realtime_turns` are web-only and under-count device spend. Closing it,
+cheapest → fullest:
+- **Imagine gen → `cost_events`** (in progress): `imagine.c` POSTs
+  `/api/usage/event` (the endpoint places-client uses) with
+  `kind:"image"`, `model`, `latency_ms`, `http_status`,
+  `context:{trigger,place_id,sheet_id}`, `fallback_quality:"low"`. Exact
+  tokens (parsing the buried `usage` object in the ~900 KB response) are a
+  follow-up.
+- **Voice session summary → `realtime_sessions`**: on `stop_session`,
+  POST the session row `voice_diag` already accumulates (model, voice,
+  duration, turn_count, end_reason) instead of (or alongside) the serial
+  dump. Per-turn `realtime_turns` is the heavier add. *(biggest blind
+  spot — voice dominates spend.)*
+- **Device diagnostics → substrate** (optional): boot reason / OTA outcome
+  / fetch failures / pack-cache hits, as a `device_logs` table or `events`
+  debug kinds. No web analogue; device-specific observability.
+
 ## Cross-references
 
 - `06-scene-contracts.md` · `13`–`16` — the device-sprite pipeline this builds on
