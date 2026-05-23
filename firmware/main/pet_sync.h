@@ -75,6 +75,13 @@ void pet_sync_touch(int64_t at_ms);
 void pet_sync_current_location(char *id_out, size_t id_cap,
                                char *sheet_out, size_t sheet_cap);
 
+/* Travel to a place by id (design/17): POST /api/places/:id/enter, and on
+ * success optimistically set the local location + sheetId so the device's
+ * location-follow render swaps to it on the next tick. Returns true on a
+ * successful enter. The device→substrate travel write behind a tapped
+ * nav_place zone. */
+bool pet_sync_enter_place(const char *place_id);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif

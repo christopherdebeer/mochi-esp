@@ -1793,6 +1793,23 @@ extern "C" void app_main(void) {
             continue;
         }
 
+        /* nav_place zones — cross-place travel (design/17). The zone's
+         * seed_text is the target place id. We hand it to the substrate
+         * (POST /enter, which also updates our local location); the
+         * travel block at the top of the loop renders it on the next
+         * tick — "home" restores the bundle, any other place fetches its
+         * pack at device geometry. This is the non-voice travel path. */
+        if (scene_hit && scene_act.kind == MPK_ACTION_NAV_PLACE &&
+            scene_act.seed_text && scene_act.seed_len > 0) {
+            char place_id[40] = {0};
+            size_t n = scene_act.seed_len < sizeof(place_id) - 1
+                ? scene_act.seed_len : sizeof(place_id) - 1;
+            memcpy(place_id, scene_act.seed_text, n);
+            ESP_LOGI(TAG, "scene nav_place → %s", place_id);
+            pet_sync_enter_place(place_id);
+            continue;
+        }
+
         /* talk_seed zones — two paths depending on whether the
          * voice session is up:
          *

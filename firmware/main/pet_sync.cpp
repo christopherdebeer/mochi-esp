@@ -296,6 +296,50 @@ void pet_sync_current_location(char *id_out, size_t id_cap,
     xSemaphoreGive(s_mtx);
 }
 
+bool pet_sync_enter_place(const char *place_id) {
+    if (!place_id || !place_id[0]) return false;
+    struct mochi_pair_creds creds;
+    if (!pair_creds_load(&creds) || !creds.pet_id[0]) return false;
+
+    char hdr_pet[96];
+    snprintf(hdr_pet, sizeof(hdr_pet), "X-Pet-Id: %s", creds.pet_id);
+    char hdr_ct[] = "Content-Type: application/json";
+    char *headers[] = { hdr_pet, hdr_ct, NULL };
+    char url[96];
+    snprintf(url, sizeof(url),
+        "https://mochi.val.run/api/places/%s/enter", place_id);
+    char body[] = "{}";
+
+    body_capture_t cap = {NULL, 0};
+    int rc = https_post(url, headers, body, capture_body, &cap);
+    if (rc != 0 || !cap.body) {
+        ESP_LOGW(TAG, "enter %s rc=%d", place_id, rc);
+        free(cap.body);
+        return false;
+    }
+    cJSON *root = cJSON_Parse(cap.body);
+    free(cap.body);
+    if (!root) return false;
+    bool good = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "ok"));
+    char sheet[64] = {0};
+    cJSON *sh = cJSON_GetObjectItemCaseSensitive(root, "sheet_id");
+    if (cJSON_IsString(sh) && sh->valuestring) {
+        snprintf(sheet, sizeof(sheet), "%s", sh->valuestring);
+    }
+    cJSON_Delete(root);
+    if (!good) return false;
+
+    /* Optimistic local update so the location-follow render picks it up
+     * next tick without waiting for a state pull (design/17). */
+    if (!s_mtx) s_mtx = xSemaphoreCreateMutex();
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    snprintf(s_location, sizeof(s_location), "%s", place_id);
+    snprintf(s_location_sheet, sizeof(s_location_sheet), "%s", sheet);
+    xSemaphoreGive(s_mtx);
+    ESP_LOGI(TAG, "entered place %s (sheet=%s)", place_id, sheet);
+    return true;
+}
+
 /* ─── push ────────────────────────────────────────────────────── */
 
 static bool do_mutate_post(event_kind_t kind, int64_t at_ms) {

@@ -176,6 +176,7 @@ typedef enum {
     MPK_ACTION_NAV_SCENE    = 2,  /* data = absolute scene index         */
     MPK_ACTION_NAV_RELATIVE = 3,  /* data = signed scene delta (i8)      */
     MPK_ACTION_TALK_SEED    = 4,  /* seed_text/seed_len set; data unused */
+    MPK_ACTION_NAV_PLACE    = 5,  /* seed_text/seed_len = target place id (design/17) */
 } mpk_action_kind_t;
 
 typedef struct {
@@ -223,7 +224,10 @@ static inline bool mpk_zone_get(const mpk_t *p, uint16_t i, uint8_t z,
     const uint16_t label_idx = mpk__u16(zp + 10);
     out->kind = (mpk_action_kind_t)kind;
     out->data = (kind == MPK_ACTION_NAV_RELATIVE) ? (int16_t)(int8_t)data : (int16_t)data;
-    if (kind == MPK_ACTION_TALK_SEED) {
+    /* talk_seed and nav_place both carry a variable-length string in the
+     * pack-global label table: the seed text and the target place id
+     * respectively. Resolve it for both. */
+    if (kind == MPK_ACTION_TALK_SEED || kind == MPK_ACTION_NAV_PLACE) {
         out->seed_text = mpk__seed(p, label_idx, &out->seed_len);
     } else {
         out->seed_text = NULL;
