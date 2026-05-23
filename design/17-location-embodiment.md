@@ -175,13 +175,15 @@ visual tuning knob.
   existing location-follow block renders it. Producer half: `mpk.ts`
   encodes kind 5. Content: author the actual exit zones into
   `scene-bundle-a` / places (studio) — deferred to authoring.
-- **`places-client.ts` → `/orchestration` dedup.** The `/dev` browser
-  flow recomputes the gen recipe (prompt / gen size / exemplar / guide
-  rasterisation) now centralised in `/api/places/:id/orchestration` +
-  `/sheets/:id/guide.png`. Repoint it so there's one recipe, two triggers
-  (browser + voice). Not urgent; removes drift. Wholesale port of `/dev`
-  imagine into the studio is *not* required — place authoring migrates to
-  the studio as the `nav_place`/meta-link authoring lands there.
+- **`places-client.ts` → `/orchestration` dedup** — *done* (live in
+  `c15r/mochi`). The `/dev` browser flow now fetches the recipe (prompt /
+  gen size / exemplar / server-rasterised guide) from
+  `/api/places/:id/orchestration` instead of recomputing it, and the
+  browser `<canvas>` SVG rasterise + `buildPlacePrompt`/`resolveCanonical`
+  helpers are deleted — one recipe, two triggers (browser + voice).
+  Behaviour-preserving; transpiles clean. Wholesale port of `/dev` imagine
+  into the studio is *not* required — place authoring migrates to the
+  studio as the `nav_place`/meta-link authoring lands there.
 - **Substrate travel hint.** `markPlaceReady` should set a pet thought
   ("somewhere new…") with a travel action, so imagine's notify surfaces on
   web + device via the shared thought-bubble path.
