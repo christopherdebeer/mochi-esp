@@ -68,6 +68,19 @@ Two concrete defects fall out and gate everything:
 
 ## Progress (2026-05-23)
 
+- **Places are global, not per-pet (studio feedback).** `scene-bundle-a`
+  (home) and the canonical seeds are shared by every pet; studio-authored
+  bundles are the same shape — curated, global. Per-pet worlds come only
+  from imagine. So registration moved from per-pet to a **global world
+  registry** (`mochi-places:bundles` blob): `places.worldPlaces()` =
+  canonical seeds + registered bundles; `registerWorldPlace` upserts the
+  blob; `backfillCanonicalPlaces` seeds new pets with the bundles; and
+  `/api/places/:id/enter` **lazily materialises** a global place for pets
+  already backfilled this process (so travel resolves for everyone). New
+  routes `GET/POST /api/places/world` (no pet scope). The studio's panel is
+  now **World Places** (no pet id), and the planner + `nav_place` picker
+  read the global list. Verified `/api/places/world` returns the four seeds.
+
 - **Planner emits resolvable world edges (reciprocity for free).** The
   planner's `nav_place` targets were raw **sheet ids**, but travel resolves
   **place ids** (`/api/places/:id/enter`) — so planner-drafted cross-bundle
