@@ -68,6 +68,20 @@ Two concrete defects fall out and gate everything:
 
 ## Progress (2026-05-23)
 
+- **P4 — places registration (travel works).** Traced the device path:
+  `pet_sync_enter_place` POSTs `/api/places/:id/enter`, and the *server*
+  returns the `sheet_id` — so `nav_place` travel only needs a `ready`
+  `places` row `(pet, id, sheet_id)`. Firmware (`main.cpp:1943` →
+  `pet_sync_enter_place`), P2 (zone in the pack), and `/enter` already exist;
+  the gap was registration. Added `places.linkBundlePlace` + `POST
+  /api/places/link` + `GET /api/places/list`, and a studio **Device Places**
+  panel (per-pet, holds the device's pet id) to register a bundle sheet as a
+  travel destination. The Zones `nav_place` field becomes a **picker** of
+  registered places. So: register `test-bundle-a` as place `forest` for your
+  pet → add a `nav_place: forest` zone in `scene-bundle-a` → save → travel.
+  Still to do: reciprocal edge auto-wiring, voice-imagine running the
+  planner, costumes (kinds 6/7).
+
 - **P2 shipped — the pack projects from the plan.** `/devsprite/pack` now
   prefers the rich `scene_plan` (per-cell `cellZones` + typed device actions
   incl. `nav_place`) and falls back to the thin `/sheets/:id/zones` store for
