@@ -68,6 +68,15 @@ Two concrete defects fall out and gate everything:
 
 ## Progress (2026-05-23)
 
+- **Planner emits resolvable world edges (reciprocity for free).** The
+  planner's `nav_place` targets were raw **sheet ids**, but travel resolves
+  **place ids** (`/api/places/:id/enter`) — so planner-drafted cross-bundle
+  edges didn't resolve. Now `✨ draft plan` takes its nav targets from the
+  **registered places** (the Device Places list), so drafted exits point at
+  real, travel-able place ids. Reciprocity falls out: register the places,
+  then re-draft each bundle with the full list and the planner wires exits
+  both ways — a connected world graph, no manual reciprocal edge step.
+
 - **P4 — places registration (travel works).** Traced the device path:
   `pet_sync_enter_place` POSTs `/api/places/:id/enter`, and the *server*
   returns the `sheet_id` — so `nav_place` travel only needs a `ready`
