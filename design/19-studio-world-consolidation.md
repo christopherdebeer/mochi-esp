@@ -68,6 +68,16 @@ Two concrete defects fall out and gate everything:
 
 ## Progress (2026-05-23)
 
+- **Planner prompt v2 — interconnection + interspersed grammars.** Feedback:
+  one fixed grammar across the bundle defeats diversity. Reworked the planner
+  prompt so the dropdown grammar is an **overall bias**, and rooms
+  **intersperse** the others (care / talk / atmospheric / junction). It now
+  gets explicit per-cell **adjacency** (N/S/E/W → target cell index) computed
+  from the grid, so `nav_scene` wiring + exit placement are directional;
+  biases toward a **richly interconnected** level with **minimal `nav_place`**;
+  gives gentle (non-rigid) placement guidance; and states the response
+  contract as a **TypeScript `interface`** (JSON mode) rather than prose.
+
 - **Planner is now a level designer.** Investigating `test-bundle-a` (forest,
   pure-branch, 16 cells) showed every cell **byte-identical** (one zone set
   broadcast to all) and the only exits were `nav_place` to *other* sheets —
