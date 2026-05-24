@@ -68,6 +68,20 @@ Two concrete defects fall out and gate everything:
 
 ## Progress (2026-05-23)
 
+- **P2 shipped — the pack projects from the plan.** `/devsprite/pack` now
+  prefers the rich `scene_plan` (per-cell `cellZones` + typed device actions
+  incl. `nav_place`) and falls back to the thin `/sheets/:id/zones` store for
+  sheets without a plan. Zone rects **scale with the `cw/ch` projection**
+  (source cell → device cell) so taps stay aligned — fixing the prior
+  unscaled-zone bug. Zones whose `deviceAction` isn't actionable (kind 0 /
+  intent-only) are **dropped**, so an intent-only contract (e.g. the
+  dashboard-seeded kitchen `zones`) doesn't suppress the device's corner-icon
+  fallback. The pack ETag keys on the plan (`-zp<hash>.<updatedAt>`) or the
+  thin store (`-zt<hash>`), so boot-sync re-pulls on a plan edit. Verified:
+  `test-bundle-a` plan-sourced (nav zones reach the pack), `scene-bundle-a`
+  still thin-sourced, kitchen projects its care `event` zones. The two zone
+  stores are now one source with a clean fallback.
+
 - **Per-cell room descriptions.** The planner now emits a one-line `desc`
   per cell (added to the response TS interface); it's stored as a per-cell
   `raw` cellDirective, and `buildScenePrompt` leads each cell with it
@@ -271,10 +285,12 @@ One surface, left-to-right, each stage already has a home to harvest:
   panel (grammar · seed · pet anchor) + per-zone role/intent/gestures; one
   save writes the rich `scene_plans` row (per-cell `cellZones`) AND the
   thin device store. Thin store still authoritative for the pack.
-- **P2 — pack projects from the plan.** `/devsprite/pack` derives
-  `format=1` zones from `getScenePlan` via the projection table; ETag
-  keys on projected zones; one-shot lift of existing thin blobs into
-  `scene_plans`. Thin store retired. **The two stores are now one.**
+- **P2 — pack projects from the plan.** ✓ *Shipped 2026-05-23.*
+  `/devsprite/pack` prefers `getScenePlan`'s `cellZones` (projected to MPK1
+  with `cw/ch` rect scaling + `deviceAction`→typed-action, non-actionable
+  zones dropped), falling back to the thin store; ETag keys on the plan so
+  boot-sync re-pulls on edit. Thin store kept as the fallback rather than
+  retired (sheets without a plan still work).
 - **P3 — generation in the studio.** ✓ *Shipped 2026-05-23.* New Generate
   panel (`panels/Generate.tsx`) + `generateSceneSheet` (`api.ts`): fetches
   the plan recipe, rasterises the plan's `guide.svg` (built from its zones)
