@@ -83,12 +83,21 @@ idf.py -p /dev/cu.usbmodem* flash monitor       # build + flash + tail
 Full toolchain setup, port-name conventions per OS, and troubleshooting:
 **`firmware/README.md`**.
 
-## Status (as of 2026-05-22, release v0.0.17)
+## Status (as of 2026-05-24, release v0.0.19 · v0.0.20 pending)
 
 The architectural spine through realtime voice, OTA, and on-device pet
-state is complete. The current track is the **device-sprite pipeline** —
-one encoder/studio/format, build-time MPK1 packs that boot-sync from the
-server, and on-device scene generation (`design/13`–`16`).
+state is complete. The **device-sprite pipeline** (`design/13`–`16`) —
+one encoder/studio/format, boot-sync MPK1 packs, on-device imagine —
+landed, then grew into **location & world** (`design/17`): the device
+follows `pets.location`, travels between places (`nav_place` /
+`nav_scene`), and renders costumes. The current track is the **studio
+world consolidation** (`design/19`): the Device Studio is now the world-
+authoring surface — author/generate a scene *plan* (per-cell zoned rooms
++ a `nav_place` graph), project it to the device pack, and register
+global world places the device travels to. **v0.0.20** packages the
+travelled-to scene-pack fix + travel telemetry (device code for the
+consolidation already shipped through v0.0.19; the rest is server-side
+and boot-syncs).
 
 | Milestone | Status | What it delivered |
 |---|---|---|
