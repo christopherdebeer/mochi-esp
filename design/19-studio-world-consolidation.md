@@ -68,6 +68,15 @@ Two concrete defects fall out and gate everything:
 
 ## Progress (2026-05-23)
 
+- **Per-cell room descriptions.** The planner now emits a one-line `desc`
+  per cell (added to the response TS interface); it's stored as a per-cell
+  `raw` cellDirective, and `buildScenePrompt` leads each cell with it
+  (`a "<cell>" scene — <desc>, containing <zones>`) so the image model gets
+  distinct per-room content. Descriptions round-trip on load and are
+  editable per cell in the Zones panel ("room description"). `raw`
+  directives now read as the room's description (level case); time/weather
+  directives remain the lighting variant (variant case).
+
 - **Planner prompt v2 — interconnection + interspersed grammars.** Feedback:
   one fixed grammar across the bundle defeats diversity. Reworked the planner
   prompt so the dropdown grammar is an **overall bias**, and rooms
