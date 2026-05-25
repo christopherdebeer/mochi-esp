@@ -10,7 +10,8 @@
  *
  * (Sleep was a 3 s hold and PWR triple-tap opened the key portal;
  * both retired once the key portal moved into Settings — see
- * design/22. PWR now has the single "tap = sleep" meaning.)
+ * design/22. PWR now means: single tap → sleep, double tap →
+ * dev_menu wheel; long-press is unused.)
  *
  * Two paths for committing:
  *
@@ -59,5 +60,30 @@ void mark_handled(void);
  * return. Caller is responsible for having rendered whatever
  * they want visible during sleep. */
 [[noreturn]] void commit_sleep(void);
+
+/* Returns true once when a PWR double-tap is observed. Cleared on
+ * read. Used by the dev_menu wheel as the trigger to enter Settings;
+ * retains the heavier-discovery feel the wheel is meant to have. */
+bool double_tap_consume(void);
+
+/* Returns true once when a PWR single-tap was observed WHILE the
+ * wheel is active (set_wheel_active(true)). Cleared on read. main.cpp
+ * polls this and calls dev_menu::request_advance(). The single-tap
+ * never enters the sleep handoff while the wheel is up — eliminating
+ * the original race where the watcher's HANDOFF_GRACE_MS fallback
+ * fired its sleep render over the wheel. */
+bool single_tap_advance_consume(void);
+
+/* Tell the watcher whether the dev_menu wheel currently owns the
+ * screen. Single-tap PWR while active → single_tap_advance_consume;
+ * while inactive → the original sleep handoff. main.cpp toggles
+ * this around dev_menu::active() transitions. */
+void set_wheel_active(bool active);
+
+/* Tell the watcher whether a voice session is up. Same shape: while
+ * active, single-tap PWR routes to single_tap_advance_consume so
+ * main can stop the session instead of going through the sleep
+ * handoff (sleeping mid-conversation is too abrupt). */
+void set_voice_active(bool active);
 
 }  /* namespace sleep_gesture */

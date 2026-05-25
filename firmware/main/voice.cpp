@@ -80,6 +80,13 @@ static constexpr size_t TOOLS_BUF_BYTES   = 16384;
 static SemaphoreHandle_t s_cfg_mtx   = nullptr;
 static char             *s_cfg_instr = nullptr;
 static char             *s_cfg_tools = nullptr;
+/* True while prefetch_config is mid-fetch. start_session checks this
+ * and waits briefly for the in-flight prefetch to land instead of
+ * kicking off its OWN /api/voice/session GET. Without this, a user
+ * tapping BOOT while prefetch was still running gave us two
+ * concurrent TLS sockets to mochi.val.run and one to api.openai.com,
+ * exhausting internal heap (MBEDTLS_ERR_SSL_ALLOC_FAILED). */
+static volatile bool     s_prefetch_in_flight = false;
 
 static char *voice_psram_strdup(const char *s) {
     if (!s) return nullptr;
@@ -279,6 +286,31 @@ int start_session(void) {
                     }
                     xSemaphoreGive(s_cfg_mtx);
                 }
+                /* If a prefetch is already in flight, wait for it
+                 * to finish (up to ~3 s) instead of opening a second
+                 * TLS connection to the same endpoint. The two-
+                 * concurrent-fetch case raced with the OpenAI
+                 * signaling POST and exhausted internal heap. */
+                if (!filled && s_prefetch_in_flight) {
+                    ESP_LOGI(TAG, "session config: prefetch in flight, waiting");
+                    int waited = 0;
+                    while (s_prefetch_in_flight && waited < 3000) {
+                        vTaskDelay(pdMS_TO_TICKS(50));
+                        waited += 50;
+                    }
+                    if (s_cfg_mtx) {
+                        xSemaphoreTake(s_cfg_mtx, portMAX_DELAY);
+                        if (s_cfg_instr) {
+                            snprintf(persona_buf, PERSONA_BUF_BYTES, "%s", s_cfg_instr);
+                            if (s_cfg_tools) {
+                                snprintf(tools_buf, TOOLS_BUF_BYTES, "%s", s_cfg_tools);
+                            }
+                            filled = true;
+                            src = "cache (post-wait)";
+                        }
+                        xSemaphoreGive(s_cfg_mtx);
+                    }
+                }
                 if (!filled) {
                     filled = fetch_session_config(pair.pet_id,
                         persona_buf, PERSONA_BUF_BYTES,
@@ -290,8 +322,12 @@ int start_session(void) {
             }
         }
 
-        ESP_LOGI(TAG, "starting voice session (config: %s, tools: %s)…",
-            src, tools_json ? "yes" : "none");
+        const size_t heap_int = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        const size_t heap_int_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+        ESP_LOGI(TAG, "starting voice session (config: %s, tools: %s) "
+                      "heap_int=%uB largest=%uB",
+            src, tools_json ? "yes" : "none",
+            (unsigned)heap_int, (unsigned)heap_int_largest);
         rc = voice_peer_start(openai_key, instructions, tools_json);
         if (rc != 0) {
             ESP_LOGE(TAG, "voice_peer_start rc=%d", rc);
@@ -330,6 +366,7 @@ void prefetch_config(void) {
     struct mochi_pair_creds pair = {};
     if (!pair_creds_load(&pair) || !pair.pet_id[0]) return;
 
+    s_prefetch_in_flight = true;
     char *instr = (char *)heap_caps_calloc(1, PERSONA_BUF_BYTES, MALLOC_CAP_SPIRAM);
     char *tools = (char *)heap_caps_calloc(1, TOOLS_BUF_BYTES, MALLOC_CAP_SPIRAM);
     if (instr && tools &&
@@ -340,6 +377,7 @@ void prefetch_config(void) {
     }
     free(instr);
     free(tools);
+    s_prefetch_in_flight = false;
 }
 
 Phase phase(void) {

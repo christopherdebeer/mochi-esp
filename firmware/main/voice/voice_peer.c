@@ -299,7 +299,28 @@ static void open_audio_playback(uint32_t sample_rate, uint8_t channel) {
     }
 }
 
+/* Drain + fade-out before close: write ~80 ms of silence (linearly
+ * tapered over ~40 ms of the most recent already-buffered audio
+ * doesn't help — esp_codec_dev gives us no visibility into the I²S
+ * TX FIFO contents) so the speaker has a clean tail rather than a
+ * hard click on close. ~80 ms covers the typical I²S DMA latency
+ * plus a tiny safety margin. Used for both user-stop and server
+ * barge-in (output_audio_buffer.cleared) endings. */
+static void output_fade_to_silence(void) {
+    if (!s_peer.play_open || !s_peer.play_dev) return;
+    /* 80 ms × 24 kHz × 2 bytes/sample = 3840 bytes. Stack-friendly. */
+    static const size_t FADE_MS = 80;
+    const size_t samples = (24000 * FADE_MS) / 1000;
+    const size_t bytes = samples * sizeof(int16_t);
+    int16_t silence[bytes / sizeof(int16_t)];
+    memset(silence, 0, sizeof(silence));
+    /* Blocking write at 24 kHz: 80 ms of audio takes ~80 ms wall.
+     * We're already on the teardown path, so the latency is fine. */
+    esp_codec_dev_write(s_peer.play_dev, silence, sizeof(silence));
+}
+
 static void close_audio_playback(void) {
+    output_fade_to_silence();
     voice_aec_deinit();
     if (s_peer.play_open && s_peer.play_dev) {
         esp_codec_dev_close(s_peer.play_dev);
@@ -563,6 +584,17 @@ static int pc_on_data(esp_peer_data_frame_t *frame, void *ctx) {
      */
     if (event_type_is(body, body_len, "output_audio_buffer.started")) {
         set_phase(VOICE_PHASE_SPEAKING);
+    } else if (event_type_is(body, body_len, "output_audio_buffer.cleared")) {
+        /* Server barge-in: user started talking, OpenAI cancelled
+         * the in-flight assistant response. Frames already past the
+         * `cleared` boundary keep playing through I²S TX DMA and end
+         * abruptly — push a brief silence to fade the tail cleanly.
+         * Same helper the explicit-stop path uses. */
+        output_fade_to_silence();
+        voice_phase_t cur = (voice_phase_t)atomic_load(&s_peer.phase);
+        if (cur == VOICE_PHASE_SPEAKING) {
+            set_phase(VOICE_PHASE_READY);
+        }
     } else if (event_type_is(body, body_len, "output_audio_buffer.stopped") ||
                event_type_is(body, body_len, "response.done")) {
         voice_phase_t cur = (voice_phase_t)atomic_load(&s_peer.phase);
@@ -1132,9 +1164,16 @@ int voice_peer_start(const char *openai_key, const char *instructions,
     /* The mint + signaling bring-up runs ON the worker (below), not
      * here — so this call is non-blocking and the UI stays responsive
      * during the ~2.4 s mint + connect window (design/23). */
-    BaseType_t ok = xTaskCreateWithCaps(
+    /* Pinned to CPU 0 (the PRO core). The mic_task is pinned to
+     * CPU 1 (the APP core) and runs opus_encode at the same prio;
+     * with both unpinned-or-on-CPU-1, the encoder + the peer's
+     * audio-rx push into AEC starved IDLE1 long enough to trip
+     * the watchdog ~5 s in. Splitting them across cores gives each
+     * an IDLE task that can actually idle. */
+    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(
         worker_task, "voice_peer", WORKER_STACK_BYTES,
-        NULL, WORKER_PRIO, &s_peer.worker, MALLOC_CAP_SPIRAM);
+        NULL, WORKER_PRIO, &s_peer.worker, 0 /* CPU 0 */,
+        MALLOC_CAP_SPIRAM);
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "xTaskCreate failed");
         free(s_peer.key_copy); s_peer.key_copy = NULL;

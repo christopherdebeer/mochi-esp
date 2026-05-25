@@ -8,9 +8,6 @@
 #include "esp_timer.h"
 #include "esp_system.h"
 #include "esp_heap_caps.h"
-#include "driver/gpio.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 
 #include "board_pins.h"
 #include "epd_ui.h"
@@ -26,14 +23,8 @@ namespace dev_menu {
  * a fresh BOOT press still exits / advances earlier. */
 static constexpr int64_t INACTIVITY_US = 60LL * 1000 * 1000;
 
-/* Watcher poll cadence — fast enough that a kid's normal short press
- * (~80–150 ms) reliably catches a falling edge. The 1 Hz main-loop
- * tick missed presses entirely when they fit between iterations,
- * which read as "BOOT is unresponsive". */
-static constexpr int POLL_MS = 25;
-/* Debounce: ignore additional edges within this many ticks of the
- * last accepted press. */
-static constexpr int DEBOUNCE_TICKS = 2;   /* 50 ms */
+/* No internal poll loop now — the trigger is request_advance() from
+ * main.cpp, which itself is driven by sleep_gesture's PWR detector. */
 
 static Mode                 s_mode = Mode::Live;
 static int64_t              s_entered_mode_us = 0;
@@ -87,42 +78,23 @@ static void clear_buttons(void) {
 
 const char *picked_ssid(void) { return s_picked_ssid; }
 
-/* Background watcher: 25 ms cadence falling-edge detection on BOOT.
- * Latches s_press_pending so the (slow) main loop can consume the
- * event on its next tick. Without this, presses that fit entirely
- * between two main-loop ticks were lost. */
-static void watcher_task(void *) {
-    int prev_level = gpio_get_level((gpio_num_t)MOCHI_BOOT_BUTTON_GPIO);
-    int debounce = 0;
-    while (true) {
-        if (debounce > 0) debounce--;
-        const int level = gpio_get_level((gpio_num_t)MOCHI_BOOT_BUTTON_GPIO);
-        /* Falling edge with active-low pull-up = press. */
-        if (level == 0 && prev_level == 1 && debounce == 0) {
-            debounce = DEBOUNCE_TICKS;
-            /* Latch — the main loop will consume on its next pass.
-             * Multiple presses within a single main-loop tick still
-             * register as one (intent: don't double-advance). */
-            s_press_pending.store(true, std::memory_order_release);
-            ESP_LOGI(TAG, "BOOT press latched");
-        }
-        prev_level = level;
-        vTaskDelay(pdMS_TO_TICKS(POLL_MS));
-    }
-}
+/* dev_menu no longer owns its own button watcher: BOOT is reserved
+ * for voice start/stop, and the wheel is driven by PWR
+ * (sleep_gesture::double_tap_consume to enter, subsequent ticks of
+ * advance() while the wheel is open to cycle). main.cpp wires both
+ * ends, so the latch flag here is set externally rather than from a
+ * polled GPIO. Atomic so the call is safe from the sleep_gesture
+ * task that may detect the gesture on its own core. */
 
 void init(epaper_driver_display * /*epd*/) {
-    /* The BOOT pin is configured for input + pull-up by
-     * boot_button_init() in main.cpp. */
     s_mode = Mode::Live;
     s_entered_mode_us = 0;
     s_press_pending.store(false, std::memory_order_release);
-    if (!s_started) {
-        s_started = true;
-        xTaskCreatePinnedToCore(watcher_task, "dev_menu_btn",
-            2048, nullptr, 2, nullptr, 1);
-        ESP_LOGI(TAG, "watcher started (BOOT poll %d ms)", POLL_MS);
-    }
+    s_started = true;
+}
+
+void request_advance(void) {
+    s_press_pending.store(true, std::memory_order_release);
 }
 
 Mode current(void) { return s_mode; }

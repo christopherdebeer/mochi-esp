@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include <atomic>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -338,6 +339,34 @@ static void boot_button_init(void) {
     ESP_ERROR_CHECK(gpio_config(&cfg));
 }
 
+/* BOOT-press watcher: 25 ms cadence falling-edge detection. BOOT is
+ * the dedicated voice start/stop button now (the dev_menu wheel
+ * moved to PWR double-tap). Latches s_boot_press_pending so the
+ * (slow) main loop can consume the event on its next tick — without
+ * this, presses that fit between two main-loop iterations were lost
+ * and read as "BOOT is unresponsive". */
+static std::atomic<bool> s_boot_press_pending{false};
+static void boot_watcher_task(void *) {
+    int prev_level = gpio_get_level((gpio_num_t)MOCHI_BOOT_BUTTON_GPIO);
+    int debounce = 0;
+    constexpr int POLL_MS = 25;
+    constexpr int DEBOUNCE_TICKS = 2;   /* 50 ms */
+    while (true) {
+        if (debounce > 0) debounce--;
+        const int level = gpio_get_level((gpio_num_t)MOCHI_BOOT_BUTTON_GPIO);
+        if (level == 0 && prev_level == 1 && debounce == 0) {
+            debounce = DEBOUNCE_TICKS;
+            s_boot_press_pending.store(true, std::memory_order_release);
+            ESP_LOGI(TAG, "BOOT press latched");
+        }
+        prev_level = level;
+        vTaskDelay(pdMS_TO_TICKS(POLL_MS));
+    }
+}
+static bool boot_press_consume(void) {
+    return s_boot_press_pending.exchange(false, std::memory_order_acq_rel);
+}
+
 static void epd_power_on(void) {
     gpio_config_t cfg = {};
     cfg.pin_bit_mask = 1ULL << MOCHI_EPD_PWR_GPIO;
@@ -570,6 +599,11 @@ extern "C" void app_main(void) {
 
     led_init();
     boot_button_init();
+    /* Spawn the BOOT-press watcher on the same core as Wi-Fi (it's a
+     * trivial GPIO poll, so noise on either core is negligible). The
+     * latch is consumed by the main loop's voice start/stop block. */
+    xTaskCreatePinnedToCore(boot_watcher_task, "boot_btn",
+        2048, nullptr, 2, nullptr, 1);
     epd_power_on();
     peripheral_rails_on();
 
@@ -1715,7 +1749,23 @@ extern "C" void app_main(void) {
 
     while (true) {
         touch::Event ev;
-        bool got_touch = touch::wait_event(&ev, 1000);
+        /* Tick cadence: 1 s normally, 100 ms during a voice session
+         * so a BOOT-press to stop is consumed promptly. The previous
+         * 1 s tick let the model talk for up to 1.5 s after the user
+         * tapped to stop — long enough that the model finished a
+         * phrase the user meant to cut. Faster polling tightens the
+         * latency without burning idle CPU when voice is offline. */
+        const int wait_ms = voice::is_active() ? 100 : 1000;
+        bool got_touch = touch::wait_event(&ev, wait_ms);
+
+        /* Tell the sleep_gesture watcher when the wheel or voice owns
+         * the screen. The watcher gates single-tap PWR through
+         * single_tap_advance_consume() in those modes (not the sleep
+         * handoff), eliminating the race where the fallback sleep
+         * render landed on top of an active flow. Polled at the top
+         * of the loop so the gate tracks state edges promptly. */
+        sleep_gesture::set_wheel_active(dev_menu::active());
+        sleep_gesture::set_voice_active(voice::is_active());
 
         /* Touch-drain guard. If a previous tick set this, eat the
          * first touch we see and reset. Lets dev_menu / dialog flows
@@ -1728,12 +1778,47 @@ extern "C" void app_main(void) {
             got_touch = false;
         }
 
-        /* Sleep gesture takes priority over touch. The wait_event
-         * 1-second timeout means we check this at least once per
-         * second even with no taps. When the PWR tap fires we claim
-         * it (so the watcher's fallback render doesn't race us),
-         * render the rich asleep frame, then commit_sleep() — never
-         * returns. */
+        /* PWR gesture map (design/22 + design/24 update):
+         *
+         *   single-tap PWR      → sleep (when in Live)
+         *                       → advance the dev_menu wheel (when up)
+         *   double-tap PWR      → enter the dev_menu wheel from Live
+         *
+         * sleep_gesture exposes both: requested() (latched once a
+         * single-tap clears its 350 ms double-tap window) and
+         * double_tap_consume() (latched immediately on the second tap).
+         * We service double-tap first so a fast pair doesn't race the
+         * single-tap path into a sleep commit. */
+        if (sleep_gesture::double_tap_consume()) {
+            if (!voice::is_active() && !key_portal::active()) {
+                ESP_LOGI(TAG, "PWR double-tap → enter dev_menu");
+                dev_menu::request_advance();
+            }
+        }
+
+        /* Single-tap PWR while a non-sleep flow owns the screen: the
+         * watcher gates these via set_wheel_active / set_voice_active,
+         * surfaces them through single_tap_advance_consume, and skips
+         * the sleep handoff entirely. main routes by what's currently
+         * active. The earlier in-handoff intercept raced with the
+         * watcher's fallback timeout firing the sleep render on top of
+         * the wheel; this gate-up-front design eliminates that race. */
+        if (sleep_gesture::single_tap_advance_consume()) {
+            if (voice::is_active()) {
+                ESP_LOGI(TAG, "PWR tap (voice active) → stop session");
+                voice::stop_session();
+                render_with_expression("neutral", false, nullptr);
+                last_voice_phase = voice::Phase::Idle;
+                if (s_pending_talked_at != 0) {
+                    pet_sync_enqueue(EVENT_TALKED, s_pending_talked_at);
+                    s_pending_talked_at = 0;
+                }
+            } else if (dev_menu::active()) {
+                ESP_LOGI(TAG, "PWR tap (wheel up) → advance");
+                dev_menu::request_advance();
+            }
+        }
+
         if (sleep_gesture::requested()) {
             sleep_gesture::mark_handled();
             device_diag_event(DIAG_INFO, "sleep", "PWR tap → sleep", nullptr);
@@ -1742,9 +1827,45 @@ extern "C" void app_main(void) {
             sleep_gesture::commit_sleep();
         }
 
-        /* (PWR triple-tap → key portal retired: the key portal is now
-         * reachable from Settings, and PWR is a single tap → sleep.
-         * See design/22.) */
+        /* BOOT short-press → voice start/stop. The dedicated voice
+         * gesture (design/24): BOOT is THE voice button. From Live
+         * a press starts a session; while voice is up a press stops.
+         * Skipped while the dev_menu wheel owns the screen so a
+         * mid-wheel BOOT doesn't collide with whatever PWR-driven
+         * action the user is in the middle of. */
+        if (boot_press_consume() && !dev_menu::active() &&
+            !key_portal::active()) {
+            if (voice::is_active()) {
+                ESP_LOGI(TAG, "BOOT → stop voice session");
+                voice::stop_session();
+                render_with_expression("neutral", false, nullptr);
+                last_voice_phase = voice::Phase::Idle;
+                if (s_pending_talked_at != 0) {
+                    pet_sync_enqueue(EVENT_TALKED, s_pending_talked_at);
+                    s_pending_talked_at = 0;
+                }
+            } else if (voice::is_ready()) {
+                ESP_LOGI(TAG, "BOOT → start voice session");
+                render_with_expression("waking_up", false, nullptr);
+                last_voice_phase = voice::Phase::Connecting;
+                if (voice::start_session() == 0) {
+                    /* Local effects only at start; mutate POST defers
+                     * to session end (avoids the OpenAI vs val.run
+                     * concurrent-TLS heap collision — see v0.1.3). */
+                    const int64_t talked_at = now_ms_wall();
+                    event_log_append(EVENT_TALKED, talked_at);
+                    pet_sync_touch(talked_at);
+                    s_dev_pet.last_interaction_at = talked_at;
+                    s_pending_talked_at = talked_at;
+                } else {
+                    ESP_LOGW(TAG, "voice start failed");
+                    render_with_expression("neutral", false, nullptr);
+                    last_voice_phase = voice::Phase::Idle;
+                }
+            } else {
+                ESP_LOGW(TAG, "BOOT but voice not ready (no key?)");
+            }
+        }
 
         /* Dev-menu wheel: BOOT short-press cycles debug screens. While
          * a debug screen is up, dev_menu owns the panel — we skip the
@@ -2239,70 +2360,14 @@ extern "C" void app_main(void) {
         if (now_us - last_event_us < DEBOUNCE_US) continue;
         last_event_us = now_us;
 
-        /* Voice control (design/23). The dedicated affordance is the
-         * mic glyph at the far-left of the status bar; tap it to start.
-         * While a session is live, ANY tap stops it (tap-to-stop), so
-         * this is handled before the care/scene pipeline — a tap during
-         * a session must not also log a care event. start_session is
-         * non-blocking now (mint runs on the worker), so there's no
-         * hold + drain dance. */
-        {
-            /* Mic tap zone — generously bigger than the rendered
-             * 14×14 glyph. e-ink tap targets need slop because (a)
-             * the panel is small, (b) capacitive touch reports
-             * cluster centroid not finger contact, and (c) without
-             * haptic feedback users tend to over-aim. 56×32 covers
-             * the bar height plus a strip into the scene, so a
-             * slightly-low or slightly-right tap still registers. */
-            const bool tapped_mic =
-                (int)ev.y < STATUS_BAR_H + 14 && (int)ev.x < 56;
-            if (voice::is_active()) {
-                ESP_LOGI(TAG, "voice active — tap → stop session");
-                voice::stop_session();
-                render_with_expression("neutral", false, nullptr);
-                last_voice_phase = voice::Phase::Idle;
-                /* Flush any deferred EVENT_TALKED — same reasoning
-                 * as the auto-stop path above. */
-                if (s_pending_talked_at != 0) {
-                    pet_sync_enqueue(EVENT_TALKED, s_pending_talked_at);
-                    s_pending_talked_at = 0;
-                }
-                continue;
-            }
-            if (tapped_mic) {
-                if (!voice::is_ready()) {
-                    ESP_LOGW(TAG, "mic tap but voice not ready (no key?)");
-                    continue;
-                }
-                ESP_LOGI(TAG, "mic tap → start voice session");
-                /* Show the connecting face immediately so the tap reads
-                 * as registered during the connect window. */
-                render_with_expression("waking_up", false, nullptr);
-                last_voice_phase = voice::Phase::Connecting;
-                if (voice::start_session() == 0) {
-                    /* Local effects are cheap (event log + last_int
-                     * touch) so they fire immediately. The
-                     * pet_sync_enqueue mutate, however, opens a
-                     * concurrent TLS socket to mochi.val.run while
-                     * voice is mid-handshake to api.openai.com — the
-                     * two together exhaust internal heap and we get
-                     * MBEDTLS_ERR_SSL_ALLOC_FAILED on the OpenAI
-                     * call, killing the session. Defer the mutate
-                     * until session end (handled below in the
-                     * stop_requested path). */
-                    const int64_t talked_at = now_ms_wall();
-                    event_log_append(EVENT_TALKED, talked_at);
-                    pet_sync_touch(talked_at);
-                    s_dev_pet.last_interaction_at = talked_at;
-                    s_pending_talked_at = talked_at;
-                } else {
-                    ESP_LOGW(TAG, "voice start failed");
-                    render_with_expression("neutral", false, nullptr);
-                    last_voice_phase = voice::Phase::Idle;
-                }
-                continue;
-            }
-        }
+        /* Voice start/stop is BOOT-driven now (design/24, see the
+         * boot_press_consume block at the top of the loop). The
+         * status-bar mic glyph remains as a passive state indicator
+         * but no longer hosts a tap rect; touches in that area fall
+         * through to the normal care / scene-zone pipeline. While a
+         * session is active a touch anywhere is intentionally NOT
+         * tap-to-stop — kids playing with the panel mid-conversation
+         * shouldn't cut Mochi off accidentally. */
 
         Zone z = classify(ev.x, ev.y);
         /* Thought-bubble taps resolve expr + kind dynamically from
