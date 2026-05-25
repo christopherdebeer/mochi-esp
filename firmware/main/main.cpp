@@ -420,8 +420,13 @@ extern "C" void app_main(void) {
      * version overlay stamps small white text 30% from the top so
      * the running firmware version is visible at every cold boot
      * without USB. */
-    epd_ui::render_boot_splash(epd);
-    epd_ui::overlay_boot_version(epd, ota_update::current_version());
+    /* NVS up early (idempotent) so the splash can show the paired pet's
+     * lonely expression when the splash pack carries a pet zone. */
+    nvs_creds_init();
+    struct mochi_pair_creds boot_pair = {};
+    const bool boot_paired = pair_creds_load(&boot_pair);
+    epd_ui::render_boot_splash(epd, "Mochi", ota_update::current_version(),
+                               boot_paired);
     epd->EPD_Init();
     epd->EPD_Display();
     epd->EPD_DisplayPartBaseImage();

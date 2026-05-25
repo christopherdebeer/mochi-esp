@@ -116,4 +116,39 @@ void blit_two_plane(uint8_t *dst, size_t dst_w, size_t dst_h,
     }
 }
 
+void blit_two_plane_scaled(uint8_t *dst, size_t dst_w, size_t dst_h,
+                           const uint8_t *ink, const uint8_t *mask,
+                           size_t src_w, size_t src_h,
+                           int dx, int dy, size_t out_w, size_t out_h) {
+    if (out_w == 0 || out_h == 0 || src_w == 0 || src_h == 0) return;
+    const size_t dst_stride = (dst_w + 7) >> 3;
+    const size_t src_stride = (src_w + 7) >> 3;
+
+    for (size_t oy = 0; oy < out_h; oy++) {
+        int py = dy + (int)oy;
+        if (py < 0 || (size_t)py >= dst_h) continue;
+        size_t sy = (oy * src_h) / out_h;
+        if (sy >= src_h) sy = src_h - 1;
+        for (size_t ox = 0; ox < out_w; ox++) {
+            int px = dx + (int)ox;
+            if (px < 0 || (size_t)px >= dst_w) continue;
+            size_t sx = (ox * src_w) / out_w;
+            if (sx >= src_w) sx = src_w - 1;
+
+            const size_t s_off = sy * src_stride + (sx >> 3);
+            const uint8_t s_bit = (uint8_t)(1u << (7 - (sx & 7)));
+            /* Skip transparent source pixels (mask bit == 1). */
+            if ((mask[s_off] & s_bit) != 0) continue;
+
+            const size_t d_off = (size_t)py * dst_stride + ((size_t)px >> 3);
+            const uint8_t d_bit = (uint8_t)(1u << (7 - ((size_t)px & 7)));
+            if ((ink[s_off] & s_bit) == 0) {
+                dst[d_off] &= (uint8_t)~d_bit;   /* ink → black */
+            } else {
+                dst[d_off] |= d_bit;             /* paper → white */
+            }
+        }
+    }
+}
+
 }  /* namespace compositor */

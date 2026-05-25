@@ -74,4 +74,16 @@ void blit_two_plane(uint8_t *dst, size_t dst_w, size_t dst_h,
                     size_t src_w, size_t src_h,
                     int dx, int dy);
 
+/*
+ * Nearest-neighbour scaled two-plane blit. Like blit_two_plane, but the
+ * source (src_w × src_h) is resampled into an out_w × out_h rectangle at
+ * (dx, dy). Nearest-neighbour keeps 1-bit art crisp (no grey from
+ * interpolation). Used to place a pet sprite scaled to fit a scene/splash
+ * pet zone (design/20). Out-of-bounds destination pixels are clipped.
+ */
+void blit_two_plane_scaled(uint8_t *dst, size_t dst_w, size_t dst_h,
+                           const uint8_t *ink, const uint8_t *mask,
+                           size_t src_w, size_t src_h,
+                           int dx, int dy, size_t out_w, size_t out_h);
+
 }  /* namespace compositor */
