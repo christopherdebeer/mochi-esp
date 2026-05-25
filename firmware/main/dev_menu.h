@@ -45,9 +45,8 @@ enum class Mode : uint8_t {
     Splash,
     Settings,        /* read-only device info / diagnostics */
     Actions,         /* tappable action buttons (design/22) */
-    /* future modes plug in here. Whole new screens make sense for
-     * things that need a full panel (a WiFi network list, OTA
-     * progress, etc.). */
+    Wifi,            /* known-network list — tap to switch (design/22) */
+    /* future modes plug in here. */
     _Count,
 };
 
@@ -95,7 +94,14 @@ enum class TouchResult : uint8_t {
     ForgetWifi,       /* forget the joined SSID + reboot (flip to next known) */
     UpdateNow,        /* force an immediate OTA manifest check */
     RePair,           /* clear pairing + reboot into the pairing flow */
+    GoHome,           /* reset the pet's location to home */
+    WifiSwitch,       /* switch to the picked known network — see picked_ssid() */
 };
+
+/* The SSID picked by the most recent WifiSwitch dispatch (the WiFi
+ * screen). Valid right after dispatch_touch returns WifiSwitch; empty
+ * otherwise. main.cpp reads this to know which stored network to join. */
+const char *picked_ssid(void);
 
 /* Forward an (x, y) touch event into the active wheel screen. Returns
  * the action the user requested, or None if the touch landed outside

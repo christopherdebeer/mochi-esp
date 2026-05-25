@@ -14,6 +14,7 @@
 
 #include "board_pins.h"
 #include "epd_ui.h"
+#include "nvs_creds.h"
 
 static const char *TAG = "dev_menu";
 
@@ -47,6 +48,7 @@ static const char *mode_name(Mode m) {
         case Mode::Splash:   return "splash";
         case Mode::Settings: return "settings";
         case Mode::Actions:  return "actions";
+        case Mode::Wifi:     return "wifi";
         default:             return "?";
     }
 }
@@ -64,16 +66,26 @@ struct Button {
     TouchResult action;
     const char *label;
 };
-/* Single Settings button today. The list is sized for headroom; new
- * actions just append + bump the count. */
-static constexpr int MAX_BUTTONS = 4;
+/* Headroom for the Actions screen (6) and the WiFi list (stored
+ * networks, capped to what fits). */
+static constexpr int MAX_BUTTONS = 8;
 static Button   s_buttons[MAX_BUTTONS] = {};
 static int      s_button_count = 0;
+/* Per-button SSID payload for WifiSwitch buttons (the WiFi screen);
+ * empty for action buttons. dispatch_touch copies the tapped one into
+ * s_picked_ssid so main.cpp knows which network to join. */
+static char     s_button_ssid[MAX_BUTTONS][MOCHI_WIFI_SSID_MAX + 1] = {};
+static char     s_picked_ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
 
 static void clear_buttons(void) {
     s_button_count = 0;
-    for (int i = 0; i < MAX_BUTTONS; i++) s_buttons[i] = {};
+    for (int i = 0; i < MAX_BUTTONS; i++) {
+        s_buttons[i] = {};
+        s_button_ssid[i][0] = '\0';
+    }
 }
+
+const char *picked_ssid(void) { return s_picked_ssid; }
 
 /* Background watcher: 25 ms cadence falling-edge detection on BOOT.
  * Latches s_press_pending so the (slow) main loop can consume the
@@ -131,6 +143,10 @@ TouchResult dispatch_touch(int x, int y) {
         if (x >= b.x && x < b.x + b.w &&
             y >= b.y && y < b.y + b.h) {
             ESP_LOGI(TAG, "button hit: '%s'", b.label);
+            if (b.action == TouchResult::WifiSwitch) {
+                snprintf(s_picked_ssid, sizeof(s_picked_ssid),
+                         "%s", s_button_ssid[i]);
+            }
             return b.action;
         }
     }
@@ -195,9 +211,12 @@ static void draw_button_border(epaper_driver_display *epd, const Button &b) {
 }
 
 static void register_button(int x, int y, int w, int h,
-                            TouchResult action, const char *label) {
+                            TouchResult action, const char *label,
+                            const char *ssid = nullptr) {
     if (s_button_count >= MAX_BUTTONS) return;
-    s_buttons[s_button_count++] = { x, y, w, h, action, label };
+    const int i = s_button_count++;
+    s_buttons[i] = { x, y, w, h, action, label };
+    snprintf(s_button_ssid[i], sizeof(s_button_ssid[i]), "%s", ssid ? ssid : "");
 }
 
 static void render_settings(epaper_driver_display *epd,
@@ -252,21 +271,21 @@ static void render_actions(epaper_driver_display *epd) {
 
     epd_ui::draw_text_centered(epd, 4, 2, "ACTIONS");
 
-    /* Buttons fill the panel below the title down to the hint line.
-     * Five generous (28-px) targets fit on the 200-px panel. */
+    /* Six buttons on the 200-px panel: title + 6×(24+2) + hint fits. */
     static const struct { TouchResult action; const char *label; } items[] = {
         { TouchResult::ChangeWifi,    "Change WiFi"     },
         { TouchResult::ForgetWifi,    "Forget WiFi"     },
         { TouchResult::UpdateNow,     "Update now"      },
         { TouchResult::RePair,        "Re-pair device"  },
+        { TouchResult::GoHome,        "Go home"         },
         { TouchResult::OpenKeyPortal, "OpenAI key"      },
     };
     constexpr int N = (int)(sizeof(items) / sizeof(items[0]));
     constexpr int BTN_MARGIN = 2;
     constexpr int BTN_W = MOCHI_EPD_WIDTH - 2 * BTN_MARGIN;
-    constexpr int BTN_H = 28;
-    constexpr int BTN_GAP = 3;
-    constexpr int TOP_Y = 24;
+    constexpr int BTN_H = 24;
+    constexpr int BTN_GAP = 2;
+    constexpr int TOP_Y = 22;
 
     int by = TOP_Y;
     for (int i = 0; i < N; i++) {
@@ -279,7 +298,57 @@ static void render_actions(epaper_driver_display *epd) {
         by += BTN_H + BTN_GAP;
     }
 
-    epd_ui::draw_text(epd, 4, MOCHI_EPD_HEIGHT - 9, 1, "BOOT next  tap=do");
+    epd_ui::draw_text(epd, 4, MOCHI_EPD_HEIGHT - 9, 1, "BOOT: WiFi  tap=do");
+
+    epd->EPD_Init_Partial();
+    epd->EPD_DisplayPart();
+}
+
+/* WiFi screen — the stored networks, tap one to switch to it at
+ * runtime (design/22). Listing the MRU creds *is* "the SSIDs we
+ * already have creds for"; esp_wifi_connect does a directed probe so
+ * we don't need a scan to reach a network that isn't beaconing. The
+ * currently-joined SSID is marked "*". */
+static void render_wifi(epaper_driver_display *epd, const char *cur_ssid) {
+    epd_ui::clear(epd);
+    clear_buttons();
+
+    epd_ui::draw_text_centered(epd, 4, 2, "WIFI");
+
+    const size_t stored = nvs_creds_count();
+    constexpr int BTN_MARGIN = 2;
+    constexpr int BTN_W = MOCHI_EPD_WIDTH - 2 * BTN_MARGIN;
+    constexpr int BTN_H = 24;
+    constexpr int BTN_GAP = 2;
+    constexpr int TOP_Y = 22;
+    /* Cap to what fits between the title and the hint. */
+    const int max_rows = (MOCHI_EPD_HEIGHT - TOP_Y - 12) / (BTN_H + BTN_GAP);
+
+    int rows = (int)stored;
+    if (rows > max_rows) rows = max_rows;
+    if (rows > MAX_BUTTONS) rows = MAX_BUTTONS;
+
+    int by = TOP_Y;
+    for (int i = 0; i < rows; i++) {
+        struct mochi_wifi_creds c = {};
+        if (!nvs_creds_load_at((size_t)i, &c)) continue;
+        const bool is_cur = cur_ssid && cur_ssid[0] &&
+                            strncmp(c.ssid, cur_ssid, MOCHI_WIFI_SSID_MAX) == 0;
+        char label[40];
+        snprintf(label, sizeof(label), "%s%.30s", is_cur ? "*" : " ", c.ssid);
+        Button b = { BTN_MARGIN, by, BTN_W, BTN_H, TouchResult::WifiSwitch, "" };
+        draw_button_border(epd, b);
+        epd_ui::draw_text(epd, b.x + 6, b.y + (b.h - 8) / 2, 1, label);
+        register_button(b.x, b.y, b.w, b.h, TouchResult::WifiSwitch, "", c.ssid);
+        by += BTN_H + BTN_GAP;
+    }
+
+    if (rows == 0) {
+        epd_ui::draw_text(epd, 4, TOP_Y + 8, 1, "no saved networks");
+    }
+
+    epd_ui::draw_text(epd, 4, MOCHI_EPD_HEIGHT - 9, 1,
+                      rows > 0 ? "tap=switch  BOOT exit" : "Actions: Change WiFi");
 
     epd->EPD_Init_Partial();
     epd->EPD_DisplayPart();
@@ -299,6 +368,9 @@ static void render_mode(epaper_driver_display *epd, Mode m,
             break;
         case Mode::Actions:
             render_actions(epd);
+            break;
+        case Mode::Wifi:
+            render_wifi(epd, ssid);
             break;
         default:
             /* Live is rendered by main.cpp's render_resting on the

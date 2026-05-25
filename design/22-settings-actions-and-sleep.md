@@ -41,16 +41,17 @@ wake-hold) is ignored until released and tapped afresh. (`sleep_gesture.cpp`.)
 ## Settings information architecture
 
 One read-only screen can't also hold a stack of generous touch targets
-on a 200×200 panel, so the wheel splits the two:
+on a 200×200 panel, so the wheel splits into screens:
 
 - **Settings** — read-only device info (fw, pet, net/ip/ssid, heap/psram,
   battery). No buttons. "BOOT: Actions".
-- **Actions** — a vertical stack of five tappable buttons. A tap runs the
-  action; a tap that misses every button exits to Live (unchanged miss
-  semantics).
+- **Actions** — a vertical stack of tappable action buttons. A tap runs
+  the action; a tap that misses every button exits to Live (unchanged
+  miss semantics).
+- **WiFi** — the stored networks, tap one to switch to it (below).
 
 ```
-Live ─BOOT▶ Splash ─BOOT▶ Settings(info) ─BOOT▶ Actions(buttons) ─BOOT▶ (wrap to Splash)
+Live ─BOOT▶ Splash ─BOOT▶ Settings(info) ─BOOT▶ Actions ─BOOT▶ WiFi ─BOOT▶ (wrap to Splash)
 ```
 
 ## Actions (shipped)
@@ -61,7 +62,22 @@ Live ─BOOT▶ Splash ─BOOT▶ Settings(info) ─BOOT▶ Actions(buttons) ─
 | **Forget WiFi** | `nvs_creds_forget(joined_ssid)` + reboot. connect_any then joins the next-strongest *known* network (or the no-creds path runs provisioning if that was the last one). |
 | **Update now** | `ota_update::check_now()` — cuts the 24 h inter-check sleep short so the OTA poll runs immediately. |
 | **Re-pair device** | `pair_creds_clear()` + reboot into the pairing flow. |
+| **Go home** | `pet_sync_enter_place("home")` — resets the pet's location to home; the travel block swaps to the embedded home bundle next tick. Network POST; no-op offline. |
 | **OpenAI key** | open the key-entry portal (moved here from the old Settings button + the retired PWR triple-tap). |
+
+### WiFi screen — switch to a known network, no reboot
+
+The WiFi wheel screen lists the stored networks (the joined one marked
+`*`); tapping one runs a **runtime STA→STA switch** — `wifi_sta::switch_to`
+(`esp_wifi_set_config` + connect, 15 s) — with no reboot and no AP↔STA
+hand-off, so it sidesteps the v5.3 hang. On success the network is
+promoted to MRU (so the next boot prefers it); on failure the device
+falls back to `connect_any` so a failed switch doesn't strand it offline.
+
+No scan: listing the stored creds *is* "the networks we already have
+creds for", and `esp_wifi_connect` does a directed probe, so it reaches a
+network even if it isn't beaconing (the Apple-hotspot case). "Add a new
+network" remains the Actions → **Change WiFi** (SoftAP) path.
 
 Reboot actions show a one-line toast before restarting so the tap gets
 feedback. Each is reachable only with intent (BOOT to the Actions screen,
@@ -81,20 +97,26 @@ Per the request to flip quickly to a network we already have creds for:
   on the next-best known network with **no retyping** — the cheap path
   to "flip to a known SSID".
 
-## Deferred (Stage 3)
+## Server side (`c15r/mochi`)
 
-- **Pick-a-network list (scan + runtime switch).** A WiFi screen that
-  scans, lists known+visible SSIDs, and on tap reconnects to the chosen
-  one *without a reboot*. Switching STA→STA is a normal
-  `esp_wifi_set_config` + reconnect (not the AP↔STA hand-off that hangs
-  on v5.3), so it's feasible — but it's a new list UI + runtime reconnect
-  path that wants on-hardware iteration before it's trusted. "Forget +
-  reboot" covers the common case until then.
-- **Reset location to home.** `pet_sync_enter_place("home")` is
-  network-gated and depends on the server treating "home" as an
-  enterable place — unverified from the firmware repo (server lives in
-  `c15r/mochi`). Deferred until the server side is confirmed; otherwise
-  the button would silently no-op offline / on an unsupported backend.
+"home" is a canonical seed place (`backend/places.ts` `CANONICAL_SEEDS`
+← `shared/locations.ts`), so `POST /api/places/home/enter` already
+resolves, sets `pets.location='home'`, and returns the sheet. One
+defensive edit landed in `backend/places-device.ts`: the `/enter`
+handler now `backfillCanonicalPlaces()` + retries when a place isn't
+found, so "Go home" (and any seed enter) resolves even for a pet whose
+seeds weren't materialised yet this process — instead of a 404.
+
+## Still deferred
+
+- **Scan + visibility in the WiFi list.** The list shows stored networks
+  but doesn't yet mark which are in range or sort by signal. A passive
+  scan would add that (and a ~1.5 s stall on screen entry). Directed
+  connect already reaches non-beaconing networks, so this is polish, not
+  function.
+- **On-hardware validation.** The runtime WiFi switch and Go-home were
+  built + compile-checked but not flashed; the STA→STA transition and
+  the offline-recovery fallback want a device pass.
 
 ## Files
 

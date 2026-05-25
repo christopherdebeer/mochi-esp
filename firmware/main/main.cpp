@@ -1759,6 +1759,60 @@ extern "C" void app_main(void) {
                             pair_creds_clear();
                             reboot_with_msg("Re-pairing", "Restarting...");
                             break;
+                        case dev_menu::TouchResult::GoHome:
+                            ESP_LOGI(TAG, "dev_menu → go home");
+                            /* Network POST; the travel block swaps to the
+                             * home bundle next tick on success. No-op +
+                             * logged if offline. */
+                            pet_sync_enter_place("home");
+                            break;
+                        case dev_menu::TouchResult::WifiSwitch: {
+                            /* Runtime switch to a stored network — no
+                             * reboot (STA→STA). Blocks up to ~15 s on this
+                             * thread behind a toast. On failure, fall back
+                             * to connect_any so we don't strand the device
+                             * offline after dropping the old link. */
+                            char ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
+                            snprintf(ssid, sizeof(ssid), "%s",
+                                     dev_menu::picked_ssid());
+                            ESP_LOGI(TAG, "dev_menu → switch WiFi '%s'", ssid);
+                            struct mochi_wifi_creds c = {};
+                            bool found = false;
+                            for (size_t i = 0; i < nvs_creds_count(); i++) {
+                                struct mochi_wifi_creds t = {};
+                                if (nvs_creds_load_at(i, &t) &&
+                                    strncmp(t.ssid, ssid,
+                                            MOCHI_WIFI_SSID_MAX) == 0) {
+                                    c = t; found = true; break;
+                                }
+                            }
+                            if (!found) { ESP_LOGW(TAG, "ssid not stored"); break; }
+                            epd_ui::clear(epd);
+                            epd_ui::draw_text_centered(epd, 84, 1, "Switching to");
+                            epd_ui::draw_text_centered(epd, 104, 1, ssid);
+                            epd->EPD_Init_Partial();
+                            epd->EPD_DisplayPart();
+                            char ip[16] = {};
+                            if (wifi_sta::switch_to(&c, ip, sizeof(ip))) {
+                                nvs_creds_append(&c);   /* promote to MRU */
+                                snprintf(s_net_ip,   sizeof(s_net_ip),   "%s", ip);
+                                snprintf(s_net_ssid, sizeof(s_net_ssid), "%s", c.ssid);
+                                s_net_phase = NetPhase::Online;
+                                ESP_LOGI(TAG, "switched → %s (%s)", c.ssid, ip);
+                            } else {
+                                ESP_LOGW(TAG, "switch failed; restoring via connect_any");
+                                char rs[MOCHI_WIFI_SSID_MAX + 1] = {};
+                                if (wifi_sta::connect_any(ip, sizeof(ip),
+                                                          rs, sizeof(rs))) {
+                                    snprintf(s_net_ip,   sizeof(s_net_ip),   "%s", ip);
+                                    snprintf(s_net_ssid, sizeof(s_net_ssid), "%s", rs);
+                                    s_net_phase = NetPhase::Online;
+                                } else {
+                                    s_net_phase = NetPhase::Offline;
+                                }
+                            }
+                            break;
+                        }
                         case dev_menu::TouchResult::None:
                         default:
                             ESP_LOGI(TAG, "touch in dev_menu → exit to live");

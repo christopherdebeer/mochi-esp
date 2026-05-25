@@ -120,6 +120,13 @@ bool connect(const struct mochi_wifi_creds *creds,
     return try_one(creds, ip_str, ip_len, 30000);
 }
 
+bool switch_to(const struct mochi_wifi_creds *creds,
+               char *ip_str, size_t ip_len) {
+    sta_stack_up();
+    ESP_LOGI(TAG, "runtime switch → '%s'", creds->ssid);
+    return try_one(creds, ip_str, ip_len, 15000);
+}
+
 bool connect_any(char *ip_str, size_t ip_len,
                  char *out_ssid, size_t out_ssid_len) {
     sta_stack_up();

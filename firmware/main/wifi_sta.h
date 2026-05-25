@@ -22,6 +22,16 @@ void init_stack(void);
 bool connect(const struct mochi_wifi_creds *creds,
              char *ip_str, size_t ip_len);
 
+/* Runtime switch to a specific stored network without a reboot — a
+ * plain STA→STA reconnect (set_config + connect), NOT the AP↔STA
+ * hand-off that hangs on v5.3. Assumes the STA stack is already up
+ * (it is, post-boot). Uses a shorter 15 s timeout than connect() so a
+ * Settings tap doesn't stall the UI for half a minute. On success
+ * writes the IP and returns true; on failure returns false (caller
+ * should fall back to connect_any to restore some link). design/22. */
+bool switch_to(const struct mochi_wifi_creds *creds,
+               char *ip_str, size_t ip_len);
+
 /* Scan for visible APs, intersect with the stored MRU cred list, and
  * try matching credentials in scan-strength order until one connects
  * or all fail. Used on the already-provisioned branch so a device
