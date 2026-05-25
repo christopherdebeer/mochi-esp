@@ -43,8 +43,10 @@ namespace dev_menu {
 enum class Mode : uint8_t {
     Live = 0,        /* not in the wheel — home state */
     Splash,
-    Diagnostics,
-    /* future: WifiSelect, Provision, Pairing, OtaForce, … */
+    Settings,        /* debug info + tappable action buttons */
+    /* future modes plug in here. Settings hosts most actions; whole
+     * new screens make sense for things that need a full panel
+     * (WifiSelect's network list, OtaForce's progress, etc.). */
     _Count,
 };
 
@@ -80,5 +82,21 @@ bool active(void);
  * when something else needs the screen (e.g. a touch gesture or
  * a sleep request). The next main-loop tick will redraw the pet. */
 void exit_to_live(void);
+
+/* Touch-driven actions on the active wheel screen. Returned values
+ * tell main.cpp what (if anything) to do AFTER dev_menu has
+ * exited the wheel back to Live. Buttons are debug-only — actions
+ * the device couldn't otherwise reach without a serial cable. */
+enum class TouchResult : uint8_t {
+    None = 0,         /* no button hit; main.cpp may exit_to_live itself */
+    OpenKeyPortal,    /* "open key portal" button on the Settings screen */
+};
+
+/* Forward an (x, y) touch event into the active wheel screen. Returns
+ * the action the user requested, or None if the touch landed outside
+ * any button. Caller still owns the "exit to live on miss" semantics
+ * — this only reports the hit. Safe to call when current() == Live;
+ * always returns None. */
+TouchResult dispatch_touch(int x, int y);
 
 }  /* namespace dev_menu */

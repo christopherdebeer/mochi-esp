@@ -43,11 +43,35 @@ static bool                 s_started = false;
 
 static const char *mode_name(Mode m) {
     switch (m) {
-        case Mode::Live:        return "live";
-        case Mode::Splash:      return "splash";
-        case Mode::Diagnostics: return "diag";
-        default:                return "?";
+        case Mode::Live:     return "live";
+        case Mode::Splash:   return "splash";
+        case Mode::Settings: return "settings";
+        default:             return "?";
     }
+}
+
+/* ─── Settings-screen action buttons ───────────────────────────────
+ *
+ * Each tappable region renders a 1-px bordered rect with its label
+ * centred inside. Hit-tests resolve via dispatch_touch() at the
+ * coords stored here. Coordinates are panel pixels.
+ *
+ * Buttons are zero-sized when not laid out (current() != Settings),
+ * so dispatch_touch trivially misses on any other screen. */
+struct Button {
+    int x, y, w, h;
+    TouchResult action;
+    const char *label;
+};
+/* Single Settings button today. The list is sized for headroom; new
+ * actions just append + bump the count. */
+static constexpr int MAX_BUTTONS = 4;
+static Button   s_buttons[MAX_BUTTONS] = {};
+static int      s_button_count = 0;
+
+static void clear_buttons(void) {
+    s_button_count = 0;
+    for (int i = 0; i < MAX_BUTTONS; i++) s_buttons[i] = {};
 }
 
 /* Background watcher: 25 ms cadence falling-edge detection on BOOT.
@@ -95,7 +119,21 @@ void exit_to_live(void) {
     if (s_mode != Mode::Live) {
         ESP_LOGI(TAG, "exit → live");
         s_mode = Mode::Live;
+        clear_buttons();
     }
+}
+
+TouchResult dispatch_touch(int x, int y) {
+    if (s_mode == Mode::Live) return TouchResult::None;
+    for (int i = 0; i < s_button_count; i++) {
+        const Button &b = s_buttons[i];
+        if (x >= b.x && x < b.x + b.w &&
+            y >= b.y && y < b.y + b.h) {
+            ESP_LOGI(TAG, "button hit: '%s'", b.label);
+            return b.action;
+        }
+    }
+    return TouchResult::None;
 }
 
 /* Advance helper: Live → Splash, then cycle through the rest of the
@@ -141,41 +179,84 @@ static const char *phase_label(int phase) {
     }
 }
 
-static void render_diagnostics(epaper_driver_display *epd,
-                               const char *pet_name, const char *version,
-                               const char *ip_str, const char *ssid,
-                               int net_phase, int batt_pct) {
+/* Stamp a 1-px border around a rect using the slow per-pixel API. We
+ * only call this on the Settings screen, where pre-render cost is
+ * paid once per BOOT-press. */
+static void draw_button_border(epaper_driver_display *epd, const Button &b) {
+    for (int dx = 0; dx < b.w; dx++) {
+        epd->EPD_DrawColorPixel(b.x + dx, b.y, DRIVER_COLOR_BLACK);
+        epd->EPD_DrawColorPixel(b.x + dx, b.y + b.h - 1, DRIVER_COLOR_BLACK);
+    }
+    for (int dy = 0; dy < b.h; dy++) {
+        epd->EPD_DrawColorPixel(b.x, b.y + dy, DRIVER_COLOR_BLACK);
+        epd->EPD_DrawColorPixel(b.x + b.w - 1, b.y + dy, DRIVER_COLOR_BLACK);
+    }
+}
+
+static void register_button(int x, int y, int w, int h,
+                            TouchResult action, const char *label) {
+    if (s_button_count >= MAX_BUTTONS) return;
+    s_buttons[s_button_count++] = { x, y, w, h, action, label };
+}
+
+static void render_settings(epaper_driver_display *epd,
+                            const char *pet_name, const char *version,
+                            const char *ip_str, const char *ssid,
+                            int net_phase, int batt_pct) {
     epd_ui::clear(epd);
-    epd_ui::draw_text_centered(epd, 6, 2, "DIAGNOSTICS");
+    clear_buttons();
+
+    epd_ui::draw_text_centered(epd, 4, 2, "SETTINGS");
 
     char line[40];
-    int y = 32;
-    snprintf(line, sizeof(line), "fw  %s", version ? version : "?");
-    epd_ui::draw_text(epd, 4, y, 1, line); y += 12;
-    snprintf(line, sizeof(line), "pet %s", pet_name ? pet_name : "?");
-    epd_ui::draw_text(epd, 4, y, 1, line); y += 12;
-    snprintf(line, sizeof(line), "net %s", phase_label(net_phase));
-    epd_ui::draw_text(epd, 4, y, 1, line); y += 12;
-    snprintf(line, sizeof(line), "ip  %s", ip_str && *ip_str ? ip_str : "-");
-    epd_ui::draw_text(epd, 4, y, 1, line); y += 12;
+    int y = 26;
+    snprintf(line, sizeof(line), "fw   %s", version ? version : "?");
+    epd_ui::draw_text(epd, 4, y, 1, line); y += 10;
+    snprintf(line, sizeof(line), "pet  %s", pet_name ? pet_name : "?");
+    epd_ui::draw_text(epd, 4, y, 1, line); y += 10;
+    snprintf(line, sizeof(line), "net  %s", phase_label(net_phase));
+    epd_ui::draw_text(epd, 4, y, 1, line); y += 10;
+    snprintf(line, sizeof(line), "ip   %s", ip_str && *ip_str ? ip_str : "-");
+    epd_ui::draw_text(epd, 4, y, 1, line); y += 10;
     snprintf(line, sizeof(line), "ssid %s", ssid && *ssid ? ssid : "-");
-    epd_ui::draw_text(epd, 4, y, 1, line); y += 12;
+    epd_ui::draw_text(epd, 4, y, 1, line); y += 10;
 
-    /* Heap & PSRAM — useful when chasing alloc failures. free / total
-     * in KB to fit the line within ~25 chars. */
-    const size_t free_int  = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    const size_t free_psr  = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    snprintf(line, sizeof(line), "ram %uK free", (unsigned)(free_int / 1024));
-    epd_ui::draw_text(epd, 4, y, 1, line); y += 12;
-    snprintf(line, sizeof(line), "psr %uK free", (unsigned)(free_psr / 1024));
-    epd_ui::draw_text(epd, 4, y, 1, line); y += 12;
-
+    /* Heap & PSRAM — useful when chasing alloc failures. */
+    const size_t free_int = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    const size_t free_psr = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    snprintf(line, sizeof(line), "ram  %uK", (unsigned)(free_int / 1024));
+    epd_ui::draw_text(epd, 4, y, 1, line); y += 10;
+    snprintf(line, sizeof(line), "psr  %uK", (unsigned)(free_psr / 1024));
+    epd_ui::draw_text(epd, 4, y, 1, line); y += 10;
     snprintf(line, sizeof(line), "batt %d%%", batt_pct);
     epd_ui::draw_text(epd, 4, y, 1, line); y += 14;
 
-    /* Wheel position chip at the bottom: reduces "did the press
-     * register?" anxiety on the partial-refresh cadence. */
-    epd_ui::draw_text(epd, 4, MOCHI_EPD_HEIGHT - 12, 1, "BOOT next  5s exit");
+    /* Action buttons. Layout from the bottom of the panel so info
+     * lines aren't squeezed. Wider + taller than the first cut so
+     * there's a generous tap target — the 16-px-high original was
+     * fiddly to hit at arm's length on the small panel. */
+    constexpr int BTN_MARGIN = 2;
+    constexpr int BTN_W = MOCHI_EPD_WIDTH - 2 * BTN_MARGIN;
+    constexpr int BTN_H = 28;
+    constexpr int BTN_LEFT = BTN_MARGIN;
+    constexpr int BOTTOM_HINT_Y = MOCHI_EPD_HEIGHT - 10;
+    int by = BOTTOM_HINT_Y - BTN_H - 4;
+
+    {
+        Button b = { BTN_LEFT, by, BTN_W, BTN_H,
+                     TouchResult::OpenKeyPortal, "open key portal" };
+        draw_button_border(epd, b);
+        const int label_w = (int)strlen(b.label) * 8;
+        const int lx = b.x + (b.w - label_w) / 2;
+        const int ly = b.y + (b.h - 8) / 2;
+        epd_ui::draw_text(epd, lx, ly, 1, b.label);
+        register_button(b.x, b.y, b.w, b.h, b.action, b.label);
+        by -= BTN_H + 4;
+    }
+
+    /* Wheel-position hint: BOOT advances, 60 s timeout returns to
+     * live, touch-outside-button also exits. */
+    epd_ui::draw_text(epd, 4, BOTTOM_HINT_Y, 1, "BOOT next  60s exit");
 
     epd->EPD_Init_Partial();
     epd->EPD_DisplayPart();
@@ -189,9 +270,9 @@ static void render_mode(epaper_driver_display *epd, Mode m,
         case Mode::Splash:
             render_splash(epd, paired, pet_name, version);
             break;
-        case Mode::Diagnostics:
-            render_diagnostics(epd, pet_name, version, ip_str, ssid,
-                               net_phase, batt_pct);
+        case Mode::Settings:
+            render_settings(epd, pet_name, version, ip_str, ssid,
+                            net_phase, batt_pct);
             break;
         default:
             /* Live is rendered by main.cpp's render_resting on the
@@ -217,6 +298,10 @@ bool tick(epaper_driver_display *epd, bool paired,
         const Mode next = advance(s_mode);
         ESP_LOGI(TAG, "BOOT press: %s → %s",
             mode_name(s_mode), mode_name(next));
+        /* Buttons live only while their owning screen is up. Clear
+         * before re-rendering so a stale Settings hit-rect can't
+         * leak into a touch dispatched against the next screen. */
+        clear_buttons();
         s_mode = next;
         s_entered_mode_us = now_us;
         render_mode(epd, s_mode, paired, pet_name, version,
@@ -226,6 +311,7 @@ bool tick(epaper_driver_display *epd, bool paired,
                (now_us - s_entered_mode_us) >= INACTIVITY_US) {
         ESP_LOGI(TAG, "inactivity timeout → live");
         s_mode = Mode::Live;
+        clear_buttons();
         changed = true;
     }
     return changed;

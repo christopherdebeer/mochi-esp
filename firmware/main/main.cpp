@@ -1058,16 +1058,19 @@ extern "C" void app_main(void) {
             }
         };
 
-        /* Left: time. Right: battery. Centre: pet name (centred on
-         * panel midpoint, not the slot between the two — the centre
-         * looks more visually balanced). Wifi glyph sits between the
-         * time text and the centred name. */
+        /* Left: time. Right: wifi-glyph + battery. Centre: pet name
+         * (centred on panel midpoint, not the slot between the
+         * neighbours — the centre looks more visually balanced).
+         * Net status sat left of the pet name in the first cut, but
+         * grouping it with battery on the right reads as "device
+         * health" cluster — symmetric with the time/clock cluster on
+         * the left. */
         constexpr int STATUS_PAD = 4;
         blit_status_text(time_str, STATUS_PAD);
 
         const int batt_w = (int)strlen(batt_str) * 8;
-        blit_status_text(batt_str,
-            (int)MOCHI_EPD_WIDTH - STATUS_PAD - batt_w);
+        const int batt_x = (int)MOCHI_EPD_WIDTH - STATUS_PAD - batt_w;
+        blit_status_text(batt_str, batt_x);
 
         const int name_w = (int)strlen(pair.pet_name) * 8;
         int name_x = ((int)MOCHI_EPD_WIDTH - name_w) / 2;
@@ -1114,11 +1117,12 @@ extern "C" void app_main(void) {
                 phase == NetPhase::Online      ? WIFI_ONLINE :
                 phase == NetPhase::Connecting  ? WIFI_CONNECTING :
                                                  WIFI_OFFLINE;
-            /* Centre vertically inside the bar; horizontally, sit a
-             * couple of pixels left of the pet name. The 8×8 glyph
-             * convention reads bit 0 as leftmost column (matching
-             * font8x8_glyph) — keep that. */
-            const int gx = name_x - 11;   /* glyph width 7 + 4 px gap */
+            /* Centre vertically inside the bar; horizontally sit
+             * just left of the battery text — 7-px glyph + 3-px gap
+             * before the digits. Right-side cluster (net + battery)
+             * reads as one "device health" group; pet name owns the
+             * centre. */
+            const int gx = batt_x - 10;
             const int gy = STATUS_TEXT_Y + 1;
             for (int row = 0; row < 7; row++) {
                 const uint8_t bits = gly[row];
@@ -1630,12 +1634,28 @@ extern "C" void app_main(void) {
      * when net_worker reports Offline; dismissed by a tap outside the
      * action button, or actioned (→ reboot into SoftAP provisioning). */
     bool wifi_dialog_shown = false;
+    /* One-tick suppression: when dev_menu consumes a touch we set this
+     * so the NEXT touch event the FT6336 reports (often a press → release
+     * pair across two ticks on the slow main-loop cadence) doesn't leak
+     * into the live touch path and re-fire as a pet-body tap. */
+    bool drain_next_touch = false;
     bool wifi_dialog_dismissed = false;
     ui_dialog::HitRect wifi_dialog_hit = {};
 
     while (true) {
         touch::Event ev;
         bool got_touch = touch::wait_event(&ev, 1000);
+
+        /* Touch-drain guard. If a previous tick set this, eat the
+         * first touch we see and reset. Lets dev_menu / dialog flows
+         * confidently mark "this gesture has been consumed" without
+         * leaking it into the live tap pipeline on the next iteration. */
+        if (got_touch && drain_next_touch) {
+            ESP_LOGI(TAG, "drained one touch (%u,%u)",
+                (unsigned)ev.x, (unsigned)ev.y);
+            drain_next_touch = false;
+            got_touch = false;
+        }
 
         /* Sleep gesture takes priority over touch. The wait_event
          * 1-second timeout means we check this at least once per
@@ -1679,12 +1699,32 @@ extern "C" void app_main(void) {
                 s_net_ip, s_net_ssid,
                 (int)s_net_phase, batt_pct_now);
             if (dev_menu::active()) {
-                /* Touch exits the debug wheel back to live; main.cpp's
-                 * regular render path picks up on the next tick. */
                 if (got_touch) {
-                    ESP_LOGI(TAG, "touch in dev_menu → exit to live");
+                    /* Action buttons (e.g. Settings → "open key portal")
+                     * are tappable rects on the active screen. A button
+                     * hit dispatches to its action; a miss exits the
+                     * wheel back to live as before. The wheel always
+                     * exits before the action fires so the action's UI
+                     * (key_portal, …) owns the screen cleanly. */
+                    const auto act = dev_menu::dispatch_touch(
+                        (int)ev.x, (int)ev.y);
                     dev_menu::exit_to_live();
                     s_net_render_dirty = true;
+                    if (act == dev_menu::TouchResult::OpenKeyPortal) {
+                        ESP_LOGI(TAG, "dev_menu → opening key portal");
+                        key_portal::start(epd);
+                    } else {
+                        ESP_LOGI(TAG, "touch in dev_menu → exit to live");
+                    }
+                    /* Squelch this gesture: the `continue` below
+                     * already skips the live touch handler for THIS
+                     * tick. drain_next_touch covers the FT6336's
+                     * follow-up event (often a release pulse arriving
+                     * a tick later) so a Settings miss doesn't re-
+                     * register as a pet-body tap on the just-revealed
+                     * live render. */
+                    got_touch = false;
+                    drain_next_touch = true;
                 }
                 continue;  /* dev_menu owns the screen */
             }
