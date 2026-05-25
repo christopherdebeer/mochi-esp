@@ -1074,34 +1074,48 @@ extern "C" void app_main(void) {
         const voice::Phase v_phase = voice::phase();
 
         /* Dedicated voice control: a mic glyph (idle) / filled stop
-         * square (active) at the far left of the bar. Tapping the left
-         * edge of the status bar starts/stops a session (touch loop).
-         * 7×7, same MSB-first draw convention as the wifi glyph.
-         * design/23. */
+         * square (active) at the far left of the bar. Tapping the
+         * left edge of the bar (a generously-sized hit zone — see
+         * the touch handler) starts/stops a session.
+         *
+         * The original 7×7 glyph was hard to even SEE on hardware,
+         * let alone aim a finger at. 2× scale (14×14) sits within
+         * the 19-tall bar with a 2-px margin top/bottom, and the
+         * surrounding visual mass makes the affordance read like a
+         * button rather than a stray pixel. Tap zone is wider than
+         * the glyph so a slightly-off finger still lands. design/23. */
         {
             static const uint8_t MIC_GLYPH[7] = {
                 0b00011100, 0b00011100, 0b00011100, 0b00011100,
                 0b00001000, 0b00111110, 0b00001000,
             };
-            const int mx = 2, my = STATUS_TEXT_Y + 1;
+            constexpr int MIC_SCALE = 2;
+            constexpr int MIC_PX = 7 * MIC_SCALE;       /* 14 */
+            const int mx = 3;
+            const int my = (STATUS_BAR_H - MIC_PX) / 2; /* y=2 in a 19-tall bar */
             for (int row = 0; row < 7; row++) {
                 for (int col = 0; col < 7; col++) {
                     const bool on = v_active
                         ? (row >= 1 && row <= 5 && col >= 1 && col <= 5)
                         : (((MIC_GLYPH[row] >> col) & 1) != 0);
                     if (!on) continue;
-                    const int px = mx + col, py = my + row;
-                    if (px < 0 || py < 0 ||
-                        px >= (int)MOCHI_EPD_WIDTH ||
-                        py >= (int)MOCHI_EPD_HEIGHT) continue;
-                    const size_t off = (size_t)py * 25 + ((size_t)px >> 3);
-                    composite[off] &= (uint8_t)~(1u << (7 - ((size_t)px & 7)));
+                    for (int dy = 0; dy < MIC_SCALE; dy++) {
+                        for (int dx = 0; dx < MIC_SCALE; dx++) {
+                            const int px = mx + col * MIC_SCALE + dx;
+                            const int py = my + row * MIC_SCALE + dy;
+                            if (px < 0 || py < 0 ||
+                                px >= (int)MOCHI_EPD_WIDTH ||
+                                py >= (int)MOCHI_EPD_HEIGHT) continue;
+                            const size_t off = (size_t)py * 25 + ((size_t)px >> 3);
+                            composite[off] &= (uint8_t)~(1u << (7 - ((size_t)px & 7)));
+                        }
+                    }
                 }
             }
         }
 
-        /* Time sits just right of the mic glyph. */
-        blit_status_text(time_str, 12);
+        /* Time sits past the wider mic glyph. */
+        blit_status_text(time_str, 22);
 
         const int batt_w = (int)strlen(batt_str) * 8;
         const int batt_x = (int)MOCHI_EPD_WIDTH - STATUS_PAD - batt_w;
@@ -1687,6 +1701,12 @@ extern "C" void app_main(void) {
      * pair across two ticks on the slow main-loop cadence) doesn't leak
      * into the live touch path and re-fire as a pet-body tap. */
     bool drain_next_touch = false;
+    /* Deferred substrate POST for an EVENT_TALKED that fired at voice
+     * session start. Held until the session ends so the mutate's TLS
+     * handshake doesn't fight the OpenAI signaling handshake for
+     * internal heap (MBEDTLS_ERR_SSL_ALLOC_FAILED otherwise). 0 when
+     * no enqueue is pending. */
+    int64_t s_pending_talked_at = 0;
     bool wifi_dialog_dismissed = false;
     ui_dialog::HitRect wifi_dialog_hit = {};
 
@@ -1991,6 +2011,13 @@ extern "C" void app_main(void) {
             render_with_expression("neutral", false, nullptr);
             last_voice_phase = voice::Phase::Idle;
             device_diag_event(DIAG_INFO, "voice", "session end", nullptr);
+            /* Flush any deferred EVENT_TALKED enqueue now that the
+             * voice session's TLS connection is gone — mbedtls has
+             * its internal heap back. */
+            if (s_pending_talked_at != 0) {
+                pet_sync_enqueue(EVENT_TALKED, s_pending_talked_at);
+                s_pending_talked_at = 0;
+            }
             /* Travel responsiveness (design/17): a move_to_location said
              * during the session only changed pets.location server-side.
              * Pull once now so the travel block below renders the new
@@ -2217,13 +2244,26 @@ extern "C" void app_main(void) {
          * non-blocking now (mint runs on the worker), so there's no
          * hold + drain dance. */
         {
+            /* Mic tap zone — generously bigger than the rendered
+             * 14×14 glyph. e-ink tap targets need slop because (a)
+             * the panel is small, (b) capacitive touch reports
+             * cluster centroid not finger contact, and (c) without
+             * haptic feedback users tend to over-aim. 56×32 covers
+             * the bar height plus a strip into the scene, so a
+             * slightly-low or slightly-right tap still registers. */
             const bool tapped_mic =
-                (int)ev.y < STATUS_BAR_H && (int)ev.x < 40;
+                (int)ev.y < STATUS_BAR_H + 14 && (int)ev.x < 56;
             if (voice::is_active()) {
                 ESP_LOGI(TAG, "voice active — tap → stop session");
                 voice::stop_session();
                 render_with_expression("neutral", false, nullptr);
                 last_voice_phase = voice::Phase::Idle;
+                /* Flush any deferred EVENT_TALKED — same reasoning
+                 * as the auto-stop path above. */
+                if (s_pending_talked_at != 0) {
+                    pet_sync_enqueue(EVENT_TALKED, s_pending_talked_at);
+                    s_pending_talked_at = 0;
+                }
                 continue;
             }
             if (tapped_mic) {
@@ -2237,11 +2277,21 @@ extern "C" void app_main(void) {
                 render_with_expression("waking_up", false, nullptr);
                 last_voice_phase = voice::Phase::Connecting;
                 if (voice::start_session() == 0) {
+                    /* Local effects are cheap (event log + last_int
+                     * touch) so they fire immediately. The
+                     * pet_sync_enqueue mutate, however, opens a
+                     * concurrent TLS socket to mochi.val.run while
+                     * voice is mid-handshake to api.openai.com — the
+                     * two together exhaust internal heap and we get
+                     * MBEDTLS_ERR_SSL_ALLOC_FAILED on the OpenAI
+                     * call, killing the session. Defer the mutate
+                     * until session end (handled below in the
+                     * stop_requested path). */
                     const int64_t talked_at = now_ms_wall();
                     event_log_append(EVENT_TALKED, talked_at);
-                    pet_sync_enqueue(EVENT_TALKED, talked_at);
                     pet_sync_touch(talked_at);
                     s_dev_pet.last_interaction_at = talked_at;
+                    s_pending_talked_at = talked_at;
                 } else {
                     ESP_LOGW(TAG, "voice start failed");
                     render_with_expression("neutral", false, nullptr);
