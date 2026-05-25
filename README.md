@@ -70,17 +70,21 @@ the device-vs-server partition.
 ## Building and flashing
 
 The firmware isn't built by val.town — it's an ESP-IDF project that
-compiles locally. From a clean `vt clone`:
+compiles locally. From a clean `vt clone`, one command installs the
+toolchain (ESP-IDF v5.3 + esp32s3), and it's safe to re-run in a fresh
+container or web session:
 
 ```sh
-. ~/esp/esp-idf/export.sh                       # set up the IDF env
+firmware/scripts/setup-esp-idf.sh               # install ESP-IDF + toolchain (~2 GB, first run)
+. ~/esp/esp-idf/export.sh                        # activate the IDF env
 cd firmware
-idf.py set-target esp32s3                       # one-time
-idf.py reconfigure                              # fetches managed_components/
-idf.py -p /dev/cu.usbmodem* flash monitor       # build + flash + tail
+idf.py set-target esp32s3                        # one-time
+idf.py reconfigure                               # fetches managed_components/
+idf.py -p /dev/cu.usbmodem* flash monitor        # build + flash + tail
 ```
 
-Full toolchain setup, port-name conventions per OS, and troubleshooting:
+Repeatable setup (incl. remote/web sessions): **`firmware/TOOLCHAIN.md`**.
+Port-name conventions per OS, flashing, and troubleshooting:
 **`firmware/README.md`**.
 
 ## Status (as of 2026-05-24, release v0.0.19 · v0.0.20 pending)

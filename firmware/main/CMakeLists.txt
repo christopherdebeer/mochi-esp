@@ -40,6 +40,8 @@ idf_component_register(
         "device_pair.cpp"
         "factory_reset.cpp"
         "compositor.cpp"
+        "ui_dialog.cpp"
+        "dev_menu.cpp"
         "battery.cpp"
         "sleep_gesture.cpp"
         "sprite_cache.cpp"

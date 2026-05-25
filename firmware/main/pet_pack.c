@@ -19,15 +19,12 @@ extern const uint8_t _binary_pet_a_mpk_start[]
 static mpk_t s_pack;
 static bool  s_open;
 
-bool pet_pack_init(void) {
-    if (s_open) return true;
-    /* "Sync at boot": prefer the server pack (substrate-authored) over
-     * the cached copy over the embedded baseline. pet_a.mpk is the
-     * pet-v1 sheet. See pack_cache.h / design/15. */
-    const uint8_t *bytes = pack_cache_active("pet-v1", _binary_pet_a_mpk_start);
+/* Open `bytes` into s_pack and validate the mask-plane requirement.
+ * Used by both init paths. Returns true on success. */
+static bool open_into_active(const uint8_t *bytes, const char *src) {
     int rc = mpk_open(bytes, &s_pack);
     if (rc != 0) {
-        ESP_LOGE(TAG, "mpk_open rc=%d", rc);
+        ESP_LOGE(TAG, "mpk_open(%s) rc=%d", src, rc);
         return false;
     }
     if (!s_pack.has_mask) {
@@ -35,11 +32,30 @@ bool pet_pack_init(void) {
                       " opaque against the scene; refusing to use it");
         return false;
     }
-    ESP_LOGI(TAG, "pet_pack: %ux%u %u cells (mask=%d) ready",
+    ESP_LOGI(TAG, "pet_pack: %ux%u %u cells (mask=%d, src=%s) ready",
         (unsigned)s_pack.cell_w, (unsigned)s_pack.cell_h,
-        (unsigned)s_pack.count, (int)s_pack.has_mask);
+        (unsigned)s_pack.count, (int)s_pack.has_mask, src);
     s_open = true;
     return true;
+}
+
+bool pet_pack_init_embedded(void) {
+    if (s_open) return true;
+    return open_into_active(_binary_pet_a_mpk_start, "embedded");
+}
+
+bool pet_pack_init(void) {
+    /* "Sync at boot": prefer the server pack (substrate-authored) over
+     * the cached copy over the embedded baseline. pet_a.mpk is the
+     * pet-v1 sheet. See pack_cache.h / design/15.
+     *
+     * Idempotent on success: if a previous embedded-only init opened
+     * the pack we re-resolve the active bytes (server may now be
+     * reachable) and re-validate. The fast path (already on the
+     * server-synced pack) is a near-no-op — pack_cache_active just
+     * reads the cached ETag and returns the cached buffer. */
+    const uint8_t *bytes = pack_cache_active("pet-v1", _binary_pet_a_mpk_start);
+    return open_into_active(bytes, "synced");
 }
 
 bool pet_pack_has(const char *expr) {

@@ -35,31 +35,43 @@ static const uint8_t *s_home_bytes;
  * init / load_home (bundle) and cleared by load_bytes (foreign). */
 static bool      s_is_bundle;
 
-bool scene_pack_init(void) {
-    if (s_open) return true;
-    /* "Sync at boot": prefer the server pack (substrate-authored) over
-     * the cached copy over the embedded baseline. scenes_a.mpk is the
-     * scene-bundle-a sheet. See pack_cache.h / design/15. */
-    const uint8_t *bytes =
-        pack_cache_active("scene-bundle-a", _binary_scenes_a_mpk_start);
+/* Open `bytes` into the active s_pack and seed the home/index state.
+ * Used by both init paths so the validation + logging stays in one
+ * place. */
+static bool open_into_active(const uint8_t *bytes, const char *src) {
     int rc = mpk_open(bytes, &s_pack);
     if (rc != 0) {
-        ESP_LOGE(TAG, "mpk_open rc=%d", rc);
+        ESP_LOGE(TAG, "mpk_open(%s) rc=%d", src, rc);
         return false;
     }
     s_home_bytes = bytes;
-    s_is_bundle = true;
+    s_is_bundle  = true;
     if (s_pack.count != SCENES_A_COUNT) {
         ESP_LOGW(TAG, "pack count %u != meta count %u — meta header"
                       " out of sync with .mpk binary",
             (unsigned)s_pack.count, (unsigned)SCENES_A_COUNT);
     }
-    ESP_LOGI(TAG, "scene_pack: %ux%u %u cells (mask=%d) ready",
+    ESP_LOGI(TAG, "scene_pack: %ux%u %u cells (mask=%d, src=%s) ready",
         (unsigned)s_pack.cell_w, (unsigned)s_pack.cell_h,
-        (unsigned)s_pack.count, (int)s_pack.has_mask);
-    s_open = true;
+        (unsigned)s_pack.count, (int)s_pack.has_mask, src);
+    s_open    = true;
     s_current = 0;
     return true;
+}
+
+bool scene_pack_init_embedded(void) {
+    if (s_open) return true;
+    return open_into_active(_binary_scenes_a_mpk_start, "embedded");
+}
+
+bool scene_pack_init(void) {
+    /* "Sync at boot" path: pack_cache_active hits the network. Idempotent
+     * once WiFi is up — re-running after a prior embedded init upgrades
+     * the active bytes to the server-authored pack. Pre-WiFi callers
+     * must use scene_pack_init_embedded(). */
+    const uint8_t *bytes =
+        pack_cache_active("scene-bundle-a", _binary_scenes_a_mpk_start);
+    return open_into_active(bytes, "synced");
 }
 
 bool scene_pack_load_home(void) {

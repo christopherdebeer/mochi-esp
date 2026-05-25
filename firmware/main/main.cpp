@@ -39,6 +39,7 @@
 #include "board_pins.h"
 #include "epaper_driver_bsp.h"
 #include "epd_ui.h"
+#include "dev_menu.h"
 #include "nvs_creds.h"
 #include "wifi_prov.h"
 #include "wifi_sta.h"
@@ -51,6 +52,7 @@
 #include "device_pair.h"
 #include "factory_reset.h"
 #include "compositor.h"
+#include "ui_dialog.h"
 #include "font8x8.h"
 #include "battery.h"
 #include "sleep_gesture.h"
@@ -388,6 +390,171 @@ static void peripheral_rails_on(void) {
  * (e.g. notification flash on incoming voice).
  */
 
+/* ─── Non-blocking connectivity (design/21-nonblocking-wifi.md) ────
+ *
+ * On the paired warm-boot path the pet renders from the embedded packs
+ * before WiFi is touched; this worker then brings the network up and
+ * runs everything that needs it (SNTP, OTA, ETag cache refresh, state
+ * pull, cold-cache care-icon fetch) off the boot critical path. It
+ * signals the main loop through flags rather than rendering itself, so
+ * the main loop remains the single owner of the panel. */
+enum class NetPhase : uint8_t { Connecting, Online, Offline };
+static volatile NetPhase s_net_phase = NetPhase::Connecting;
+
+/* Last-known IP + SSID, populated by net_worker on a successful join.
+ * Read-only outside the worker; kept module-scope so the dev_menu
+ * Diagnostics screen can surface them without threading them through
+ * the touch loop. Empty before the first join. */
+static char s_net_ip[16] = {};
+static char s_net_ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
+
+/* Set true when the worker has produced something worth re-rendering
+ * (a fresh state snapshot, invalidated cache, or freshly-fetched care
+ * icons). The main loop consumes + clears it. */
+static volatile bool s_net_render_dirty = false;
+
+/* What the worker borrows from app_main scope. app_main never returns,
+ * so a stack-allocated instance there outlives the worker. */
+struct NetCtx {
+    uint8_t *icon_ink[4];
+    uint8_t *icon_mask[4];
+    bool      cache_ok;
+    bool      icons_cached;   /* main already loaded all 4 from cache */
+};
+
+static void net_worker(void *arg) {
+    NetCtx *ctx = (NetCtx *)arg;
+
+    char ip_str[16] = {};
+    char joined_ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
+    wifi_sta::init_stack();
+    if (!wifi_sta::connect_any(ip_str, sizeof(ip_str),
+                               joined_ssid, sizeof(joined_ssid))) {
+        ESP_LOGW(TAG, "net_worker: no stored network reachable — offline");
+        device_diag_event(DIAG_WARN, "wifi", "offline", nullptr);
+        s_net_phase = NetPhase::Offline;
+        s_net_render_dirty = true;   /* repaint chrome with offline glyph */
+        vTaskDelete(nullptr);
+        return;
+    }
+    ESP_LOGI(TAG, "net_worker: online IP=%s ssid='%s'", ip_str, joined_ssid);
+    /* Publish IP + SSID so the dev_menu Diagnostics screen can read
+     * them. Single writer (this task), readers are non-mutating. */
+    snprintf(s_net_ip,   sizeof(s_net_ip),   "%s", ip_str);
+    snprintf(s_net_ssid, sizeof(s_net_ssid), "%s", joined_ssid);
+    {
+        char c[120];
+        snprintf(c, sizeof(c), "{\"ssid\":\"%s\",\"ip\":\"%s\"}",
+            joined_ssid, ip_str);
+        device_diag_event(DIAG_INFO, "wifi", "joined", c);
+    }
+    device_diag_flush();
+    s_net_phase = NetPhase::Online;
+    s_net_render_dirty = true;   /* repaint chrome with online glyph */
+
+    /* OTA: a successful join is the health signal that promotes a
+     * freshly-installed pending image and starts the update poller. */
+    ota_update::mark_valid_if_pending();
+    ESP_LOGI(TAG, "running firmware version: %s", ota_update::current_version());
+    ota_update::start_background_task(MOCHI_OTA_MANIFEST_URL);
+
+    /* Wall-clock sync for substrate timestamps. */
+    time_sync_init();
+
+    /* Upgrade the scene + pet packs from the server now that lwip is
+     * up. Boot path opened the embedded baseline so the first frame
+     * could render offline; pack_cache_active here probes the ETag
+     * and refreshes only if the server has a newer pack. On change
+     * the active mpk_t is replaced and we flag the renderer dirty so
+     * the next tick re-blits. */
+    if (scene_pack_init()) {
+        s_net_render_dirty = true;
+    }
+    if (pet_pack_init()) {
+        s_net_render_dirty = true;
+    }
+
+    /* Per-sheet ETag refresh: drop cache where server artwork changed
+     * so the next render refetches. */
+    if (ctx->cache_ok) {
+        struct { const char *sheet; const char *url; } probes[] = {
+            { "pet-v1",   "https://mochi.val.run/devsprite/cell/pet-v1/neutral" },
+            { "ui-v1",    "https://mochi.val.run/devsprite/cell/ui-v1/heart"    },
+            { "scene-v1", "https://mochi.val.run/devsprite/scene-v1/day"        },
+        };
+        for (auto &p : probes) {
+            char remote[40] = {}, local[40] = {};
+            if (!sprite_fetch_head_etag(p.url, remote, sizeof(remote))) {
+                ESP_LOGW(TAG, "etag probe failed for '%s'", p.sheet);
+                continue;
+            }
+            sprite_cache::load_etag(p.sheet, local, sizeof(local));
+            if (strcmp(remote, local) != 0) {
+                ESP_LOGI(TAG, "etag '%s' changed — invalidating", p.sheet);
+                sprite_cache::invalidate_sheet(p.sheet);
+                sprite_cache::store_etag(p.sheet, remote);
+                s_net_render_dirty = true;
+            }
+        }
+    }
+
+    /* Cold-cache care icons: fetch native, downsample, cache, and fill
+     * the buffers the chrome reads. Skipped when main already loaded
+     * all four from cache (the warm case). */
+    if (!ctx->icons_cached) {
+        uint8_t *ni = (uint8_t *)heap_caps_malloc(UI_CELL_NATIVE_BYTES, MALLOC_CAP_SPIRAM);
+        uint8_t *nm = (uint8_t *)heap_caps_malloc(UI_CELL_NATIVE_BYTES, MALLOC_CAP_SPIRAM);
+        char suffix[24];
+        snprintf(suffix, sizeof(suffix), "_icon_%ux%u",
+            (unsigned)ICON_W, (unsigned)ICON_H);
+        for (int i = 0; ni && nm && i < 4; i++) {
+            char url[160];
+            snprintf(url, sizeof(url), "%s%s",
+                MOCHI_UI_CELL_URL_BASE, CARE_ICON_KEYS[i]);
+            uint16_t w = 0, h = 0; uint32_t ms = 0;
+            if (!sprite_fetch_cell(url, ni, nm, UI_CELL_NATIVE_BYTES,
+                                   &w, &h, &ms) ||
+                w != UI_CELL_NATIVE_W || h != UI_CELL_NATIVE_H) {
+                ESP_LOGW(TAG, "icon '%s' fetch failed", CARE_ICON_KEYS[i]);
+                continue;
+            }
+            memset(ctx->icon_ink[i],  0xFF, ICON_BYTES);
+            memset(ctx->icon_mask[i], 0xFF, ICON_BYTES);
+            compositor::downsample_plane(ctx->icon_ink[i],  ICON_W, ICON_H,
+                ni, UI_CELL_NATIVE_W, UI_CELL_NATIVE_H);
+            compositor::downsample_plane(ctx->icon_mask[i], ICON_W, ICON_H,
+                nm, UI_CELL_NATIVE_W, UI_CELL_NATIVE_H);
+            if (ctx->cache_ok) {
+                char ink_s[40], mask_s[40];
+                snprintf(ink_s,  sizeof(ink_s),  "%s%s_ink",
+                    CARE_ICON_KEYS[i], suffix);
+                snprintf(mask_s, sizeof(mask_s), "%s%s_mask",
+                    CARE_ICON_KEYS[i], suffix);
+                sprite_cache::store("ui-v1", ink_s,  ctx->icon_ink[i],  ICON_BYTES);
+                sprite_cache::store("ui-v1", mask_s, ctx->icon_mask[i], ICON_BYTES);
+            }
+            ESP_LOGI(TAG, "icon '%s' fetched + cached", CARE_ICON_KEYS[i]);
+            s_net_render_dirty = true;
+        }
+        free(ni);
+        free(nm);
+    }
+
+    /* Authoritative state pull. pet_sync caches the snapshot
+     * internally, so current_pet_decayed picks it up on the next
+     * render once we flag dirty. */
+    {
+        pet_t snap; pet_event_t evs[12]; size_t n = 0;
+        if (pet_sync_pull_now(&snap, evs, sizeof(evs)/sizeof(evs[0]), &n)) {
+            s_net_render_dirty = true;
+        } else {
+            ESP_LOGW(TAG, "state pull failed; keeping dev-pet projection");
+        }
+    }
+
+    vTaskDelete(nullptr);
+}
+
 extern "C" void app_main(void) {
     ESP_LOGI(TAG, "—— mochi M3: boot ——");
     log_chip_info();
@@ -430,6 +597,10 @@ extern "C" void app_main(void) {
     epd->EPD_Init();
     epd->EPD_Display();
     epd->EPD_DisplayPartBaseImage();
+
+    /* Dev-menu wheel: BOOT short-press cycles splash → diagnostics →
+     * (future modes), 5 s inactivity returns to live. See dev_menu.h. */
+    dev_menu::init(epd);
 
     /* Factory-reset watchdog. Runs in parallel with everything from
      * here on, so the gesture works in any state — including stuck
@@ -502,87 +673,92 @@ extern "C" void app_main(void) {
 
     /* --- Already-provisioned branch. --- */
 
-    size_t cred_count = nvs_creds_count();
-    ESP_LOGI(TAG, "have %u stored network(s) → scan + connect_any",
-        (unsigned)cred_count);
-    wifi_sta::init_stack();
+    /*
+     * Boot-path split (design/21-nonblocking-wifi.md):
+     *
+     *   unpaired → WAITING-FOR-PAIRING. There's no pet to show yet, so
+     *              WiFi is on the critical path by necessity: connect,
+     *              run the pair flow, reboot into the paired path.
+     *   paired   → WARM BOOT. Render the pet from the embedded packs
+     *              first; net_worker brings WiFi + sync up afterwards.
+     *              The rest of app_main below is this path.
+     */
+    struct mochi_pair_creds pair = {};
+    bool have_pair = pair_creds_load(&pair);
 
-    char ip_str[16] = {};
-    char joined_ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
-    bool ok = wifi_sta::connect_any(
-        ip_str, sizeof(ip_str),
-        joined_ssid, sizeof(joined_ssid));
-    if (!ok) {
-        /*
-         * No stored network was reachable. Could be we moved house,
-         * stored APs are off, password rotated. We do *not* wipe
-         * stored creds — when we eventually return to a known
-         * network the cred is still there.
-         *
-         * We persist a "prov_on_boot" flag and reboot rather than
-         * doing an in-process STA→AP swap. ESP-IDF v5.3 has a
-         * known-rough mode-swap path that hangs (and `wifi_prov::run`
-         * also calls `esp_event_loop_create_default` with
-         * ESP_ERROR_CHECK — that aborts when the STA path already
-         * created the loop, which is what bit us). The reboot path
-         * lands in a clean boot, then the prov_on_boot flag forces
-         * the no-creds branch above. See project_eink_wifi_handover.
-         */
-        ESP_LOGW(TAG, "no stored network reachable; persisting prov_on_boot"
-                      " flag and rebooting (existing creds preserved)");
-        nvs_creds_set_prov_on_boot(true);
-        epd_ui::render_prov_failed(epd);
+    if (!have_pair) {
+        ESP_LOGI(TAG, "creds present, no pairing → WAITING-FOR-PAIRING");
+        wifi_sta::init_stack();
+        char ip_str[16] = {};
+        char joined_ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
+        if (!wifi_sta::connect_any(ip_str, sizeof(ip_str),
+                                   joined_ssid, sizeof(joined_ssid))) {
+            /* No stored network reachable. Persist prov_on_boot +
+             * reboot into a clean SoftAP provisioning boot rather than
+             * an in-process STA→AP swap (ESP-IDF v5.3 hangs on that —
+             * see project_eink_wifi_handover). Creds are preserved. */
+            ESP_LOGW(TAG, "no network reachable while unpaired; "
+                          "prov_on_boot + reboot");
+            nvs_creds_set_prov_on_boot(true);
+            epd_ui::render_prov_failed(epd);
+            epd->EPD_Init_Partial();
+            epd->EPD_DisplayPart();
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            esp_restart();
+        }
+        ESP_LOGI(TAG, "online (unpaired); IP=%s ssid='%s'",
+            ip_str, joined_ssid);
+        ota_update::mark_valid_if_pending();
+        time_sync_init();   /* pair-check TLS needs wall time */
+
+        device_pair::InitResult init = {};
+        if (!device_pair::request_code(&init)) {
+            epd_ui::render_pair_failed(epd);
+            epd->EPD_Init_Partial();
+            epd->EPD_DisplayPart();
+            ESP_LOGE(TAG, "pair-init failed; hold PWR+BOOT 10s to reset "
+                          "or power-cycle to retry");
+            while (true) vTaskDelay(pdMS_TO_TICKS(60000));
+        }
+        epd_ui::render_pair_prompt(epd, init.code);
         epd->EPD_Init_Partial();
         epd->EPD_DisplayPart();
-        vTaskDelay(pdMS_TO_TICKS(2000));
+
+        /* Block, polling every 5 s, up to the server's 10-min TTL. */
+        if (!device_pair::wait_for_user(&init, &pair, 10 * 60 * 1000)) {
+            epd_ui::render_pair_failed(epd);
+            epd->EPD_Init_Partial();
+            epd->EPD_DisplayPart();
+            ESP_LOGW(TAG, "pair-check did not complete; hold PWR+BOOT 10s "
+                          "to reset or power-cycle to retry");
+            while (true) vTaskDelay(pdMS_TO_TICKS(60000));
+        }
+        if (!pair_creds_save(&pair)) {
+            ESP_LOGE(TAG, "pair save failed; rebooting to retry");
+            esp_restart();
+        }
+        epd_ui::render_pair_success(epd, pair.pet_name);
+        epd->EPD_Init_Partial();
+        epd->EPD_DisplayPart();
+        ESP_LOGI(TAG, "pairing complete; rebooting to clean post-pair boot");
+        device_diag_event(DIAG_INFO, "pair", "paired", nullptr);
+        device_diag_flush();   /* push before the post-pair reboot */
+        vTaskDelay(pdMS_TO_TICKS(1500));
         esp_restart();
     }
 
-    ESP_LOGI(TAG, "online; IP=%s, joined='%s'", ip_str, joined_ssid);
-    {
-        char ctx[120];
-        snprintf(ctx, sizeof(ctx), "{\"ssid\":\"%s\",\"ip\":\"%s\"}",
-            joined_ssid, ip_str);
-        device_diag_event(DIAG_INFO, "wifi", "joined", ctx);
-    }
-    /* First flush: lands the boot record + wifi result early. */
-    device_diag_flush();
+    /* === Paired warm boot. The pet renders from the embedded packs
+     * before any network is touched; net_worker (spawned after the
+     * first frame, below) handles connect + SNTP + OTA + ETag refresh
+     * + state pull off the critical path. === */
+    ESP_LOGI(TAG, "paired to '%s' (pet_id=%s) — warm boot",
+        pair.pet_name, pair.pet_id);
 
     /*
-     * OTA bookkeeping. If this boot is the first one after an OTA
-     * install, the running slot is marked PENDING_VERIFY and would
-     * roll back on next reset unless we promote it now. WiFi up is
-     * the earliest signal we have that the new image is healthy:
-     * provisioning, NVS, STA stack, radio + DHCP all worked.
-     *
-     * Then spawn the background OTA task. It sleeps 30s before its
-     * first manifest poll so it never competes with the boot-time
-     * sprite fetches for radio bandwidth.
-     */
-    ota_update::mark_valid_if_pending();
-    ESP_LOGI(TAG, "running firmware version: %s", ota_update::current_version());
-    ota_update::start_background_task(MOCHI_OTA_MANIFEST_URL);
-
-    /*
-     * Wall-clock sync. Substrate decay/engagement/mood projection
-     * uses ms-since-epoch timestamps that must agree with the
-     * server's `Date.now()`. Without this, ageDays/lastInteractionAt
-     * comparisons drift by whatever offset the kernel happens to
-     * have. Block briefly waiting for the first SNTP sync; if it
-     * doesn't land in 5s the pet still works but its sense of time
-     * is approximate until a later resync. */
-    time_sync_init();
-
-    /*
-     * One-shot environmental + RTC readout before the touch loop
-     * takes over. Bus and rails are already up (they came up for
-     * touch); these drivers just attach as additional devices on
-     * the same I2cMasterBus singleton.
-     *
-     * If the RTC's oscillator-stop flag is set we plant a sentinel
-     * time (2026-05-18 12:00:00) so that subsequent reads return
-     * something visibly non-zero. M11 (decay clock) will replace
-     * this with a real "set from network time" path.
+     * Local (no-network) device init: RTC, environmental sensor, codec,
+     * battery sense, LittleFS cache + event log. None of these gate on
+     * WiFi, so they stay on the boot critical path before the first
+     * frame. Anything that needs the network is in net_worker.
      */
     if (rtc_init()) {
         if (rtc_lost_power()) {
@@ -606,189 +782,32 @@ extern "C" void app_main(void) {
         }
     }
 
-    /*
-     * M9 codec init smoke test. After RTC + SHTC3 we know the I²C
-     * bus + Audio_PWR rail are healthy. voice::init() probes the
-     * ES8311 over the same bus and configures the I²S pins for
-     * future audio work. Failure is logged-and-continued — codec
-     * init must not break the existing M8.5 pet UI path. If this
-     * collides with our existing I²C bus singleton (the vendor
-     * Waveshare i2c_bsp), the codec_board module's own bus init
-     * will trip; we'll see it in the log and decide how to refactor.
-     */
     if (!voice::init()) {
         ESP_LOGW(TAG, "voice init failed; continuing boot");
     }
 
-    /* Battery sense — ADC1 ch3 via the 1:2 divider on VBAT_PWR
-     * (GPIO 17 already enabled by peripheral_rails_on()). One read
-     * at boot for the log; render_chrome() polls again per frame.
-     *
-     * Diagnostic: take 10 samples over 2 s and report min/mean/max.
-     * With a real LiPo present the readings are tight (<50 mV
-     * spread) and sit at 4.05–4.20 V on USB charge. Without a
-     * battery the readings drift, saturate, or report something
-     * implausible — that tells us the "with lithium battery"
-     * SKU shipped without one (or the cell is in over-discharge
-     * cutoff and needs more USB time). */
+    /* Battery sense (ADC1 ch3 via the 1:2 divider on VBAT_PWR). One
+     * read for the boot log; render_chrome() polls per frame. The
+     * 10-sample LiPo-presence diagnostic was retired from the boot
+     * path — it was 2 s of pure logging on the critical path. */
     if (battery_init()) {
-        uint16_t mv_min = 0xFFFF, mv_max = 0;
-        uint32_t mv_sum = 0;
-        int samples = 0;
-        for (int i = 0; i < 10; i++) {
-            uint16_t mv = 0; uint8_t pct = 0;
-            if (battery_read(&mv, &pct)) {
-                if (mv < mv_min) mv_min = mv;
-                if (mv > mv_max) mv_max = mv;
-                mv_sum += mv;
-                samples++;
-            }
-            vTaskDelay(pdMS_TO_TICKS(200));
-        }
-        if (samples > 0) {
-            uint16_t mean = (uint16_t)(mv_sum / samples);
-            int spread = (int)mv_max - (int)mv_min;
-            ESP_LOGI(TAG,
-                "battery diag: min=%u mean=%u max=%u spread=%d mV (n=%d)",
-                (unsigned)mv_min, (unsigned)mean,
-                (unsigned)mv_max, spread, samples);
-            /* Heuristic interpretation. Calibrated against typical
-             * single-cell LiPo behaviour on USB. */
-            if (mean >= 4000 && mean <= 4250 && spread < 50) {
-                ESP_LOGI(TAG, "battery diag → looks like a real LiPo on USB charge");
-            } else if (mean >= 3300 && mean <= 4000 && spread < 50) {
-                ESP_LOGI(TAG, "battery diag → looks like a LiPo discharging or just plugged in");
-            } else if (spread >= 50) {
-                ESP_LOGW(TAG, "battery diag → readings drift; likely NO LiPo connected");
-            } else {
-                ESP_LOGW(TAG, "battery diag → out-of-range mean (%u mV); LiPo presence unclear",
-                    (unsigned)mean);
-            }
+        uint16_t mv = 0; uint8_t pct = 0;
+        if (battery_read(&mv, &pct)) {
+            ESP_LOGI(TAG, "battery: %u mV (%u%%)", (unsigned)mv, (unsigned)pct);
         }
     }
 
-    /*
-     * Persistent sprite cache — LittleFS on the 'storage' partition.
-     * Per-sheet ETag check at boot: HEAD each sheet we use, compare
-     * against the locally-stored tag, and invalidate that sheet's
-     * cached blobs if they don't match. Subsequent fetches go
-     * through fetch_or_load_* helpers below — they read from cache
-     * when present and only hit the network on cache miss.
-     *
-     * First boot has no cache yet, so everything misses and we pay
-     * the full ~22s of fetches once. Subsequent boots — and any
-     * post-pair reboot — skip the network entirely if the server
-     * artwork hasn't changed.
-     */
-    /* sprite_cache was already init'd in the early-dump block above;
-     * re-init is idempotent and returns the same result. */
     bool cache_ok = sprite_cache::init();
-
-    /* Once LittleFS is mounted, dump (and consume) any voice session
-     * log left behind by the previous boot. This is what makes
-     * disconnected-USB voice testing recoverable: the device flushes
-     * the session log on stop_session, the next boot prints it.
-     * Idempotent — no-op if no session ran. */
     if (cache_ok) {
+        /* Dump (and consume) the previous boot's voice session log,
+         * then bring up the on-device event log. */
         voice_diag_dump_last();
-        /* M12 — bring up the on-device event log. Same partition,
-         * separate file (/lfs/events.bin). engagement.c reads the
-         * recent slice on every render via event_log_load_recent. */
         event_log_init();
-    }
-
-    if (cache_ok) {
-        struct { const char *sheet; const char *probe_url; } probes[] = {
-            { "pet-v1",   "https://mochi.val.run/devsprite/cell/pet-v1/neutral" },
-            { "ui-v1",    "https://mochi.val.run/devsprite/cell/ui-v1/heart"    },
-            { "scene-v1", "https://mochi.val.run/devsprite/scene-v1/day"        },
-        };
-        for (auto &p : probes) {
-            char remote[40] = {};
-            char local[40]  = {};
-            if (!sprite_fetch_head_etag(p.probe_url, remote, sizeof(remote))) {
-                ESP_LOGW(TAG, "etag probe failed for '%s'; cache unchanged",
-                    p.sheet);
-                continue;
-            }
-            sprite_cache::load_etag(p.sheet, local, sizeof(local));
-            if (strcmp(remote, local) != 0) {
-                ESP_LOGI(TAG, "etag '%s': remote=%s local=%s — invalidating",
-                    p.sheet, remote, local[0] ? local : "(none)");
-                sprite_cache::invalidate_sheet(p.sheet);
-                sprite_cache::store_etag(p.sheet, remote);
-            } else {
-                ESP_LOGI(TAG, "etag '%s' unchanged (%s) — using cache",
-                    p.sheet, remote);
-            }
-        }
     } else {
         ESP_LOGW(TAG, "sprite cache disabled; falling back to per-fetch");
     }
-
-    /*
-     * M5 — device pairing. If NVS has no pet binding yet, run the
-     * pair-init / pair-check protocol against mochi.val.run, persist
-     * the result, and reboot. The reboot is deliberate: it re-enters
-     * this same code path with creds present, which keeps the
-     * already-paired branch the canonical "boot path", and avoids
-     * having to special-case "we just paired" anywhere downstream.
-     *
-     * If we already have a pairing, just log it. We don't (yet) verify
-     * with the server on each boot — the substrate is durable and the
-     * pet_id is what every future call uses as bearer. A future
-     * health-check on /api/pets/<id> can reject revoked devices.
-     */
-    struct mochi_pair_creds pair = {};
-    bool have_pair = pair_creds_load(&pair);
-    if (!have_pair) {
-        ESP_LOGI(TAG, "no pairing → entering pair flow");
-        device_pair::InitResult init = {};
-        if (!device_pair::request_code(&init)) {
-            epd_ui::render_pair_failed(epd);
-            epd->EPD_Init_Partial();
-            epd->EPD_DisplayPart();
-            ESP_LOGE(TAG, "pair-init failed; halting (touch tap to retry)");
-            /* Sit on the failed screen — touch handler below isn't
-             * running yet, so this halts. M5 acceptance: user
-             * power-cycles to retry. M5+ will retry automatically. */
-            while (true) vTaskDelay(pdMS_TO_TICKS(60000));
-        }
-
-        epd_ui::render_pair_prompt(epd, init.code);
-        epd->EPD_Init_Partial();
-        epd->EPD_DisplayPart();
-
-        /*
-         * Block here, polling every 5 s, for up to the server's
-         * 10-min code TTL. If we hit timeout (or 410 expired) the
-         * function returns false and we render the failed screen.
-         */
-        if (!device_pair::wait_for_user(&init, &pair, 10 * 60 * 1000)) {
-            epd_ui::render_pair_failed(epd);
-            epd->EPD_Init_Partial();
-            epd->EPD_DisplayPart();
-            ESP_LOGW(TAG, "pair-check did not complete; halting");
-            while (true) vTaskDelay(pdMS_TO_TICKS(60000));
-        }
-
-        if (!pair_creds_save(&pair)) {
-            ESP_LOGE(TAG, "pair save failed; rebooting to retry");
-            esp_restart();
-        }
-
-        epd_ui::render_pair_success(epd, pair.pet_name);
-        epd->EPD_Init_Partial();
-        epd->EPD_DisplayPart();
-
-        ESP_LOGI(TAG, "pairing complete; rebooting to clean post-pair boot");
-        device_diag_event(DIAG_INFO, "pair", "paired", nullptr);
-        device_diag_flush();   /* push before the post-pair reboot */
-        vTaskDelay(pdMS_TO_TICKS(1500));
-        esp_restart();
-    }
-    ESP_LOGI(TAG, "paired to '%s' (pet_id=%s)",
-        pair.pet_name, pair.pet_id);
+    /* Per-sheet ETag refresh is a network op — moved to net_worker so
+     * it can't gate the first frame. */
 
     /*
      * Pet-on-scene compositor pipeline.
@@ -864,7 +883,12 @@ extern "C" void app_main(void) {
          * compiled (sprite_fetch / sprite_cache::load both still
          * exist) only for the unused MOCHI_SCENE_URL define and as
          * a future fallback for non-bundled scenes. */
-        if (scene_pack_init() &&
+        /* Embedded-only — warm boot renders before WiFi is up; the
+         * full scene_pack_init() does a network probe through
+         * pack_cache_active that asserts inside lwip pre-init.
+         * net_worker calls scene_pack_init() once WiFi's online to
+         * upgrade to the server-synced pack and flag a re-render. */
+        if (scene_pack_init_embedded() &&
             scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H)) {
             ESP_LOGI(TAG, "scene from pack idx=%u",
                 (unsigned)scene_pack_current());
@@ -875,10 +899,9 @@ extern "C" void app_main(void) {
     }
 
     /* Bring up the bundled pet pack so render_with_expression can
-     * serve cells from flash without touching the network. Network
-     * stays as the fallback for expressions absent from the pack
-     * (and for the pack-unavailable case). */
-    if (!pet_pack_init()) {
+     * serve cells from flash without touching the network. Embedded-
+     * only at boot; net_worker upgrades after WiFi is up. */
+    if (!pet_pack_init_embedded()) {
         ESP_LOGW(TAG, "pet_pack unavailable; falling back to network "
                       "+ littlefs cache for every render");
     }
@@ -891,36 +914,25 @@ extern "C" void app_main(void) {
     }
 
     /*
-     * Fetch each care icon at native 80×80, downsample to 32×32
-     * once, cache the downsampled planes for the rest of the
-     * device's life.
-     *
-     * The native staging buffers are intentionally PSRAM-allocated
-     * (rather than on the main task stack) because sprite_fetch_cell
-     * already uses ~4 KB of stack for its own staging during TLS,
-     * and adding 1.6 KB of stack-resident staging here was enough
-     * to overflow the 8 KB main task stack on the first icon fetch.
+     * Care icons: load the downsampled 32×32 planes from the LittleFS
+     * cache only. The native 80×80 fetch + downsample is a network op,
+     * so on a cold cache (a device's first boot after pairing) it runs
+     * on net_worker instead — the worker fills these same buffers and
+     * writes them back to cache. `icons_cached` tells the worker
+     * whether it needs to. A miss renders as a blank (invisible)
+     * corner until the worker lands the artwork; render_chrome only
+     * stamps icons on unzoned scenes anyway.
      */
-    uint8_t *native_ink  = (uint8_t *)heap_caps_malloc(UI_CELL_NATIVE_BYTES, MALLOC_CAP_SPIRAM);
-    uint8_t *native_mask = (uint8_t *)heap_caps_malloc(UI_CELL_NATIVE_BYTES, MALLOC_CAP_SPIRAM);
-    if (!native_ink || !native_mask) {
-        ESP_LOGE(TAG, "PSRAM alloc failed for icon staging");
-        while (true) vTaskDelay(pdMS_TO_TICKS(60000));
-    }
+    bool icons_cached = cache_ok;
     {
-        /* Suffix for cached icons baked into the layout. If we ever
-         * change ICON_W or ICON_H, bump this string so old cached
-         * blobs get ignored. */
         char icon_suffix[24];
         snprintf(icon_suffix, sizeof(icon_suffix), "_icon_%ux%u",
             (unsigned)ICON_W, (unsigned)ICON_H);
-
-        /*
-         * Two cached blobs per icon: one for ink, one for mask.
-         * Suffix is "<icon>_icon_48x48_ink" / "<icon>_icon_48x48_mask".
-         * Loaded together; if either misses we re-fetch + re-downsample.
-         */
         for (int i = 0; i < 4; i++) {
+            /* Blank default so a miss is a clean corner, not garbage. */
+            memset(icon_ink[i],  0xFF, ICON_BYTES);
+            memset(icon_mask[i], 0xFF, ICON_BYTES);
+
             char ink_suffix[40], mask_suffix[40];
             snprintf(ink_suffix,  sizeof(ink_suffix),  "%s%s_ink",
                 CARE_ICON_KEYS[i], icon_suffix);
@@ -937,44 +949,16 @@ extern "C" void app_main(void) {
                     icon_mask[i], ICON_BYTES, &got_mask) &&
                 got_mask == ICON_BYTES;
             if (from_cache) {
-                ESP_LOGI(TAG, "icon '%s' loaded from cache",
-                    CARE_ICON_KEYS[i]);
-                continue;
-            }
-
-            /* Cache miss → network fetch native size, downsample,
-             * store the downsampled planes. */
-            char url[160];
-            snprintf(url, sizeof(url), "%s%s",
-                MOCHI_UI_CELL_URL_BASE, CARE_ICON_KEYS[i]);
-            uint16_t w = 0, h = 0; uint32_t ms = 0;
-            bool ok = sprite_fetch_cell(url, native_ink, native_mask,
-                UI_CELL_NATIVE_BYTES, &w, &h, &ms);
-            if (!ok || w != UI_CELL_NATIVE_W || h != UI_CELL_NATIVE_H) {
-                ESP_LOGW(TAG, "icon '%s' fetch failed (%ux%u); blanking",
-                    CARE_ICON_KEYS[i], w, h);
+                ESP_LOGI(TAG, "icon '%s' loaded from cache", CARE_ICON_KEYS[i]);
+            } else {
                 memset(icon_ink[i],  0xFF, ICON_BYTES);
                 memset(icon_mask[i], 0xFF, ICON_BYTES);
-                continue;
+                icons_cached = false;
             }
-            memset(icon_ink[i],  0xFF, ICON_BYTES);
-            memset(icon_mask[i], 0xFF, ICON_BYTES);
-            compositor::downsample_plane(icon_ink[i],  ICON_W, ICON_H,
-                native_ink,  UI_CELL_NATIVE_W, UI_CELL_NATIVE_H);
-            compositor::downsample_plane(icon_mask[i], ICON_W, ICON_H,
-                native_mask, UI_CELL_NATIVE_W, UI_CELL_NATIVE_H);
-            if (cache_ok) {
-                sprite_cache::store("ui-v1", ink_suffix,  icon_ink[i],  ICON_BYTES);
-                sprite_cache::store("ui-v1", mask_suffix, icon_mask[i], ICON_BYTES);
-            }
-            ESP_LOGI(TAG, "icon '%s' fetched + cached (%lu ms)",
-                CARE_ICON_KEYS[i], (unsigned long)ms);
         }
-        /* Free the native staging — only used during boot. */
-        free(native_ink);
-        free(native_mask);
-        native_ink = nullptr;
-        native_mask = nullptr;
+        if (!icons_cached) {
+            ESP_LOGI(TAG, "care icons not fully cached — net_worker will fetch");
+        }
     }
 
     /*
@@ -1074,20 +1058,86 @@ extern "C" void app_main(void) {
             }
         };
 
-        /* Left: time. Right: battery. Centre: pet name (centred on
-         * panel midpoint, not the slot between the two — the centre
-         * looks more visually balanced). */
+        /* Left: time. Right: wifi-glyph + battery. Centre: pet name
+         * (centred on panel midpoint, not the slot between the
+         * neighbours — the centre looks more visually balanced).
+         * Net status sat left of the pet name in the first cut, but
+         * grouping it with battery on the right reads as "device
+         * health" cluster — symmetric with the time/clock cluster on
+         * the left. */
         constexpr int STATUS_PAD = 4;
         blit_status_text(time_str, STATUS_PAD);
 
         const int batt_w = (int)strlen(batt_str) * 8;
-        blit_status_text(batt_str,
-            (int)MOCHI_EPD_WIDTH - STATUS_PAD - batt_w);
+        const int batt_x = (int)MOCHI_EPD_WIDTH - STATUS_PAD - batt_w;
+        blit_status_text(batt_str, batt_x);
 
         const int name_w = (int)strlen(pair.pet_name) * 8;
         int name_x = ((int)MOCHI_EPD_WIDTH - name_w) / 2;
         if (name_x < STATUS_PAD) name_x = STATUS_PAD;
         blit_status_text(pair.pet_name, name_x);
+
+        /* WiFi state glyph — 7×7 px, slotted just left of the centred
+         * pet name. Three patterns:
+         *   Online      ▁▂▃ ascending bars (filled)
+         *   Connecting  ▁▂▃ ascending bars (1-px dotted)
+         *   Offline     a small ✗ over a faint base bar
+         * Drawn directly into the composite framebuffer with the
+         * same MSB-first convention render_chrome uses elsewhere. */
+        {
+            static const uint8_t WIFI_ONLINE[7] = {
+                0b00000000,
+                0b00000010,
+                0b00000010,
+                0b00001010,
+                0b00001010,
+                0b00101010,
+                0b00101010,
+            };
+            static const uint8_t WIFI_CONNECTING[7] = {
+                0b00000000,
+                0b00000010,
+                0b00000000,
+                0b00001000,
+                0b00000010,
+                0b00100000,
+                0b00001000,
+            };
+            static const uint8_t WIFI_OFFLINE[7] = {
+                0b00000000,
+                0b01000100,
+                0b00101000,
+                0b00010000,
+                0b00101000,
+                0b01000100,
+                0b00000000,
+            };
+            const NetPhase phase = s_net_phase;
+            const uint8_t *gly =
+                phase == NetPhase::Online      ? WIFI_ONLINE :
+                phase == NetPhase::Connecting  ? WIFI_CONNECTING :
+                                                 WIFI_OFFLINE;
+            /* Centre vertically inside the bar; horizontally sit
+             * just left of the battery text — 7-px glyph + 3-px gap
+             * before the digits. Right-side cluster (net + battery)
+             * reads as one "device health" group; pet name owns the
+             * centre. */
+            const int gx = batt_x - 10;
+            const int gy = STATUS_TEXT_Y + 1;
+            for (int row = 0; row < 7; row++) {
+                const uint8_t bits = gly[row];
+                for (int col = 0; col < 7; col++) {
+                    if (!((bits >> col) & 1)) continue;
+                    const int px = gx + col;
+                    const int py = gy + row;
+                    if (px < 0 || py < 0 ||
+                        px >= (int)MOCHI_EPD_WIDTH ||
+                        py >= (int)MOCHI_EPD_HEIGHT) continue;
+                    const size_t off = (size_t)py * 25 + ((size_t)px >> 3);
+                    composite[off] &= (uint8_t)~(1u << (7 - ((size_t)px & 7)));
+                }
+            }
+        }
 
         /* 1-pixel black divider at the bottom of the status bar
          * (y = STATUS_BAR_H - 1). Sits between bar text and the
@@ -1496,18 +1546,29 @@ extern "C" void app_main(void) {
      *
      * The pull must come AFTER time_sync_init so X-Pet-Id auth +
      * TLS cert validation work; both need real wall time. */
-    {
-        pet_t snapshot;
-        pet_event_t evs[12];
-        size_t n = 0;
-        if (!pet_sync_pull_now(&snapshot, evs,
-                               sizeof(evs)/sizeof(evs[0]), &n)) {
-            ESP_LOGW(TAG, "state pull failed; using hardcoded dev pet");
-            init_dev_pet(now_ms_wall());
-        }
-    }
-    /* Spin up the push worker + periodic-resync task. Idempotent. */
+    /* Seed the dev-pet projection so the resting face is sane before
+     * net_worker's first /api/state pull lands. The worker overwrites
+     * the snapshot (pet_sync caches it) and flags a re-render on
+     * success; until then current_pet_decayed falls back to this. */
+    init_dev_pet(now_ms_wall());
+
+    /* Spin up the push worker + periodic-resync task. Idempotent; its
+     * workers retry quietly until net_worker brings WiFi up. */
     pet_sync_start();
+
+    /* Kick the non-blocking connectivity worker (design/21). Everything
+     * that needs the network — connect, SNTP, OTA, ETag refresh,
+     * cold-cache icons, state pull — runs here, off the boot critical
+     * path, so the pet is already on screen. net_ctx is static so it
+     * outlives the worker without question. */
+    static NetCtx net_ctx;
+    for (int i = 0; i < 4; i++) {
+        net_ctx.icon_ink[i]  = icon_ink[i];
+        net_ctx.icon_mask[i] = icon_mask[i];
+    }
+    net_ctx.cache_ok     = cache_ok;
+    net_ctx.icons_cached = icons_cached;
+    xTaskCreate(net_worker, "net_worker", 16384, &net_ctx, 5, nullptr);
 
     touch::init();
     int64_t last_event_us = 0;
@@ -1528,20 +1589,12 @@ extern "C" void app_main(void) {
     /* Health heartbeat (design/18): first fires shortly after boot. */
     int64_t last_health_us = 0;
 
-    /* Auto-trigger key portal if NVS has no OpenAI key. The user
-     * landed here either by skipping the optional key field during
-     * provisioning, or by an OTA from a build where it was set on a
-     * different NVS layout. Either way, we'd rather drop them
-     * straight into the recovery UX than make them discover the
-     * triple-tap gesture by reading source. */
-    {
-        char probe[MOCHI_OPENAI_KEY_MAX + 1] = {};
-        if (!openai_key_load(probe, sizeof(probe))) {
-            ESP_LOGI(TAG, "no openai key on boot — opening key portal");
-            key_portal::start(epd);
-        }
-        memset(probe, 0, sizeof(probe));
-    }
+    /* Auto-trigger the key portal if NVS has no OpenAI key. The portal
+     * shows the device's IP for the user to visit, so it's only useful
+     * once WiFi is up — deferred into the loop (gated on net online,
+     * one-shot via key_autostart_done) rather than fired here against a
+     * not-yet-connected stack on the warm path. */
+    bool key_autostart_done = false;
 
     /*
      * Phase-driven expression for active voice sessions. The user
@@ -1577,9 +1630,32 @@ extern "C" void app_main(void) {
     int64_t last_substrate_us = esp_timer_get_time();
     char last_resting_expr[32] = "neutral";
 
+    /* Phase 2 — WiFi-unavailable dialog (design/21). Raised by the loop
+     * when net_worker reports Offline; dismissed by a tap outside the
+     * action button, or actioned (→ reboot into SoftAP provisioning). */
+    bool wifi_dialog_shown = false;
+    /* One-tick suppression: when dev_menu consumes a touch we set this
+     * so the NEXT touch event the FT6336 reports (often a press → release
+     * pair across two ticks on the slow main-loop cadence) doesn't leak
+     * into the live touch path and re-fire as a pet-body tap. */
+    bool drain_next_touch = false;
+    bool wifi_dialog_dismissed = false;
+    ui_dialog::HitRect wifi_dialog_hit = {};
+
     while (true) {
         touch::Event ev;
         bool got_touch = touch::wait_event(&ev, 1000);
+
+        /* Touch-drain guard. If a previous tick set this, eat the
+         * first touch we see and reset. Lets dev_menu / dialog flows
+         * confidently mark "this gesture has been consumed" without
+         * leaking it into the live tap pipeline on the next iteration. */
+        if (got_touch && drain_next_touch) {
+            ESP_LOGI(TAG, "drained one touch (%u,%u)",
+                (unsigned)ev.x, (unsigned)ev.y);
+            drain_next_touch = false;
+            got_touch = false;
+        }
 
         /* Sleep gesture takes priority over touch. The wait_event
          * 1-second timeout means we check this at least once per
@@ -1603,6 +1679,62 @@ extern "C" void app_main(void) {
             key_portal::start(epd);
         }
 
+        /* Dev-menu wheel: BOOT short-press cycles debug screens. While
+         * a debug screen is up, dev_menu owns the panel — we skip the
+         * pet render path until inactivity returns us to Live. A touch
+         * exits early so the kid isn't stuck on a debug screen.
+         *
+         * Skipped while voice is active or the key portal owns the
+         * screen — those flows render their own state. */
+        if (!voice::is_active() && !key_portal::active()) {
+            const int batt_pct_now = ([&]() -> int {
+                uint16_t mv = 0; uint8_t pct = 0;
+                return battery_read(&mv, &pct) ? (int)pct : -1;
+            })();
+            const bool mode_changed = dev_menu::tick(
+                epd,
+                pair.pet_id[0] != '\0',
+                pair.pet_name,
+                ota_update::current_version(),
+                s_net_ip, s_net_ssid,
+                (int)s_net_phase, batt_pct_now);
+            if (dev_menu::active()) {
+                if (got_touch) {
+                    /* Action buttons (e.g. Settings → "open key portal")
+                     * are tappable rects on the active screen. A button
+                     * hit dispatches to its action; a miss exits the
+                     * wheel back to live as before. The wheel always
+                     * exits before the action fires so the action's UI
+                     * (key_portal, …) owns the screen cleanly. */
+                    const auto act = dev_menu::dispatch_touch(
+                        (int)ev.x, (int)ev.y);
+                    dev_menu::exit_to_live();
+                    s_net_render_dirty = true;
+                    if (act == dev_menu::TouchResult::OpenKeyPortal) {
+                        ESP_LOGI(TAG, "dev_menu → opening key portal");
+                        key_portal::start(epd);
+                    } else {
+                        ESP_LOGI(TAG, "touch in dev_menu → exit to live");
+                    }
+                    /* Squelch this gesture: the `continue` below
+                     * already skips the live touch handler for THIS
+                     * tick. drain_next_touch covers the FT6336's
+                     * follow-up event (often a release pulse arriving
+                     * a tick later) so a Settings miss doesn't re-
+                     * register as a pet-body tap on the just-revealed
+                     * live render. */
+                    got_touch = false;
+                    drain_next_touch = true;
+                }
+                continue;  /* dev_menu owns the screen */
+            }
+            if (mode_changed) {
+                /* Just timed out from a debug screen back to live;
+                 * mark dirty so the loop redraws the pet promptly. */
+                s_net_render_dirty = true;
+            }
+        }
+
         /* Drive the portal's idle / post-submit auto-stop. */
         key_portal::tick();
 
@@ -1619,6 +1751,65 @@ extern "C" void app_main(void) {
                 render_with_expression("neutral", false, nullptr);
             }
             continue;
+        }
+
+        /* Key-portal autostart, deferred until WiFi is up (it shows the
+         * device IP for the user to visit). One-shot. */
+        if (!key_autostart_done && s_net_phase == NetPhase::Online &&
+            !voice::is_active()) {
+            key_autostart_done = true;
+            char probe[MOCHI_OPENAI_KEY_MAX + 1] = {};
+            if (!openai_key_load(probe, sizeof(probe))) {
+                ESP_LOGI(TAG, "no openai key — opening key portal");
+                key_portal::start(epd);
+            }
+            memset(probe, 0, sizeof(probe));
+            if (key_portal::active()) continue;  /* portal owns the screen */
+        }
+
+        /* WiFi-unavailable dialog (design/21 Phase 2). When the
+         * background connect gives up, surface a dismissible card over
+         * the pet rather than taking over the screen or rebooting — the
+         * pet keeps running offline (embedded packs + local decay). The
+         * action reboots into SoftAP provisioning; a tap elsewhere
+         * dismisses (latched so it doesn't immediately re-appear). */
+        if (s_net_phase == NetPhase::Offline && !wifi_dialog_shown &&
+            !wifi_dialog_dismissed && !voice::is_active()) {
+            wifi_dialog_shown = true;
+            render_with_expression(last_resting_expr, false, nullptr);
+            ui_dialog::render(composite, MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
+                "No WiFi", "Mochi is offline.", "Tap below to set up.",
+                "Set up WiFi", &wifi_dialog_hit);
+            epd->EPD_LoadBuffer(composite, FB_LEN);
+            epd->EPD_Init_Partial();
+            epd->EPD_DisplayPart();
+            ESP_LOGI(TAG, "wifi-unavailable dialog shown");
+        }
+        if (wifi_dialog_shown) {
+            if (got_touch) {
+                if (ui_dialog::hit_contains(&wifi_dialog_hit,
+                                            (int)ev.x, (int)ev.y)) {
+                    ESP_LOGI(TAG, "wifi dialog → reboot into provisioning");
+                    nvs_creds_set_prov_on_boot(true);
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                    esp_restart();
+                }
+                ESP_LOGI(TAG, "wifi dialog dismissed → pet (offline)");
+                wifi_dialog_shown = false;
+                wifi_dialog_dismissed = true;
+                render_with_expression(last_resting_expr, false, nullptr);
+            }
+            continue;  /* dialog owns input + screen until handled */
+        }
+
+        /* net_worker produced fresh state / cache / icons → re-render
+         * the resting pet so the new artwork + snapshot show. */
+        if (s_net_render_dirty && !voice::is_active()) {
+            s_net_render_dirty = false;
+            const char *resting = render_resting();
+            snprintf(last_resting_expr, sizeof(last_resting_expr), "%s",
+                     resting ? resting : "neutral");
+            last_substrate_us = esp_timer_get_time();
         }
 
         /*

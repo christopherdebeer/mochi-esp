@@ -11,6 +11,10 @@ exercised. The `i2c_master` driver and clock-stretch tolerance behaviour
 in particular are v5-era — see `../design/01-bring-up-plan.md` M8 for
 why polling-mode SHTC3 commands are mandatory on v5.
 
+> **Quick start:** `firmware/scripts/setup-esp-idf.sh` installs the
+> verified toolchain in one (re-runnable) command. See
+> [`TOOLCHAIN.md`](TOOLCHAIN.md). The manual steps below are equivalent.
+
 ### macOS / Linux
 
 ```sh
