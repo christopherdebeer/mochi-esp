@@ -1659,25 +1659,21 @@ extern "C" void app_main(void) {
 
         /* Sleep gesture takes priority over touch. The wait_event
          * 1-second timeout means we check this at least once per
-         * second even with no taps. When the long-press fires we
-         * claim it (so the watcher's fallback render doesn't race
-         * us), render the rich asleep frame, then commit_sleep()
-         * — never returns. */
+         * second even with no taps. When the PWR tap fires we claim
+         * it (so the watcher's fallback render doesn't race us),
+         * render the rich asleep frame, then commit_sleep() — never
+         * returns. */
         if (sleep_gesture::requested()) {
             sleep_gesture::mark_handled();
-            device_diag_event(DIAG_INFO, "sleep", "long-press → sleep", nullptr);
+            device_diag_event(DIAG_INFO, "sleep", "PWR tap → sleep", nullptr);
             device_diag_flush();   /* push before we power down */
             render_asleep();
             sleep_gesture::commit_sleep();
         }
 
-        /* Manual key-portal trigger: triple-tap PWR. Distinct from
-         * the long-hold sleep gesture and the 10s factory-reset
-         * gesture. Used to replace an already-set key. */
-        if (sleep_gesture::triple_tap_consume() && !voice::is_active()) {
-            ESP_LOGI(TAG, "triple-tap → opening key portal");
-            key_portal::start(epd);
-        }
+        /* (PWR triple-tap → key portal retired: the key portal is now
+         * reachable from Settings, and PWR is a single tap → sleep.
+         * See design/22.) */
 
         /* Dev-menu wheel: BOOT short-press cycles debug screens. While
          * a debug screen is up, dev_menu owns the panel — we skip the

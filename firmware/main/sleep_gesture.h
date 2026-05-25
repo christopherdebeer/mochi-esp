@@ -1,11 +1,16 @@
 /*
- * Long-press PWR → enter deep sleep with PWR as wake source.
+ * Single tap PWR → enter deep sleep with PWR as wake source.
  *
- * Watches GPIO 18 (PWR) for a 3-second hold WHILE BOOT is NOT also
- * held. The "BOOT also held" exclusion is so a user trying to
- * trigger the factory-reset gesture (PWR + BOOT for 10 s) doesn't
- * accidentally fall asleep partway through. Factory-reset wins
- * by being checked in its own task on a different polling cadence.
+ * Watches GPIO 18 (PWR) for a short press↘release WHILE BOOT is NOT
+ * also held. A tap is a press shorter than TAP_MAX_MS with BOOT up the
+ * whole time — so the factory-reset gesture (PWR + BOOT for 10 s)
+ * never reads as a sleep tap, and a held PWR (including the press that
+ * woke the device) doesn't either. Edge-triggered, with a startup
+ * grace so the wake-press can't immediately re-sleep the device.
+ *
+ * (Sleep was a 3 s hold and PWR triple-tap opened the key portal;
+ * both retired once the key portal moved into Settings — see
+ * design/22. PWR now has the single "tap = sleep" meaning.)
  *
  * Two paths for committing:
  *
@@ -39,10 +44,9 @@ namespace sleep_gesture {
  * buffers. */
 void start(epaper_driver_display *epd);
 
-/* Returns true if the long-press has fired and the main task
- * should now render the asleep screen and call commit_sleep().
- * Returns false otherwise. Latches once true; resets only across
- * a full reboot. */
+/* Returns true if the tap has fired and the main task should now
+ * render the asleep screen and call commit_sleep(). Returns false
+ * otherwise. Latches once true; resets only across a full reboot. */
 bool requested(void);
 
 /* Tell the watcher "I'm going to handle this — don't fire the
@@ -55,15 +59,5 @@ void mark_handled(void);
  * return. Caller is responsible for having rendered whatever
  * they want visible during sleep. */
 [[noreturn]] void commit_sleep(void);
-
-/* Triple-tap PWR — three press-release cycles inside a short window
- * with no hold long enough to be the sleep gesture. Used by main as
- * the manual trigger for the key_portal recovery flow when the user
- * wants to replace an already-set OpenAI key.
- *
- * Returns true once after each detected triple-tap. Caller should
- * read in a polling fashion; the flag self-clears on read so the
- * next triple-tap is independent. */
-bool triple_tap_consume(void);
 
 }  /* namespace sleep_gesture */
