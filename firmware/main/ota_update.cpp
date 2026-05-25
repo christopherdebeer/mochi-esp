@@ -40,6 +40,26 @@ namespace {
 const char *g_manifest_url = nullptr;
 volatile bool g_reboot_ready = false;
 volatile bool g_task_started = false;
+/* Set by ota_update::check_now() (Settings → "update now"); cuts the
+ * 24 h inter-check sleep short so the next poll runs immediately. */
+volatile bool g_check_now = false;
+
+/* Sleep up to `ms`, but return early if a check-now is requested.
+ * Polls in short chunks rather than blocking the whole interval so the
+ * "update now" button feels instant. */
+void ota_wait(int ms) {
+    constexpr int CHUNK_MS = 500;
+    int waited = 0;
+    while (waited < ms) {
+        if (g_check_now) {
+            g_check_now = false;
+            ESP_LOGI(TAG, "check-now → waking early");
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(CHUNK_MS));
+        waited += CHUNK_MS;
+    }
+}
 
 struct manifest_ctx {
     char  *buf;
@@ -210,7 +230,7 @@ void ota_task(void *) {
                             remote_version, sizeof(remote_version),
                             bin_url, sizeof(bin_url))) {
             ESP_LOGI(TAG, "no manifest this cycle; sleeping");
-            vTaskDelay(pdMS_TO_TICKS(OTA_CHECK_INTERVAL_MS));
+            ota_wait(OTA_CHECK_INTERVAL_MS);
             continue;
         }
 
@@ -241,7 +261,7 @@ void ota_task(void *) {
                 running, remote_version, cmp);
             device_diag_eventf(DIAG_INFO, "ota", NULL,
                 "up to date %s", running);
-            vTaskDelay(pdMS_TO_TICKS(OTA_CHECK_INTERVAL_MS));
+            ota_wait(OTA_CHECK_INTERVAL_MS);
             continue;
         }
         ESP_LOGI(TAG, "update available: %s → %s", running, remote_version);
@@ -257,7 +277,7 @@ void ota_task(void *) {
         /* Update failed; back off a long time before retrying so a
          * persistently broken release doesn't hammer the network. */
         ESP_LOGW(TAG, "update failed; sleeping before retry");
-        vTaskDelay(pdMS_TO_TICKS(OTA_CHECK_INTERVAL_MS));
+        ota_wait(OTA_CHECK_INTERVAL_MS);
     }
 }
 
@@ -310,6 +330,14 @@ void start_background_task(const char *manifest_url) {
 
 bool reboot_ready() {
     return g_reboot_ready;
+}
+
+void check_now() {
+    /* Settings → "update now": cut the inter-check sleep short. No-op
+     * if the task hasn't started yet (device offline) — it'll run its
+     * normal first check once net_worker brings WiFi up. */
+    g_check_now = true;
+    ESP_LOGI(TAG, "check-now requested");
 }
 
 const char *current_version() {

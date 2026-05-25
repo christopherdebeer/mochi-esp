@@ -46,6 +46,7 @@ static const char *mode_name(Mode m) {
         case Mode::Live:     return "live";
         case Mode::Splash:   return "splash";
         case Mode::Settings: return "settings";
+        case Mode::Actions:  return "actions";
         default:             return "?";
     }
 }
@@ -231,32 +232,54 @@ static void render_settings(epaper_driver_display *epd,
     snprintf(line, sizeof(line), "batt %d%%", batt_pct);
     epd_ui::draw_text(epd, 4, y, 1, line); y += 14;
 
-    /* Action buttons. Layout from the bottom of the panel so info
-     * lines aren't squeezed. Wider + taller than the first cut so
-     * there's a generous tap target — the 16-px-high original was
-     * fiddly to hit at arm's length on the small panel. */
+    /* Read-only screen — the tappable actions live on the next wheel
+     * position. BOOT advances; 60 s inactivity (or a touch) returns
+     * to the live pet. */
+    epd_ui::draw_text(epd, 4, MOCHI_EPD_HEIGHT - 10, 1,
+                      "BOOT: Actions  60s exit");
+
+    epd->EPD_Init_Partial();
+    epd->EPD_DisplayPart();
+}
+
+/* Actions screen — a vertical stack of tappable buttons. Each is a
+ * 1-px bordered full-width rect with a centred label; dispatch_touch
+ * resolves a tap to the button's TouchResult, and main.cpp performs
+ * the action (most reboot, so they exit the wheel implicitly). */
+static void render_actions(epaper_driver_display *epd) {
+    epd_ui::clear(epd);
+    clear_buttons();
+
+    epd_ui::draw_text_centered(epd, 4, 2, "ACTIONS");
+
+    /* Buttons fill the panel below the title down to the hint line.
+     * Five generous (28-px) targets fit on the 200-px panel. */
+    static const struct { TouchResult action; const char *label; } items[] = {
+        { TouchResult::ChangeWifi,    "Change WiFi"     },
+        { TouchResult::ForgetWifi,    "Forget WiFi"     },
+        { TouchResult::UpdateNow,     "Update now"      },
+        { TouchResult::RePair,        "Re-pair device"  },
+        { TouchResult::OpenKeyPortal, "OpenAI key"      },
+    };
+    constexpr int N = (int)(sizeof(items) / sizeof(items[0]));
     constexpr int BTN_MARGIN = 2;
     constexpr int BTN_W = MOCHI_EPD_WIDTH - 2 * BTN_MARGIN;
     constexpr int BTN_H = 28;
-    constexpr int BTN_LEFT = BTN_MARGIN;
-    constexpr int BOTTOM_HINT_Y = MOCHI_EPD_HEIGHT - 10;
-    int by = BOTTOM_HINT_Y - BTN_H - 4;
+    constexpr int BTN_GAP = 3;
+    constexpr int TOP_Y = 24;
 
-    {
-        Button b = { BTN_LEFT, by, BTN_W, BTN_H,
-                     TouchResult::OpenKeyPortal, "open key portal" };
+    int by = TOP_Y;
+    for (int i = 0; i < N; i++) {
+        Button b = { BTN_MARGIN, by, BTN_W, BTN_H, items[i].action, items[i].label };
         draw_button_border(epd, b);
         const int label_w = (int)strlen(b.label) * 8;
-        const int lx = b.x + (b.w - label_w) / 2;
-        const int ly = b.y + (b.h - 8) / 2;
-        epd_ui::draw_text(epd, lx, ly, 1, b.label);
+        epd_ui::draw_text(epd, b.x + (b.w - label_w) / 2,
+                          b.y + (b.h - 8) / 2, 1, b.label);
         register_button(b.x, b.y, b.w, b.h, b.action, b.label);
-        by -= BTN_H + 4;
+        by += BTN_H + BTN_GAP;
     }
 
-    /* Wheel-position hint: BOOT advances, 60 s timeout returns to
-     * live, touch-outside-button also exits. */
-    epd_ui::draw_text(epd, 4, BOTTOM_HINT_Y, 1, "BOOT next  60s exit");
+    epd_ui::draw_text(epd, 4, MOCHI_EPD_HEIGHT - 9, 1, "BOOT next  tap=do");
 
     epd->EPD_Init_Partial();
     epd->EPD_DisplayPart();
@@ -273,6 +296,9 @@ static void render_mode(epaper_driver_display *epd, Mode m,
         case Mode::Settings:
             render_settings(epd, pet_name, version, ip_str, ssid,
                             net_phase, batt_pct);
+            break;
+        case Mode::Actions:
+            render_actions(epd);
             break;
         default:
             /* Live is rendered by main.cpp's render_resting on the

@@ -50,6 +50,13 @@ bool nvs_creds_append(const struct mochi_wifi_creds *creds);
 /* Wipe all stored creds. Used by factory reset. */
 bool nvs_creds_clear_all(void);
 
+/* Remove every stored entry whose SSID matches `ssid`, keeping the
+ * rest in MRU order. Returns true if something was removed, false if
+ * the SSID wasn't stored. Used by Settings → "Forget WiFi": after a
+ * reboot the device reconnects to the next-strongest known network
+ * (design/22). */
+bool nvs_creds_forget(const char *ssid);
+
 /* --- Legacy single-cred helpers, retained as thin shims so older
  *     call sites and tests keep compiling. nvs_creds_load returns the
  *     MRU entry; nvs_creds_save inserts at MRU; nvs_creds_clear wipes

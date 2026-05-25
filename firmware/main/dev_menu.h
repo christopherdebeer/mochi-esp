@@ -43,10 +43,11 @@ namespace dev_menu {
 enum class Mode : uint8_t {
     Live = 0,        /* not in the wheel — home state */
     Splash,
-    Settings,        /* debug info + tappable action buttons */
-    /* future modes plug in here. Settings hosts most actions; whole
-     * new screens make sense for things that need a full panel
-     * (WifiSelect's network list, OtaForce's progress, etc.). */
+    Settings,        /* read-only device info / diagnostics */
+    Actions,         /* tappable action buttons (design/22) */
+    /* future modes plug in here. Whole new screens make sense for
+     * things that need a full panel (a WiFi network list, OTA
+     * progress, etc.). */
     _Count,
 };
 
@@ -89,7 +90,11 @@ void exit_to_live(void);
  * the device couldn't otherwise reach without a serial cable. */
 enum class TouchResult : uint8_t {
     None = 0,         /* no button hit; main.cpp may exit_to_live itself */
-    OpenKeyPortal,    /* "open key portal" button on the Settings screen */
+    OpenKeyPortal,    /* open the OpenAI key-entry portal */
+    ChangeWifi,       /* reboot into SoftAP provisioning (add a network) */
+    ForgetWifi,       /* forget the joined SSID + reboot (flip to next known) */
+    UpdateNow,        /* force an immediate OTA manifest check */
+    RePair,           /* clear pairing + reboot into the pairing flow */
 };
 
 /* Forward an (x, y) touch event into the active wheel screen. Returns

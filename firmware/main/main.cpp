@@ -1706,11 +1706,63 @@ extern "C" void app_main(void) {
                         (int)ev.x, (int)ev.y);
                     dev_menu::exit_to_live();
                     s_net_render_dirty = true;
-                    if (act == dev_menu::TouchResult::OpenKeyPortal) {
-                        ESP_LOGI(TAG, "dev_menu → opening key portal");
-                        key_portal::start(epd);
-                    } else {
-                        ESP_LOGI(TAG, "touch in dev_menu → exit to live");
+                    /* Small helper: show a one-line "restarting" toast
+                     * before a reboot action so the tap gets visible
+                     * feedback. */
+                    auto reboot_with_msg = [&](const char *l1, const char *l2) {
+                        epd_ui::clear(epd);
+                        epd_ui::draw_text_centered(epd, 84, 1, l1);
+                        epd_ui::draw_text_centered(epd, 104, 1, l2);
+                        epd->EPD_Init_Partial();
+                        epd->EPD_DisplayPart();
+                        vTaskDelay(pdMS_TO_TICKS(1200));
+                        esp_restart();
+                    };
+                    switch (act) {
+                        case dev_menu::TouchResult::OpenKeyPortal:
+                            ESP_LOGI(TAG, "dev_menu → key portal");
+                            key_portal::start(epd);
+                            break;
+                        case dev_menu::TouchResult::UpdateNow:
+                            ESP_LOGI(TAG, "dev_menu → OTA check now");
+                            ota_update::check_now();
+                            epd_ui::clear(epd);
+                            epd_ui::draw_text_centered(epd, 84, 1,
+                                "Checking for");
+                            epd_ui::draw_text_centered(epd, 104, 1,
+                                "updates...");
+                            epd->EPD_Init_Partial();
+                            epd->EPD_DisplayPart();
+                            break;
+                        case dev_menu::TouchResult::ChangeWifi:
+                            ESP_LOGI(TAG, "dev_menu → change WiFi (SoftAP)");
+                            nvs_creds_set_prov_on_boot(true);
+                            reboot_with_msg("Restarting for", "WiFi setup...");
+                            break;
+                        case dev_menu::TouchResult::ForgetWifi: {
+                            char ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
+                            if (s_net_ssid[0]) {
+                                snprintf(ssid, sizeof(ssid), "%s", s_net_ssid);
+                            } else {
+                                struct mochi_wifi_creds c = {};
+                                if (nvs_creds_load_at(0, &c)) {
+                                    snprintf(ssid, sizeof(ssid), "%s", c.ssid);
+                                }
+                            }
+                            ESP_LOGI(TAG, "dev_menu → forget WiFi '%s'", ssid);
+                            nvs_creds_forget(ssid);
+                            reboot_with_msg("Forgetting WiFi", "Restarting...");
+                            break;
+                        }
+                        case dev_menu::TouchResult::RePair:
+                            ESP_LOGI(TAG, "dev_menu → re-pair");
+                            pair_creds_clear();
+                            reboot_with_msg("Re-pairing", "Restarting...");
+                            break;
+                        case dev_menu::TouchResult::None:
+                        default:
+                            ESP_LOGI(TAG, "touch in dev_menu → exit to live");
+                            break;
                     }
                     /* Squelch this gesture: the `continue` below
                      * already skips the live touch handler for THIS

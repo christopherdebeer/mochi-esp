@@ -191,6 +191,37 @@ bool nvs_creds_append(const struct mochi_wifi_creds *creds) {
     return true;
 }
 
+bool nvs_creds_forget(const char *ssid) {
+    if (!ssid || !ssid[0]) return false;
+    struct mochi_wifi_creds list[MOCHI_WIFI_CREDS_MAX] = {};
+    size_t n = read_all(list);
+
+    /* Compact out every entry matching `ssid`, preserving MRU order of
+     * the rest. After a reboot, connect_any picks the strongest of the
+     * remaining known networks (or the no-creds path runs provisioning
+     * if this was the last one). */
+    size_t kept = 0;
+    bool removed = false;
+    for (size_t i = 0; i < n; i++) {
+        if (strncmp(list[i].ssid, ssid, MOCHI_WIFI_SSID_MAX) == 0) {
+            removed = true;
+            continue;
+        }
+        if (kept != i) list[kept] = list[i];
+        kept++;
+    }
+    if (!removed) {
+        ESP_LOGW(TAG, "forget: SSID '%s' not stored", ssid);
+        return false;
+    }
+    if (!write_all(list, kept)) {
+        ESP_LOGE(TAG, "forget write failed");
+        return false;
+    }
+    ESP_LOGI(TAG, "forgot SSID '%s' (count=%u)", ssid, (unsigned)kept);
+    return true;
+}
+
 bool nvs_creds_clear_all(void) {
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return false;
