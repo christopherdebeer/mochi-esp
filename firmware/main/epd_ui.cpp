@@ -208,11 +208,14 @@ void render_boot_splash(epaper_driver_display *epd, const char *title,
                 mpk_zone_v1_t zn;
                 if (!mpk_zone_get(&pack, idx, z, &zn)) continue;
                 if (zn.kind != MPK_ACTION_PET) continue;
-                const int ei = (int)zn.data;
-                if (ei < 0 || ei >= PET_EXPR_COUNT) continue;
+                /* The splash deliberately ignores the zone's authored
+                 * `data` and always renders the "lonely" expression —
+                 * a freshly-woken device reaching for its kid. The
+                 * data byte is reserved for non-splash pet zones (e.g.
+                 * scene cells where the artist picks an expression). */
                 static uint8_t petInk[1536], petMask[1536];
                 uint16_t pw = 0, ph = 0;
-                if (!pet_pack_load(PET_EXPR_NAMES[ei], petInk, petMask,
+                if (!pet_pack_load("lonely", petInk, petMask,
                                    sizeof(petInk), &pw, &ph)) continue;
                 int side = (zn.w < zn.h ? zn.w : zn.h);
                 if (side < 1) side = 1;
@@ -245,17 +248,28 @@ void render_boot_splash(epaper_driver_display *epd, const char *title,
 #endif
 
     if (!usedPack) {
-        /* Fallback: the bundled single-frame splash. */
+        /* Pack unavailable / wrong shape — fall back to the bundled
+         * single-frame splash AND draw the title/status banners with
+         * filled backgrounds, since splash.bin has no authored zones
+         * to host them. */
         const size_t len = (size_t)(splash_bin_end - splash_bin_start);
         epd->EPD_LoadBuffer((uint8_t *)splash_bin_start, len);
+        if (title && *title)
+            draw_text_in_rect(epd, 8, 12, W - 16, 26, title, false, true);
+        if (status && *status)
+            draw_text_in_rect(epd, 8, 42, W - 16, 14, status, false, true);
+        return;
     }
 
-    /* Anything no zone placed gets a legible default banner (background
-     * filled) near the top. design/20. */
-    if (!titleZone && title && *title)
-        draw_text_in_rect(epd, 8, 12, W - 16, 26, title, false, true);
-    if (!statusZone && status && *status)
-        draw_text_in_rect(epd, 8, 42, W - 16, 14, status, false, true);
+    /* When the pack DID render: trust the authored cell. If a cell
+     * doesn't include a title or status zone, that's the artist's
+     * choice — don't paint a default banner over the artwork.
+     * The previous fallback drew a filled-background block for any
+     * unplaced string, which read as a duplicate when the cell DID
+     * include a zone of that type but the renderer matched both
+     * (e.g. status data overlapping a title slot). design/20. */
+    (void)titleZone;
+    (void)statusZone;
 }
 
 void overlay_boot_version(epaper_driver_display *epd, const char *version) {

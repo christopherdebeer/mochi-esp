@@ -69,8 +69,11 @@ def _validate_fmt1(path, d, cell_w, cell_h, count, label_len, has_mask) -> list[
                 errs.append(f"entry {i} zone {z} runs past EOF")
                 break
             kind = d[zp + 8]
-            if kind > 4:
-                errs.append(f"entry {i} zone {z}: action_kind {kind} > 4")
+            # MPK_ACTION_* in firmware/main/mochi_pack.h:
+            # 0 NONE, 1 EVENT, 2 NAV_SCENE, 3 NAV_RELATIVE,
+            # 4 TALK_SEED, 5 NAV_PLACE, 6 TEXT, 7 PET.
+            if kind > 7:
+                errs.append(f"entry {i} zone {z}: action_kind {kind} > 7")
 
     # label table sits just past the last entry.
     n_labels = 0
