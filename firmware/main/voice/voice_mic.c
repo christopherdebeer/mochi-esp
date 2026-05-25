@@ -275,6 +275,14 @@ static void mic_task(void *arg) {
         }
 
     loop_tail:
+        /* Yield once per encoded frame so IDLE on this core gets to
+         * reset the watchdog. opus_encode is CPU-bound (~3-4 ms on a
+         * 20 ms frame) and we observed task_wdt: IDLE1 starvation
+         * when the encoder + codec_read alternated without an
+         * explicit reschedule point. esp_codec_dev_read itself blocks
+         * on I²S, but only AFTER the encoder finishes — so a yield
+         * BEFORE looping back to read is the right insertion. */
+        taskYIELD();
         if (s_pcm_frames == 1 || (s_pcm_frames % 50) == 0) {
             voice_diag_log("mic: read=%lu muted=%lu enc_ok=%lu enc_err=%lu "
                 "snd_ok=%lu snd_blk=%lu snd_err=%lu",

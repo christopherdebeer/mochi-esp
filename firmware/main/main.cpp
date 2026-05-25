@@ -1498,10 +1498,13 @@ extern "C" void app_main(void) {
         ESP_LOGI(TAG, "asleep render committed");
     };
 
-    /* Initial render: pet on scene, neutral. Full refresh seeds the
-     * partial-refresh "previous frame" so subsequent taps are
-     * flicker-free. */
-    if (!render_with_expression("neutral", true, nullptr)) {
+    /* Initial render: pet on scene, neutral. Partial refresh —
+     * EPD_DisplayPartBaseImage was called after the boot splash, so
+     * the panel's "previous frame" buffer is already seeded; a full
+     * here just visibly re-flashes the panel from splash → pet for
+     * no benefit. Subsequent partial refreshes still work because
+     * the splash is the seeded base. */
+    if (!render_with_expression("neutral", false, nullptr)) {
         ESP_LOGE(TAG, "initial neutral render failed; halting");
         while (true) vTaskDelay(pdMS_TO_TICKS(60000));
     }
