@@ -1107,52 +1107,51 @@ extern "C" void app_main(void) {
         const bool v_active = voice::is_active();
         const voice::Phase v_phase = voice::phase();
 
-        /* Dedicated voice control: a mic glyph (idle) / filled stop
-         * square (active) at the far left of the bar. Tapping the
-         * left edge of the bar (a generously-sized hit zone — see
-         * the touch handler) starts/stops a session.
-         *
-         * The original 7×7 glyph was hard to even SEE on hardware,
-         * let alone aim a finger at. 2× scale (14×14) sits within
-         * the 19-tall bar with a 2-px margin top/bottom, and the
-         * surrounding visual mass makes the affordance read like a
-         * button rather than a stray pixel. Tap zone is wider than
-         * the glyph so a slightly-off finger still lands. design/23. */
-        {
+        /* Mic glyph (1× scale, 7×7) at the far left, but ONLY when
+         * voice is reachable (net online + key present). It's no longer
+         * a tap target — BOOT drives voice now (design/24) — so the
+         * scaled-up affordance is gone and the glyph is back to a
+         * passive state indicator. Hidden when offline so the bar
+         * doesn't lie about whether a session would actually connect. */
+        const bool voice_reachable =
+            (s_net_phase == NetPhase::Online) && voice::is_ready();
+        int time_x = STATUS_PAD;
+        if (voice_reachable) {
             static const uint8_t MIC_GLYPH[7] = {
                 0b00011100, 0b00011100, 0b00011100, 0b00011100,
                 0b00001000, 0b00111110, 0b00001000,
             };
-            constexpr int MIC_SCALE = 2;
-            constexpr int MIC_PX = 7 * MIC_SCALE;       /* 14 */
-            const int mx = 3;
-            const int my = (STATUS_BAR_H - MIC_PX) / 2; /* y=2 in a 19-tall bar */
+            const int mx = STATUS_PAD;
+            const int my = STATUS_TEXT_Y + 1; /* baseline-aligned with text */
             for (int row = 0; row < 7; row++) {
                 for (int col = 0; col < 7; col++) {
                     const bool on = v_active
                         ? (row >= 1 && row <= 5 && col >= 1 && col <= 5)
                         : (((MIC_GLYPH[row] >> col) & 1) != 0);
                     if (!on) continue;
-                    for (int dy = 0; dy < MIC_SCALE; dy++) {
-                        for (int dx = 0; dx < MIC_SCALE; dx++) {
-                            const int px = mx + col * MIC_SCALE + dx;
-                            const int py = my + row * MIC_SCALE + dy;
-                            if (px < 0 || py < 0 ||
-                                px >= (int)MOCHI_EPD_WIDTH ||
-                                py >= (int)MOCHI_EPD_HEIGHT) continue;
-                            const size_t off = (size_t)py * 25 + ((size_t)px >> 3);
-                            composite[off] &= (uint8_t)~(1u << (7 - ((size_t)px & 7)));
-                        }
-                    }
+                    const int px = mx + col;
+                    const int py = my + row;
+                    if (px < 0 || py < 0 ||
+                        px >= (int)MOCHI_EPD_WIDTH ||
+                        py >= (int)MOCHI_EPD_HEIGHT) continue;
+                    const size_t off = (size_t)py * 25 + ((size_t)px >> 3);
+                    composite[off] &= (uint8_t)~(1u << (7 - ((size_t)px & 7)));
                 }
             }
+            time_x = STATUS_PAD + 7 + 3;   /* glyph + small gap */
         }
+        blit_status_text(time_str, time_x);
 
-        /* Time sits past the wider mic glyph. */
-        blit_status_text(time_str, 22);
-
+        /* Right cluster: WiFi (right-most) + battery (text immediately
+         * left of WiFi). Net status used to sit just left of the battery
+         * digits at 7×7 — too tiny to read at arm's length. Now the
+         * WiFi is the bar's right-most element at 11×9 (described
+         * below) and battery slides left to make room. */
+        constexpr int WIFI_W = 11;
+        constexpr int WIFI_GAP = 3;          /* between battery digits and bars */
+        const int wifi_x = (int)MOCHI_EPD_WIDTH - STATUS_PAD - WIFI_W;
         const int batt_w = (int)strlen(batt_str) * 8;
-        const int batt_x = (int)MOCHI_EPD_WIDTH - STATUS_PAD - batt_w;
+        const int batt_x = wifi_x - WIFI_GAP - batt_w;
         blit_status_text(batt_str, batt_x);
 
         /* Centre: pet name normally; during a session, the voice state
@@ -1169,64 +1168,62 @@ extern "C" void app_main(void) {
         if (name_x < 14) name_x = 14;
         blit_status_text(center, name_x);
 
-        /* WiFi state glyph — 7×7 px, slotted just left of the centred
-         * pet name. Three patterns:
-         *   Online      ▁▂▃ ascending bars (filled)
-         *   Connecting  ▁▂▃ ascending bars (1-px dotted)
-         *   Offline     a small ✗ over a faint base bar
+        /* WiFi state glyph — 4 ascending bars at the far-right of the
+         * status bar (right of the battery digits). 11×9 px overall:
+         * four 2-px-wide bars separated by a 1-px gutter, climbing in
+         * height from 3→6→7→9 px so the cellular-style "signal" reads
+         * are immediate. The previous 7×7 hairline version was hard
+         * to parse at arm's length on a 200-px panel.
+         *
+         * State mapping is deliberately conservative for the e-ink
+         * panel — no gradients, just filled vs hollow:
+         *   Online      → all 4 bars filled
+         *   Connecting  → bars 1+2 filled (low-fidelity 'searching')
+         *   Offline     → 1×1 dot at the base of each bar slot, plus
+         *                 a diagonal slash through the cluster
+         *                 (clearly NOT signal — easy to spot)
          * Drawn directly into the composite framebuffer with the
          * same MSB-first convention render_chrome uses elsewhere. */
         {
-            static const uint8_t WIFI_ONLINE[7] = {
-                0b00000000,
-                0b00000010,
-                0b00000010,
-                0b00001010,
-                0b00001010,
-                0b00101010,
-                0b00101010,
-            };
-            static const uint8_t WIFI_CONNECTING[7] = {
-                0b00000000,
-                0b00000010,
-                0b00000000,
-                0b00001000,
-                0b00000010,
-                0b00100000,
-                0b00001000,
-            };
-            static const uint8_t WIFI_OFFLINE[7] = {
-                0b00000000,
-                0b01000100,
-                0b00101000,
-                0b00010000,
-                0b00101000,
-                0b01000100,
-                0b00000000,
-            };
             const NetPhase phase = s_net_phase;
-            const uint8_t *gly =
-                phase == NetPhase::Online      ? WIFI_ONLINE :
-                phase == NetPhase::Connecting  ? WIFI_CONNECTING :
-                                                 WIFI_OFFLINE;
-            /* Centre vertically inside the bar; horizontally sit
-             * just left of the battery text — 7-px glyph + 3-px gap
-             * before the digits. Right-side cluster (net + battery)
-             * reads as one "device health" group; pet name owns the
-             * centre. */
-            const int gx = batt_x - 10;
-            const int gy = STATUS_TEXT_Y + 1;
-            for (int row = 0; row < 7; row++) {
-                const uint8_t bits = gly[row];
-                for (int col = 0; col < 7; col++) {
-                    if (!((bits >> col) & 1)) continue;
-                    const int px = gx + col;
-                    const int py = gy + row;
-                    if (px < 0 || py < 0 ||
-                        px >= (int)MOCHI_EPD_WIDTH ||
-                        py >= (int)MOCHI_EPD_HEIGHT) continue;
-                    const size_t off = (size_t)py * 25 + ((size_t)px >> 3);
-                    composite[off] &= (uint8_t)~(1u << (7 - ((size_t)px & 7)));
+            const int gx = wifi_x;
+            const int base_y = STATUS_TEXT_Y + 8;  /* bottom of bars */
+            constexpr int BAR_W = 2;
+            constexpr int BAR_GAP = 1;
+            constexpr int BAR_HEIGHTS[4] = { 3, 5, 7, 9 };
+            auto plot = [&](int px, int py) {
+                if (px < 0 || py < 0 ||
+                    px >= (int)MOCHI_EPD_WIDTH ||
+                    py >= (int)MOCHI_EPD_HEIGHT) return;
+                const size_t off = (size_t)py * 25 + ((size_t)px >> 3);
+                composite[off] &= (uint8_t)~(1u << (7 - ((size_t)px & 7)));
+            };
+            const int filled_bars =
+                phase == NetPhase::Online     ? 4 :
+                phase == NetPhase::Connecting ? 2 : 0;
+            for (int b = 0; b < 4; b++) {
+                const int bar_x = gx + b * (BAR_W + BAR_GAP);
+                if (b < filled_bars) {
+                    /* Solid filled bar from baseline up by its height. */
+                    const int h = BAR_HEIGHTS[b];
+                    for (int dy = 0; dy < h; dy++) {
+                        for (int dx = 0; dx < BAR_W; dx++) {
+                            plot(bar_x + dx, base_y - dy);
+                        }
+                    }
+                } else {
+                    /* Empty: just a 1-px floor pip so the slot still
+                     * registers as part of the same indicator. */
+                    for (int dx = 0; dx < BAR_W; dx++) {
+                        plot(bar_x + dx, base_y);
+                    }
+                }
+            }
+            if (phase == NetPhase::Offline) {
+                /* Diagonal slash from top-right to bottom-left over
+                 * the empty cluster, so offline reads at a glance. */
+                for (int i = 0; i < 9; i++) {
+                    plot(gx + (10 - i), STATUS_TEXT_Y + i);
                 }
             }
         }

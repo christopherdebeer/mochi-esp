@@ -54,6 +54,7 @@
 #include "voice_tools.h"
 #include "voice_mic.h"
 #include "voice_aec.h"
+#include "device_diag.h"   /* /api/device/diag — survives USB disconnect */
 
 #define TAG "voice_peer"
 
@@ -601,6 +602,42 @@ static int pc_on_data(esp_peer_data_frame_t *frame, void *ctx) {
         if (cur == VOICE_PHASE_SPEAKING) {
             set_phase(VOICE_PHASE_READY);
         }
+    }
+
+    /* AEC effectiveness probe. The server's VAD fires
+     * `input_audio_buffer.speech_started` whenever it thinks the user
+     * began speaking. While the model is mid-utterance (phase =
+     * SPEAKING), there are two distinct causes:
+     *
+     *   (a) self-interrupt — model audio leaked past AEC, server
+     *       VAD triggered on it. Mic peak (post-AEC) is moderate to
+     *       high but there's no actual user voice in the room.
+     *   (b) real barge-in — user actually spoke. Same elevated peak.
+     *
+     * Same surface signal, different root cause. We can't tell them
+     * apart without an out-of-band "did the user really speak" oracle,
+     * but we CAN log the post-AEC peak alongside the phase so a human
+     * reviewing /api/device/diag can correlate against the assistant
+     * transcript. AEC counters at session-end (pushed/pulled/fail) tell
+     * us how often the canceller couldn't keep up; this per-event probe
+     * tells us when speech_started fires DURING speak.
+     *
+     * Telemetry shape: device_diag_event so the line ships to val.run
+     * even when the device is untethered (voice_diag is local-only). */
+    if (event_type_is(body, body_len, "input_audio_buffer.speech_started")) {
+        voice_phase_t cur = (voice_phase_t)atomic_load(&s_peer.phase);
+        const int peak = voice_mic_last_peak_dbfs();
+        const bool aec_on = voice_aec_is_enabled();
+        char ctx[96];
+        snprintf(ctx, sizeof(ctx),
+            "{\"phase\":\"%s\",\"peak_dbfs\":%d,\"aec\":%s}",
+            phase_name(cur), peak, aec_on ? "true" : "false");
+        const char *msg = (cur == VOICE_PHASE_SPEAKING)
+            ? "speech_started during SPEAKING"
+            : "speech_started";
+        device_diag_event(DIAG_INFO, "voice", msg, ctx);
+        voice_diag_log("speech_started phase=%s peak=%d dBFS aec=%d",
+            phase_name(cur), peak, aec_on ? 1 : 0);
     }
 
     /* Voice cost telemetry (design/18 ph3b): accumulate per-turn token

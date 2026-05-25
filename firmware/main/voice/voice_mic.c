@@ -110,6 +110,47 @@ static uint32_t s_send_block;
 static uint32_t s_read_err;
 static uint32_t s_muted_frames;   /* frames dropped because mochi was speaking */
 
+/* Latest per-frame peak amplitude, in dBFS (negative; -120 ≈ silence).
+ * Single int — torn read is fine, the only consumer is a one-shot
+ * snapshot on speech_started. */
+static atomic_int s_last_peak_dbfs = -120;
+
+/* Cheap log10 via integer math: peak/32768 → dBFS = 20·log10(peak/32768).
+ * Implemented as a 16-step lookup over peak ranges so we avoid pulling
+ * the float libm. Rounds to nearest int dBFS, clamped to [-120, 0]. */
+static int peak_to_dbfs(int16_t *pcm, size_t samples) {
+    int peak = 0;
+    for (size_t i = 0; i < samples; i++) {
+        int v = pcm[i];
+        if (v < 0) v = -v;
+        if (v > peak) peak = v;
+    }
+    if (peak <= 0) return -120;
+    /* dBFS table for peak ranges. Each step ≈ 6 dB (a halving of
+     * amplitude). Tight enough for self-interrupt vs real-speech
+     * discrimination without the float math. */
+    static const int thresholds[] = {
+        32768, 23170, 16384, 11585, 8192, 5793, 4096, 2896,
+        2048,  1448,  1024,  724,   512,  362,  256,  181,
+        128,   90,    64,    45,    32,   23,   16,   11,
+        8,     6,     4,     3,     2,    1
+    };
+    static const int dbs[] = {
+        0,  -3,  -6,  -9,  -12, -15, -18, -21,
+        -24, -27, -30, -33, -36, -39, -42, -45,
+        -48, -51, -54, -57, -60, -63, -66, -69,
+        -72, -75, -78, -81, -84, -90
+    };
+    for (size_t i = 0; i < sizeof(thresholds)/sizeof(thresholds[0]); i++) {
+        if (peak >= thresholds[i]) return dbs[i];
+    }
+    return -120;
+}
+
+int voice_mic_last_peak_dbfs(void) {
+    return atomic_load(&s_last_peak_dbfs);
+}
+
 static bool open_record(void) {
     s_record_dev = get_record_handle();
     if (!s_record_dev) {
@@ -223,6 +264,18 @@ static void mic_task(void *arg) {
          * mic in place; no-op when disabled. */
         voice_aec_process_in_place((int16_t *)s_pcm_buf,
             (size_t)(s_in_bytes / (int)sizeof(int16_t)));
+
+        /* Stamp the post-AEC peak. This is the same energy the server
+         * VAD sees over the wire (we ship encoded mic that started as
+         * this PCM). On a self-interrupt, the model's audio leaked
+         * past AEC and we'd expect a moderate-to-high peak with NO
+         * preceding human speech; on a real barge-in, the peak is
+         * elevated AND co-occurs with user voice. The /api/device/diag
+         * line on speech_started includes this value so we can tell
+         * the two apart from the val.run side. */
+        atomic_store(&s_last_peak_dbfs,
+            peak_to_dbfs((int16_t *)s_pcm_buf,
+                (size_t)(s_in_bytes / (int)sizeof(int16_t))));
 
         /* Half-duplex mute fallback. voice_peer_mic_should_mute()
          * returns false whenever voice_aec is enabled, so this gate
