@@ -40,16 +40,16 @@ static const uint8_t SLEEPY_ENERGY_FLOOR = 10;
  * (~y=92) with the tail. */
 static const int BUBBLE_X0    = 54;
 static const int BUBBLE_X1    = 146;     /* exclusive */
-static const int BUBBLE_Y0    = 22;
-static const int BUBBLE_Y1    = 58;      /* exclusive */
+static const int BUBBLE_Y0    = 42;
+static const int BUBBLE_Y1    = 78;      /* exclusive */
 static const int BUBBLE_TAIL_W = 6;      /* base of the down-pointing tail */
 static const int BUBBLE_TAIL_H = 6;      /* height; tip lands at Y1 + H - 1 */
 static const int HIT_PAD       = 6;      /* enlarge tap target on every side */
 
 /* Two scale-1 text lines, centered horizontally inside the bubble.
  * y values are the top of each glyph (glyphs are 8 rows tall). */
-static const int LINE1_TOP_Y = 28;
-static const int LINE2_TOP_Y = 40;
+static const int LINE1_TOP_Y = 48;
+static const int LINE2_TOP_Y = 60;
 
 /* ─── Framebuffer helpers ──────────────────────────────────────────
  *
