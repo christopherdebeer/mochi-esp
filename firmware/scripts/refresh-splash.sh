@@ -53,6 +53,23 @@ fetch_url() {
   return 0
 }
 
+# ── Boot splash PACK (design/20): a random-cell splash with text + pet
+# zones, built from the spash-bundle-a sheet. Optional — when the pack
+# isn't available (sheet not authored yet) this is skipped and the firmware
+# falls back to splash.bin plus a default version banner. CMake embeds
+# splash.mpk only when it exists (see main/CMakeLists.txt).
+SPLASH_MPK_URL="https://mochi.val.run/devsprite/pack/spash-bundle-a"
+MPK_OUT="$OUT_DIR/splash.mpk"
+echo "fetching splash pack from $SPLASH_MPK_URL"
+if curl -fsSL -o "$MPK_OUT.tmp" "$SPLASH_MPK_URL" \
+   && [ "$(head -c4 "$MPK_OUT.tmp" 2>/dev/null)" = "MPK1" ]; then
+  mv "$MPK_OUT.tmp" "$MPK_OUT"
+  echo "splash.mpk updated ($(file_size "$MPK_OUT") bytes) — spash-bundle-a pack"
+else
+  rm -f "$MPK_OUT.tmp"
+  echo "  splash.mpk not updated (pack unavailable) — firmware uses splash.bin" >&2
+fi
+
 echo "fetching splash from $PRIMARY_URL"
 if fetch_url "$PRIMARY_URL"; then
   echo "splash.bin updated ($(file_size "$OUT") bytes) — splash-v1/boot"

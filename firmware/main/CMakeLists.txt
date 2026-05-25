@@ -10,6 +10,19 @@
 # `main` rather than wrapping it in a component. See
 # `vendor/waveshare-eink/README.md` for why and when to revisit.
 
+# Embedded binary assets. splash.mpk — the random-cell boot splash pack
+# with text/pet zones (design/20) — is OPTIONAL: it's produced by
+# scripts/refresh-splash.sh fetching /devsprite/pack/spash-bundle-a. When
+# absent the build still works and the splash falls back to splash.bin.
+set(MOCHI_EMBED_FILES
+    "assets/splash.bin"
+    "assets/scenes_a.mpk"
+    "assets/pet_a.mpk"
+)
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/assets/splash.mpk")
+    list(APPEND MOCHI_EMBED_FILES "assets/splash.mpk")
+endif()
+
 idf_component_register(
     SRCS
         "main.cpp"
@@ -64,9 +77,7 @@ idf_component_register(
         "../vendor/waveshare-eink"
         "../vendor/qrcodegen"
     EMBED_FILES
-        "assets/splash.bin"
-        "assets/scenes_a.mpk"
-        "assets/pet_a.mpk"
+        ${MOCHI_EMBED_FILES}
     REQUIRES
         driver
         esp_timer
@@ -90,7 +101,15 @@ idf_component_register(
         espressif__esp-sr
         mbedtls
         log
+        esp_hw_support
 )
+
+# Optional splash pack (design/20): when assets/splash.mpk is present
+# (produced by scripts/refresh-splash.sh) the boot splash renders a random
+# cell + text/pet zones; otherwise it falls back to splash.bin.
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/assets/splash.mpk")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE MOCHI_HAVE_SPLASH_MPK=1)
+endif()
 
 # Force-link the esp_log/esp_log_timestamp shim into the final
 # image. Without `-u`, the prebuilt `libpeer_default.a` (which

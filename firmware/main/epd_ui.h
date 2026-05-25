@@ -37,7 +37,13 @@ void render_prov_idle(epaper_driver_display *epd, const char *ssid);
 void render_prov_connecting(epaper_driver_display *epd);
 void render_prov_failed(epaper_driver_display *epd);
 void render_online(epaper_driver_display *epd, const char *ip_str);
-void render_boot_splash(epaper_driver_display *epd);
+/* Boot splash. Renders a (random) cell from the embedded splash pack
+ * (splash.mpk) when present — overlaying title + status text at the pack's
+ * text zones, and the paired pet's expression at its pet zone — else falls
+ * back to the bundled splash.bin. Title/status not placed by a zone get a
+ * legible default banner. `paired` gates the pet. design/20. */
+void render_boot_splash(epaper_driver_display *epd, const char *title,
+                        const char *status, bool paired);
 
 /* Overlay short white text (small, scale=1) horizontally centred at
  * 30% from the top of the panel. Designed to stamp the firmware

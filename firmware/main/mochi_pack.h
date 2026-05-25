@@ -177,7 +177,18 @@ typedef enum {
     MPK_ACTION_NAV_RELATIVE = 3,  /* data = signed scene delta (i8)      */
     MPK_ACTION_TALK_SEED    = 4,  /* seed_text/seed_len set; data unused */
     MPK_ACTION_NAV_PLACE    = 5,  /* seed_text/seed_len = target place id (design/17) */
+    /* design/20 (splash): location-only chrome zones — the payload (text
+     * string / pet sprite) is device-authored, not carried in the pack.
+     * Both are non-interactive (skipped by tap routing). */
+    MPK_ACTION_TEXT         = 6,  /* data = type|colour bitfield: bits0-3 type (0 title, 1 status), bit4 light-glyphs */
+    MPK_ACTION_PET          = 7,  /* data = expression index (see studio PET_EXPRESSIONS; 13 = lonely); rect sizes + places the pet */
 } mpk_action_kind_t;
+
+/* MPK_ACTION_TEXT data accessors. */
+#define MPK_TEXT_TYPE(data)   ((uint8_t)((data) & 0x0F))   /* 0 = title, 1 = status */
+#define MPK_TEXT_LIGHT(data)  (((data) & 0x10) != 0)       /* true = light glyphs (dark bg) */
+#define MPK_TEXT_TITLE   0
+#define MPK_TEXT_STATUS  1
 
 typedef struct {
     uint16_t          x, y, w, h;

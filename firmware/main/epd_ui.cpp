@@ -10,6 +10,11 @@ extern "C" {
 #include "qrcodegen.h"
 }
 
+#include "mochi_pack.h"
+#include "pet_pack.h"
+#include "compositor.h"
+#include "esp_random.h"
+
 namespace epd_ui {
 
 static constexpr int W = MOCHI_EPD_WIDTH;
@@ -96,15 +101,24 @@ void draw_text_centered(epaper_driver_display *epd, int y, int scale,
  */
 extern const uint8_t splash_bin_start[] asm("_binary_splash_bin_start");
 extern const uint8_t splash_bin_end[]   asm("_binary_splash_bin_end");
+#ifdef MOCHI_HAVE_SPLASH_MPK
+extern const uint8_t _binary_splash_mpk_start[] asm("_binary_splash_mpk_start");
 
-void render_boot_splash(epaper_driver_display *epd) {
-    const size_t len = (size_t)(splash_bin_end - splash_bin_start);
-    epd->EPD_LoadBuffer((uint8_t *)splash_bin_start, len);
-}
+/* Expression index → pet-pack cell label. MIRRORS the studio's
+ * PET_EXPRESSIONS (c15r/mochi-device studio/api.ts) and the pet-*-v1 sheet
+ * cell order — a pet zone's `data` is an index into this list. design/20. */
+static const char *const PET_EXPR_NAMES[] = {
+    "neutral", "happy", "blushing", "excited", "playful", "cheerful_wave",
+    "hungry", "eating", "tired", "sleeping", "waking_up", "comforted",
+    "sad", "lonely", "curious", "thinking", "surprised", "goodbye",
+};
+static constexpr int PET_EXPR_COUNT =
+    (int)(sizeof(PET_EXPR_NAMES) / sizeof(PET_EXPR_NAMES[0]));
+#endif
 
 /* Stamp on-bits only, in the requested colour. Off-bits leave the
- * existing framebuffer pixel alone — used by overlay_boot_version
- * so the splash artwork shows through the gaps between glyphs. */
+ * existing framebuffer pixel alone — so the splash artwork shows through
+ * the gaps between glyphs (when no background is filled). */
 static void blit_glyph_overlay(epaper_driver_display *epd, char c,
                                int ox, int oy, int scale,
                                COLOR_IMAGE colour) {
@@ -125,11 +139,124 @@ static void blit_glyph_overlay(epaper_driver_display *epd, char c,
     }
 }
 
+/* Fit `text` into (x,y,w,h): the largest integer glyph scale that fits,
+ * centred. `light` → white glyphs (legible on dark art), else black.
+ * `fill_bg` paints the rect the opposite colour first so the text reads on
+ * any background — used for the default (no-zone) placement. design/20. */
+static void draw_text_in_rect(epaper_driver_display *epd, int x, int y,
+                              int w, int h, const char *text,
+                              bool light, bool fill_bg) {
+    if (!text || !*text || w <= 0 || h <= 0) return;
+    const int len = (int)strlen(text);
+    int scale = 1;
+    while (len * 8 * (scale + 1) <= w && 8 * (scale + 1) <= h) scale++;
+    const int textW = len * 8 * scale;
+    const int textH = 8 * scale;
+    int tx = x + (w - textW) / 2;
+    int ty = y + (h - textH) / 2;
+    if (tx < x) tx = x;
+    if (ty < y) ty = y;
+
+    const COLOR_IMAGE fg = light ? DRIVER_COLOR_WHITE : DRIVER_COLOR_BLACK;
+    if (fill_bg) {
+        const COLOR_IMAGE bg = light ? DRIVER_COLOR_BLACK : DRIVER_COLOR_WHITE;
+        for (int yy = y; yy < y + h; yy++) {
+            if (yy < 0 || yy >= H) continue;
+            for (int xx = x; xx < x + w; xx++) {
+                if (xx < 0 || xx >= W) continue;
+                epd->EPD_DrawColorPixel(xx, yy, bg);
+            }
+        }
+    }
+    int cur = tx;
+    for (const char *p = text; *p; p++) {
+        if (cur + 8 * scale > W) break;
+        blit_glyph_overlay(epd, *p, cur, ty, scale, fg);
+        cur += 8 * scale;
+    }
+}
+
+void render_boot_splash(epaper_driver_display *epd, const char *title,
+                        const char *status, [[maybe_unused]] bool paired) {
+    bool titleZone = false, statusZone = false, usedPack = false;
+
+#ifdef MOCHI_HAVE_SPLASH_MPK
+    static uint8_t fb[((MOCHI_EPD_WIDTH + 7) / 8) * MOCHI_EPD_HEIGHT];
+    const size_t FB = sizeof(fb);
+    mpk_t pack;
+    if (mpk_open(_binary_splash_mpk_start, &pack) == 0 && pack.count > 0 &&
+        pack.cell_w == (uint16_t)W && pack.cell_h == (uint16_t)H &&
+        pack.plane_bytes == FB) {
+        const uint16_t idx = (uint16_t)(esp_random() % pack.count);
+
+        /* Base layer: the chosen cell's ink plane is exactly a full-panel
+         * framebuffer (scene cells are opaque; any mask is ignored). */
+        memcpy(fb, mpk_ink(&pack, idx), FB);
+
+        /* Pet zone(s): composite the paired pet's expression, scaled to
+         * fit the zone rect (square, foot on the rect's bottom edge),
+         * into the base buffer before we push it. */
+        if (paired) {
+            pet_pack_init();
+            const uint8_t zc = mpk_zone_count(&pack, idx);
+            for (uint8_t z = 0; z < zc; z++) {
+                mpk_zone_v1_t zn;
+                if (!mpk_zone_get(&pack, idx, z, &zn)) continue;
+                if (zn.kind != MPK_ACTION_PET) continue;
+                const int ei = (int)zn.data;
+                if (ei < 0 || ei >= PET_EXPR_COUNT) continue;
+                static uint8_t petInk[1536], petMask[1536];
+                uint16_t pw = 0, ph = 0;
+                if (!pet_pack_load(PET_EXPR_NAMES[ei], petInk, petMask,
+                                   sizeof(petInk), &pw, &ph)) continue;
+                int side = (zn.w < zn.h ? zn.w : zn.h);
+                if (side < 1) side = 1;
+                const int ox = (int)zn.x + ((int)zn.w - side) / 2;
+                const int oy = (int)zn.y + ((int)zn.h - side);
+                compositor::blit_two_plane_scaled(fb, W, H, petInk, petMask,
+                                                  pw, ph, ox, oy,
+                                                  (size_t)side, (size_t)side);
+            }
+        }
+
+        epd->EPD_LoadBuffer(fb, FB);
+        usedPack = true;
+
+        /* Text zone(s): drawn after load, straight onto the panel image so
+         * the artwork shows through glyph gaps (colour from the hint). */
+        const uint8_t zc = mpk_zone_count(&pack, idx);
+        for (uint8_t z = 0; z < zc; z++) {
+            mpk_zone_v1_t zn;
+            if (!mpk_zone_get(&pack, idx, z, &zn)) continue;
+            if (zn.kind != MPK_ACTION_TEXT) continue;
+            const uint8_t type = MPK_TEXT_TYPE(zn.data);
+            const bool light = MPK_TEXT_LIGHT(zn.data);
+            const char *t = (type == MPK_TEXT_STATUS) ? status : title;
+            if (!t || !*t) continue;
+            draw_text_in_rect(epd, zn.x, zn.y, zn.w, zn.h, t, light, false);
+            if (type == MPK_TEXT_STATUS) statusZone = true; else titleZone = true;
+        }
+    }
+#endif
+
+    if (!usedPack) {
+        /* Fallback: the bundled single-frame splash. */
+        const size_t len = (size_t)(splash_bin_end - splash_bin_start);
+        epd->EPD_LoadBuffer((uint8_t *)splash_bin_start, len);
+    }
+
+    /* Anything no zone placed gets a legible default banner (background
+     * filled) near the top. design/20. */
+    if (!titleZone && title && *title)
+        draw_text_in_rect(epd, 8, 12, W - 16, 26, title, false, true);
+    if (!statusZone && status && *status)
+        draw_text_in_rect(epd, 8, 42, W - 16, 14, status, false, true);
+}
+
 void overlay_boot_version(epaper_driver_display *epd, const char *version) {
     if (!version || !*version) return;
-    /* 30% from the top: 200 * 0.30 = 60. Glyphs are 8 px tall at
-     * scale=1, so y=60 puts the text vertically centred-ish on that
-     * line. */
+    /* Retained for callers that want a standalone version stamp; the boot
+     * path now uses render_boot_splash's status text instead. */
     constexpr int y = 60;
     int len = static_cast<int>(strlen(version));
     int total = len * 8;
