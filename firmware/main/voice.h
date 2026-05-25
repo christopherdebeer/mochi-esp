@@ -37,11 +37,18 @@ bool is_ready(void);
  * stop (either user-initiated or remote-side close). */
 bool is_active(void);
 
-/* Start a voice session. Mints an ephemeral token, opens a peer
- * connection, requests OpenAI to greet the user. Asynchronous — the
- * peer worker task keeps running after this returns. Returns 0 on
- * success, -1 on failure to even kick off the mint. */
+/* Start a voice session. Non-blocking: the mint, SDP exchange, and
+ * connect all run on the peer worker task, so this returns as soon as
+ * the session is kicked off (phase → Connecting). Persona + tools come
+ * from the prefetch_config() cache when warm, else one combined fetch.
+ * Returns 0 on success, -1 on failure to even kick off. */
 int start_session(void);
+
+/* Warm the persona+tools cache from mochi.val.run so a later
+ * start_session pays no fetch. Call from the connectivity worker after
+ * WiFi is up (and optionally after each session). Best-effort + safe
+ * to call repeatedly; no-op without a pet_id. design/23. */
+void prefetch_config(void);
 
 /* Stop the currently-active voice session. Tears down the peer,
  * stops the worker task, clears in-memory state. Idempotent. */

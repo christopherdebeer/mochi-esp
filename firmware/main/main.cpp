@@ -552,6 +552,10 @@ static void net_worker(void *arg) {
         }
     }
 
+    /* Warm the voice persona+tools cache so the first long-press pays
+     * no fetch on the session-start path (design/23). Best-effort. */
+    voice::prefetch_config();
+
     vTaskDelete(nullptr);
 }
 
@@ -1066,16 +1070,56 @@ extern "C" void app_main(void) {
          * health" cluster — symmetric with the time/clock cluster on
          * the left. */
         constexpr int STATUS_PAD = 4;
-        blit_status_text(time_str, STATUS_PAD);
+        const bool v_active = voice::is_active();
+        const voice::Phase v_phase = voice::phase();
+
+        /* Dedicated voice control: a mic glyph (idle) / filled stop
+         * square (active) at the far left of the bar. Tapping the left
+         * edge of the status bar starts/stops a session (touch loop).
+         * 7×7, same MSB-first draw convention as the wifi glyph.
+         * design/23. */
+        {
+            static const uint8_t MIC_GLYPH[7] = {
+                0b00011100, 0b00011100, 0b00011100, 0b00011100,
+                0b00001000, 0b00111110, 0b00001000,
+            };
+            const int mx = 2, my = STATUS_TEXT_Y + 1;
+            for (int row = 0; row < 7; row++) {
+                for (int col = 0; col < 7; col++) {
+                    const bool on = v_active
+                        ? (row >= 1 && row <= 5 && col >= 1 && col <= 5)
+                        : (((MIC_GLYPH[row] >> col) & 1) != 0);
+                    if (!on) continue;
+                    const int px = mx + col, py = my + row;
+                    if (px < 0 || py < 0 ||
+                        px >= (int)MOCHI_EPD_WIDTH ||
+                        py >= (int)MOCHI_EPD_HEIGHT) continue;
+                    const size_t off = (size_t)py * 25 + ((size_t)px >> 3);
+                    composite[off] &= (uint8_t)~(1u << (7 - ((size_t)px & 7)));
+                }
+            }
+        }
+
+        /* Time sits just right of the mic glyph. */
+        blit_status_text(time_str, 12);
 
         const int batt_w = (int)strlen(batt_str) * 8;
         const int batt_x = (int)MOCHI_EPD_WIDTH - STATUS_PAD - batt_w;
         blit_status_text(batt_str, batt_x);
 
-        const int name_w = (int)strlen(pair.pet_name) * 8;
+        /* Centre: pet name normally; during a session, the voice state
+         * word (connecting / listening / talking) so state is
+         * unambiguous regardless of the pet's face. design/23. */
+        const char *center = pair.pet_name;
+        if (v_active) {
+            center = v_phase == voice::Phase::Connecting ? "connecting"
+                   : v_phase == voice::Phase::Speaking   ? "talking"
+                   :                                       "listening";
+        }
+        const int name_w = (int)strlen(center) * 8;
         int name_x = ((int)MOCHI_EPD_WIDTH - name_w) / 2;
-        if (name_x < STATUS_PAD) name_x = STATUS_PAD;
-        blit_status_text(pair.pet_name, name_x);
+        if (name_x < 14) name_x = 14;
+        blit_status_text(center, name_x);
 
         /* WiFi state glyph — 7×7 px, slotted just left of the centred
          * pet name. Three patterns:
@@ -1612,7 +1656,11 @@ extern "C" void app_main(void) {
      */
     auto phase_expr = [](voice::Phase p) -> const char * {
         switch (p) {
-            case voice::Phase::Connecting: return "curious";
+            /* Connecting gets its own face ('waking_up') rather than
+             * reusing 'curious' (which also means attention/pat) — so
+             * the connect wait reads as "mochi is waking up to talk",
+             * not generic curiosity. design/23. */
+            case voice::Phase::Connecting: return "waking_up";
             case voice::Phase::Ready:      return "comforted";
             case voice::Phase::Speaking:   return "cheerful_wave";
             case voice::Phase::Idle:
@@ -2161,6 +2209,48 @@ extern "C" void app_main(void) {
         if (now_us - last_event_us < DEBOUNCE_US) continue;
         last_event_us = now_us;
 
+        /* Voice control (design/23). The dedicated affordance is the
+         * mic glyph at the far-left of the status bar; tap it to start.
+         * While a session is live, ANY tap stops it (tap-to-stop), so
+         * this is handled before the care/scene pipeline — a tap during
+         * a session must not also log a care event. start_session is
+         * non-blocking now (mint runs on the worker), so there's no
+         * hold + drain dance. */
+        {
+            const bool tapped_mic =
+                (int)ev.y < STATUS_BAR_H && (int)ev.x < 40;
+            if (voice::is_active()) {
+                ESP_LOGI(TAG, "voice active — tap → stop session");
+                voice::stop_session();
+                render_with_expression("neutral", false, nullptr);
+                last_voice_phase = voice::Phase::Idle;
+                continue;
+            }
+            if (tapped_mic) {
+                if (!voice::is_ready()) {
+                    ESP_LOGW(TAG, "mic tap but voice not ready (no key?)");
+                    continue;
+                }
+                ESP_LOGI(TAG, "mic tap → start voice session");
+                /* Show the connecting face immediately so the tap reads
+                 * as registered during the connect window. */
+                render_with_expression("waking_up", false, nullptr);
+                last_voice_phase = voice::Phase::Connecting;
+                if (voice::start_session() == 0) {
+                    const int64_t talked_at = now_ms_wall();
+                    event_log_append(EVENT_TALKED, talked_at);
+                    pet_sync_enqueue(EVENT_TALKED, talked_at);
+                    pet_sync_touch(talked_at);
+                    s_dev_pet.last_interaction_at = talked_at;
+                } else {
+                    ESP_LOGW(TAG, "voice start failed");
+                    render_with_expression("neutral", false, nullptr);
+                    last_voice_phase = voice::Phase::Idle;
+                }
+                continue;
+            }
+        }
+
         Zone z = classify(ev.x, ev.y);
         /* Thought-bubble taps resolve expr + kind dynamically from
          * the active thought's payload — the static zone→expr /
@@ -2408,106 +2498,8 @@ extern "C" void app_main(void) {
                 (unsigned)n);
         }
 
-        /* Voice trigger: long-press of the centre-attention zone
-         * starts a session; tap-anywhere while a session is running
-         * stops it. Same gesture as design/07-voice-architecture.md
-         * specifies. The hold check polls the FT6336 at 50 ms cadence
-         * for up to 800 ms — if the finger stays in the centre zone
-         * the whole time, treat as long-press; otherwise fall through
-         * to the existing tap-to-cycle-expression behaviour. */
-        if (voice::is_active()) {
-            /* Active-session tap rules:
-             *   centre tap → text talk-back (debug path: send a fixed
-             *                user message + response.create over the
-             *                data channel). Validates multi-turn
-             *                lifecycle without committing to mic
-             *                capture (M9.f.2). The pet's expression
-             *                will hop SPEAKING → READY automatically
-             *                via the data-channel event handler.
-             *   anywhere else → stop session.
-             */
-            if (z == Zone::Center) {
-                ESP_LOGI(TAG, "voice active — centre tap → text talk-back");
-                static const char *DEBUG_TEXT =
-                    "Are you still there? Say a quick goodbye and stop.";
-                if (!voice::send_text(DEBUG_TEXT)) {
-                    ESP_LOGW(TAG, "send_text failed; falling through");
-                }
-                continue;
-            }
-            ESP_LOGI(TAG, "voice active — non-centre tap → stop session");
-            voice::stop_session();
-            /* Render neutral immediately so the user sees the
-             * "session over" state. */
-            render_with_expression("neutral", false, nullptr);
-            last_voice_phase = voice::Phase::Idle;
-            continue;
-        } else if (z == Zone::Center && voice::is_ready()) {
-            constexpr int HOLD_POLL_MS = 50;
-            constexpr int HOLD_TARGET_MS = 800;
-            int held_ms = 0;
-            bool released = false;
-            for (; held_ms < HOLD_TARGET_MS; held_ms += HOLD_POLL_MS) {
-                touch::Event hold_ev;
-                if (!touch::current_point(&hold_ev)) {
-                    released = true;
-                    break;
-                }
-                if (classify(hold_ev.x, hold_ev.y) != Zone::Center) {
-                    /* finger drifted off-zone — treat as a tap */
-                    released = true;
-                    break;
-                }
-                vTaskDelay(pdMS_TO_TICKS(HOLD_POLL_MS));
-            }
-            if (!released) {
-                ESP_LOGI(TAG, "long-press → start voice session");
-                /* Visual affordance: render 'curious' immediately so the
-                 * user knows their long-press registered. Without this,
-                 * the user sees nothing for the ~2.4 s mint blocking
-                 * call and tends to keep holding longer to be certain.
-                 * Once the session enters CONNECTING, phase_expr maps
-                 * it to 'curious' too, so the next tick of the touch
-                 * loop won't re-render. */
-                render_with_expression("curious", false, nullptr);
-                last_voice_phase = voice::Phase::Connecting;
-                if (voice::start_session() == 0) {
-                    /* Log the voice turn as a "talked" event — the
-                     * strongest engagement signal in shared/engagement.ts.
-                     * Single-event-per-session for now; M13's bidi
-                     * sync may want finer-grained per-turn entries. */
-                    int64_t talked_at = now_ms_wall();
-                    event_log_append(EVENT_TALKED, talked_at);
-                    pet_sync_enqueue(EVENT_TALKED, talked_at);
-                    pet_sync_touch(talked_at);
-                    s_dev_pet.last_interaction_at = talked_at;
-                    /* Drain pending touch events that piled up while
-                     * start_session was blocked on the mint round-trip
-                     * (~2.4 s). Without this, the still-held finger
-                     * generates a "stale" touch on the next wait_event,
-                     * which trips the is_active() branch above and
-                     * stops the session 1 ms after starting it. */
-                    touch::Event drain;
-                    while (touch::wait_event(&drain, 0)) { /* drain */ }
-                    /* Then wait for finger-up so any in-progress hold
-                     * doesn't trigger an immediate stop on lift-off. */
-                    constexpr int LIFT_TIMEOUT_MS = 5000;
-                    constexpr int LIFT_POLL_MS = 50;
-                    int lifted_ms = 0;
-                    while (lifted_ms < LIFT_TIMEOUT_MS) {
-                        touch::Event probe;
-                        if (!touch::current_point(&probe)) break;
-                        vTaskDelay(pdMS_TO_TICKS(LIFT_POLL_MS));
-                        lifted_ms += LIFT_POLL_MS;
-                    }
-                    /* Drain again — the lift-off itself can leave
-                     * one final ISR marker on the queue. */
-                    while (touch::wait_event(&drain, 0)) { /* drain */ }
-                    continue;
-                }
-                ESP_LOGW(TAG, "voice start failed; falling through to tap UX");
-            }
-        }
+        /* (Voice start/stop is handled up-front via the status-bar mic
+         * affordance — see the voice-control block above. design/23.) */
 
         /* Thought-bubble tap: suppress further bubble renders for
          * THOUGHT_SUPPRESS_MS so the same need can't re-surface

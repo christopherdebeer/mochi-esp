@@ -996,6 +996,41 @@ static void check_caps(void) {
 static void worker_task(void *arg) {
     (void)arg;
     ESP_LOGI(TAG, "worker_task started");
+
+    /* Signaling bring-up (mint → ICE info → peer open → SDP exchange)
+     * runs here so voice_peer_start stays non-blocking (design/23).
+     * openai_cfg/sig_cfg live for the whole task; the initial
+     * handshake reads them, and esp_peer_signaling copies what it
+     * retains. impl->start mints (blocking ~2.4 s) then synchronously
+     * fires sig_on_ice_info (opens s_peer.pc) + sig_on_connected
+     * (kicks the offer); the loop below then pumps the SDP exchange. */
+    openai_signaling_cfg_t openai_cfg = {};
+    openai_cfg.token = s_peer.key_copy;
+    openai_cfg.voice = NULL;  /* defaults to marin in the signaling impl */
+    openai_cfg.instructions = s_peer.instructions_copy;
+    openai_cfg.tools_json = s_peer.tools_copy;
+
+    esp_peer_signaling_cfg_t sig_cfg = {};
+    sig_cfg.on_ice_info = sig_on_ice_info;
+    sig_cfg.on_connected = sig_on_connected;
+    sig_cfg.on_msg = sig_on_msg;
+    sig_cfg.on_close = sig_on_close;
+    sig_cfg.extra_cfg = &openai_cfg;
+    sig_cfg.extra_size = sizeof(openai_cfg);
+
+    const esp_peer_signaling_impl_t *impl =
+        esp_signaling_get_openai_signaling();
+    int rc = impl->start(&sig_cfg, &s_peer.sig);
+    if (rc != ESP_PEER_ERR_NONE) {
+        LOGE_DIAG("signaling.start rc=%d — aborting session", rc);
+        set_phase(VOICE_PHASE_IDLE);
+        atomic_store(&s_peer.stop_requested, true);
+        atomic_store(&s_peer.running, false);
+        s_peer.worker = NULL;
+        vTaskDeleteWithCaps(NULL);
+        return;
+    }
+
     while (atomic_load(&s_peer.running)) {
         if (s_peer.pc) {
             esp_peer_main_loop(s_peer.pc);
@@ -1094,6 +1129,9 @@ int voice_peer_start(const char *openai_key, const char *instructions,
      * close to the limit; the worker's 12 KB stack used to land in
      * internal RAM and was the last straw that made the second
      * api.openai.com TLS handshake fail with -0x7F00 on hardware. */
+    /* The mint + signaling bring-up runs ON the worker (below), not
+     * here — so this call is non-blocking and the UI stays responsive
+     * during the ~2.4 s mint + connect window (design/23). */
     BaseType_t ok = xTaskCreateWithCaps(
         worker_task, "voice_peer", WORKER_STACK_BYTES,
         NULL, WORKER_PRIO, &s_peer.worker, MALLOC_CAP_SPIRAM);
@@ -1103,32 +1141,7 @@ int voice_peer_start(const char *openai_key, const char *instructions,
         free(s_peer.instructions_copy); s_peer.instructions_copy = NULL;
         free(s_peer.tools_copy); s_peer.tools_copy = NULL;
         atomic_store(&s_peer.running, false);
-        return -1;
-    }
-
-    openai_signaling_cfg_t openai_cfg = {};
-    openai_cfg.token = s_peer.key_copy;
-    openai_cfg.voice = NULL;  /* defaults to alloy */
-    openai_cfg.instructions = s_peer.instructions_copy;
-    openai_cfg.tools_json = s_peer.tools_copy;
-
-    esp_peer_signaling_cfg_t sig_cfg = {};
-    sig_cfg.on_ice_info = sig_on_ice_info;
-    sig_cfg.on_connected = sig_on_connected;
-    sig_cfg.on_msg = sig_on_msg;
-    sig_cfg.on_close = sig_on_close;
-    sig_cfg.extra_cfg = &openai_cfg;
-    sig_cfg.extra_size = sizeof(openai_cfg);
-
-    const esp_peer_signaling_impl_t *impl =
-        esp_signaling_get_openai_signaling();
-    int rc = impl->start(&sig_cfg, &s_peer.sig);
-    if (rc != ESP_PEER_ERR_NONE) {
-        ESP_LOGE(TAG, "signaling.start rc=%d", rc);
-        atomic_store(&s_peer.running, false);
-        free(s_peer.key_copy); s_peer.key_copy = NULL;
-        free(s_peer.instructions_copy); s_peer.instructions_copy = NULL;
-        free(s_peer.tools_copy); s_peer.tools_copy = NULL;
+        set_phase(VOICE_PHASE_IDLE);
         return -1;
     }
 
