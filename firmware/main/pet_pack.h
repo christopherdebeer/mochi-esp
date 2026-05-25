@@ -26,8 +26,20 @@ extern "C" {
 #endif
 
 /* One-shot bring-up. Validates the embedded pack header. Idempotent.
- * Returns true if the pack opened cleanly. */
+ * Talks to the network through pack_cache_active to refresh the
+ * server-authored pack — DO NOT call this before WiFi is up (the
+ * lwip mbox isn't initialised yet at boot splash time and lwip
+ * asserts inside getaddrinfo). For pre-WiFi callers (the boot
+ * splash) use pet_pack_init_embedded(). Returns true if the pack
+ * opened cleanly. */
 bool pet_pack_init(void);
+
+/* Embedded-only bring-up. Opens the bundled pet_a.mpk blob without
+ * any network probe. Safe to call before WiFi is up. A subsequent
+ * pet_pack_init() call will upgrade to the server-synced pack.
+ * Idempotent: a later call (embedded or full) finds s_open already
+ * set and returns true. */
+bool pet_pack_init_embedded(void);
 
 /* True if the pack is open and contains a cell whose label matches
  * `expr`. Callers use this to decide whether to skip the network

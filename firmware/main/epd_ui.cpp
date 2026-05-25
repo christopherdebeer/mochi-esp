@@ -197,7 +197,12 @@ void render_boot_splash(epaper_driver_display *epd, const char *title,
          * fit the zone rect (square, foot on the rect's bottom edge),
          * into the base buffer before we push it. */
         if (paired) {
-            pet_pack_init();
+            /* Embedded-only — boot splash runs before WiFi is up; the
+             * full pet_pack_init() does a network probe through
+             * pack_cache_active that asserts inside lwip pre-init.
+             * The post-WiFi pet_pack_init() call in app_main upgrades
+             * to the server-synced pack later. */
+            pet_pack_init_embedded();
             const uint8_t zc = mpk_zone_count(&pack, idx);
             for (uint8_t z = 0; z < zc; z++) {
                 mpk_zone_v1_t zn;

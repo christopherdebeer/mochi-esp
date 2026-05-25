@@ -34,8 +34,19 @@ extern "C" {
 #endif
 
 /* One-shot bring-up. Validates the embedded pack header. Idempotent.
- * Returns true if the pack opened cleanly. */
+ * Talks to the network through pack_cache_active to refresh the
+ * server-authored pack — DO NOT call this before WiFi is up (the
+ * lwip mbox isn't initialised yet at boot splash time and lwip
+ * asserts inside getaddrinfo). For pre-WiFi callers (warm-boot
+ * pet render) use scene_pack_init_embedded() and let net_worker
+ * upgrade later via scene_pack_init(). Returns true on success. */
 bool scene_pack_init(void);
+
+/* Embedded-only bring-up. Opens the bundled scenes_a.mpk blob with
+ * no network probe — safe to call before WiFi is up. A subsequent
+ * scene_pack_init() will resync to the server-authored pack.
+ * Idempotent. */
+bool scene_pack_init_embedded(void);
 
 /* Swap the active scene pack to a caller-provided MPK1 blob — e.g. a
  * freshly imagined place fetched into PSRAM (design/16). The bytes must

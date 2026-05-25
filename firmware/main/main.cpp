@@ -425,6 +425,7 @@ static void net_worker(void *arg) {
         ESP_LOGW(TAG, "net_worker: no stored network reachable — offline");
         device_diag_event(DIAG_WARN, "wifi", "offline", nullptr);
         s_net_phase = NetPhase::Offline;
+        s_net_render_dirty = true;   /* repaint chrome with offline glyph */
         vTaskDelete(nullptr);
         return;
     }
@@ -437,6 +438,7 @@ static void net_worker(void *arg) {
     }
     device_diag_flush();
     s_net_phase = NetPhase::Online;
+    s_net_render_dirty = true;   /* repaint chrome with online glyph */
 
     /* OTA: a successful join is the health signal that promotes a
      * freshly-installed pending image and starts the update poller. */
@@ -446,6 +448,19 @@ static void net_worker(void *arg) {
 
     /* Wall-clock sync for substrate timestamps. */
     time_sync_init();
+
+    /* Upgrade the scene + pet packs from the server now that lwip is
+     * up. Boot path opened the embedded baseline so the first frame
+     * could render offline; pack_cache_active here probes the ETag
+     * and refreshes only if the server has a newer pack. On change
+     * the active mpk_t is replaced and we flag the renderer dirty so
+     * the next tick re-blits. */
+    if (scene_pack_init()) {
+        s_net_render_dirty = true;
+    }
+    if (pet_pack_init()) {
+        s_net_render_dirty = true;
+    }
 
     /* Per-sheet ETag refresh: drop cache where server artwork changed
      * so the next render refetches. */
@@ -852,7 +867,12 @@ extern "C" void app_main(void) {
          * compiled (sprite_fetch / sprite_cache::load both still
          * exist) only for the unused MOCHI_SCENE_URL define and as
          * a future fallback for non-bundled scenes. */
-        if (scene_pack_init() &&
+        /* Embedded-only — warm boot renders before WiFi is up; the
+         * full scene_pack_init() does a network probe through
+         * pack_cache_active that asserts inside lwip pre-init.
+         * net_worker calls scene_pack_init() once WiFi's online to
+         * upgrade to the server-synced pack and flag a re-render. */
+        if (scene_pack_init_embedded() &&
             scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H)) {
             ESP_LOGI(TAG, "scene from pack idx=%u",
                 (unsigned)scene_pack_current());
@@ -863,10 +883,9 @@ extern "C" void app_main(void) {
     }
 
     /* Bring up the bundled pet pack so render_with_expression can
-     * serve cells from flash without touching the network. Network
-     * stays as the fallback for expressions absent from the pack
-     * (and for the pack-unavailable case). */
-    if (!pet_pack_init()) {
+     * serve cells from flash without touching the network. Embedded-
+     * only at boot; net_worker upgrades after WiFi is up. */
+    if (!pet_pack_init_embedded()) {
         ESP_LOGW(TAG, "pet_pack unavailable; falling back to network "
                       "+ littlefs cache for every render");
     }
@@ -1025,7 +1044,8 @@ extern "C" void app_main(void) {
 
         /* Left: time. Right: battery. Centre: pet name (centred on
          * panel midpoint, not the slot between the two — the centre
-         * looks more visually balanced). */
+         * looks more visually balanced). Wifi glyph sits between the
+         * time text and the centred name. */
         constexpr int STATUS_PAD = 4;
         blit_status_text(time_str, STATUS_PAD);
 
@@ -1037,6 +1057,67 @@ extern "C" void app_main(void) {
         int name_x = ((int)MOCHI_EPD_WIDTH - name_w) / 2;
         if (name_x < STATUS_PAD) name_x = STATUS_PAD;
         blit_status_text(pair.pet_name, name_x);
+
+        /* WiFi state glyph — 7×7 px, slotted just left of the centred
+         * pet name. Three patterns:
+         *   Online      ▁▂▃ ascending bars (filled)
+         *   Connecting  ▁▂▃ ascending bars (1-px dotted)
+         *   Offline     a small ✗ over a faint base bar
+         * Drawn directly into the composite framebuffer with the
+         * same MSB-first convention render_chrome uses elsewhere. */
+        {
+            static const uint8_t WIFI_ONLINE[7] = {
+                0b00000000,
+                0b00000010,
+                0b00000010,
+                0b00001010,
+                0b00001010,
+                0b00101010,
+                0b00101010,
+            };
+            static const uint8_t WIFI_CONNECTING[7] = {
+                0b00000000,
+                0b00000010,
+                0b00000000,
+                0b00001000,
+                0b00000010,
+                0b00100000,
+                0b00001000,
+            };
+            static const uint8_t WIFI_OFFLINE[7] = {
+                0b00000000,
+                0b01000100,
+                0b00101000,
+                0b00010000,
+                0b00101000,
+                0b01000100,
+                0b00000000,
+            };
+            const NetPhase phase = s_net_phase;
+            const uint8_t *gly =
+                phase == NetPhase::Online      ? WIFI_ONLINE :
+                phase == NetPhase::Connecting  ? WIFI_CONNECTING :
+                                                 WIFI_OFFLINE;
+            /* Centre vertically inside the bar; horizontally, sit a
+             * couple of pixels left of the pet name. The 8×8 glyph
+             * convention reads bit 0 as leftmost column (matching
+             * font8x8_glyph) — keep that. */
+            const int gx = name_x - 11;   /* glyph width 7 + 4 px gap */
+            const int gy = STATUS_TEXT_Y + 1;
+            for (int row = 0; row < 7; row++) {
+                const uint8_t bits = gly[row];
+                for (int col = 0; col < 7; col++) {
+                    if (!((bits >> col) & 1)) continue;
+                    const int px = gx + col;
+                    const int py = gy + row;
+                    if (px < 0 || py < 0 ||
+                        px >= (int)MOCHI_EPD_WIDTH ||
+                        py >= (int)MOCHI_EPD_HEIGHT) continue;
+                    const size_t off = (size_t)py * 25 + ((size_t)px >> 3);
+                    composite[off] &= (uint8_t)~(1u << (7 - ((size_t)px & 7)));
+                }
+            }
+        }
 
         /* 1-pixel black divider at the bottom of the status bar
          * (y = STATUS_BAR_H - 1). Sits between bar text and the
