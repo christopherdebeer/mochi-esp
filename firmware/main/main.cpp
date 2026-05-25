@@ -39,6 +39,7 @@
 #include "board_pins.h"
 #include "epaper_driver_bsp.h"
 #include "epd_ui.h"
+#include "dev_menu.h"
 #include "nvs_creds.h"
 #include "wifi_prov.h"
 #include "wifi_sta.h"
@@ -400,6 +401,13 @@ static void peripheral_rails_on(void) {
 enum class NetPhase : uint8_t { Connecting, Online, Offline };
 static volatile NetPhase s_net_phase = NetPhase::Connecting;
 
+/* Last-known IP + SSID, populated by net_worker on a successful join.
+ * Read-only outside the worker; kept module-scope so the dev_menu
+ * Diagnostics screen can surface them without threading them through
+ * the touch loop. Empty before the first join. */
+static char s_net_ip[16] = {};
+static char s_net_ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
+
 /* Set true when the worker has produced something worth re-rendering
  * (a fresh state snapshot, invalidated cache, or freshly-fetched care
  * icons). The main loop consumes + clears it. */
@@ -430,6 +438,10 @@ static void net_worker(void *arg) {
         return;
     }
     ESP_LOGI(TAG, "net_worker: online IP=%s ssid='%s'", ip_str, joined_ssid);
+    /* Publish IP + SSID so the dev_menu Diagnostics screen can read
+     * them. Single writer (this task), readers are non-mutating. */
+    snprintf(s_net_ip,   sizeof(s_net_ip),   "%s", ip_str);
+    snprintf(s_net_ssid, sizeof(s_net_ssid), "%s", joined_ssid);
     {
         char c[120];
         snprintf(c, sizeof(c), "{\"ssid\":\"%s\",\"ip\":\"%s\"}",
@@ -585,6 +597,10 @@ extern "C" void app_main(void) {
     epd->EPD_Init();
     epd->EPD_Display();
     epd->EPD_DisplayPartBaseImage();
+
+    /* Dev-menu wheel: BOOT short-press cycles splash → diagnostics →
+     * (future modes), 5 s inactivity returns to live. See dev_menu.h. */
+    dev_menu::init(epd);
 
     /* Factory-reset watchdog. Runs in parallel with everything from
      * here on, so the gesture works in any state — including stuck
@@ -1641,6 +1657,42 @@ extern "C" void app_main(void) {
         if (sleep_gesture::triple_tap_consume() && !voice::is_active()) {
             ESP_LOGI(TAG, "triple-tap → opening key portal");
             key_portal::start(epd);
+        }
+
+        /* Dev-menu wheel: BOOT short-press cycles debug screens. While
+         * a debug screen is up, dev_menu owns the panel — we skip the
+         * pet render path until inactivity returns us to Live. A touch
+         * exits early so the kid isn't stuck on a debug screen.
+         *
+         * Skipped while voice is active or the key portal owns the
+         * screen — those flows render their own state. */
+        if (!voice::is_active() && !key_portal::active()) {
+            const int batt_pct_now = ([&]() -> int {
+                uint16_t mv = 0; uint8_t pct = 0;
+                return battery_read(&mv, &pct) ? (int)pct : -1;
+            })();
+            const bool mode_changed = dev_menu::tick(
+                epd,
+                pair.pet_id[0] != '\0',
+                pair.pet_name,
+                ota_update::current_version(),
+                s_net_ip, s_net_ssid,
+                (int)s_net_phase, batt_pct_now);
+            if (dev_menu::active()) {
+                /* Touch exits the debug wheel back to live; main.cpp's
+                 * regular render path picks up on the next tick. */
+                if (got_touch) {
+                    ESP_LOGI(TAG, "touch in dev_menu → exit to live");
+                    dev_menu::exit_to_live();
+                    s_net_render_dirty = true;
+                }
+                continue;  /* dev_menu owns the screen */
+            }
+            if (mode_changed) {
+                /* Just timed out from a debug screen back to live;
+                 * mark dirty so the loop redraws the pet promptly. */
+                s_net_render_dirty = true;
+            }
         }
 
         /* Drive the portal's idle / post-submit auto-stop. */
