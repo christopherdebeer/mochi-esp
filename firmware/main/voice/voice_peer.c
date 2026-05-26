@@ -54,6 +54,7 @@
 #include "voice_tools.h"
 #include "voice_mic.h"
 #include "voice_aec.h"
+#include "device_diag.h"   /* /api/device/diag — survives USB disconnect */
 
 #define TAG "voice_peer"
 
@@ -299,7 +300,28 @@ static void open_audio_playback(uint32_t sample_rate, uint8_t channel) {
     }
 }
 
+/* Drain + fade-out before close: write ~80 ms of silence (linearly
+ * tapered over ~40 ms of the most recent already-buffered audio
+ * doesn't help — esp_codec_dev gives us no visibility into the I²S
+ * TX FIFO contents) so the speaker has a clean tail rather than a
+ * hard click on close. ~80 ms covers the typical I²S DMA latency
+ * plus a tiny safety margin. Used for both user-stop and server
+ * barge-in (output_audio_buffer.cleared) endings. */
+static void output_fade_to_silence(void) {
+    if (!s_peer.play_open || !s_peer.play_dev) return;
+    /* 80 ms × 24 kHz × 2 bytes/sample = 3840 bytes. Stack-friendly. */
+    static const size_t FADE_MS = 80;
+    const size_t samples = (24000 * FADE_MS) / 1000;
+    const size_t bytes = samples * sizeof(int16_t);
+    int16_t silence[bytes / sizeof(int16_t)];
+    memset(silence, 0, sizeof(silence));
+    /* Blocking write at 24 kHz: 80 ms of audio takes ~80 ms wall.
+     * We're already on the teardown path, so the latency is fine. */
+    esp_codec_dev_write(s_peer.play_dev, silence, sizeof(silence));
+}
+
 static void close_audio_playback(void) {
+    output_fade_to_silence();
     voice_aec_deinit();
     if (s_peer.play_open && s_peer.play_dev) {
         esp_codec_dev_close(s_peer.play_dev);
@@ -563,12 +585,59 @@ static int pc_on_data(esp_peer_data_frame_t *frame, void *ctx) {
      */
     if (event_type_is(body, body_len, "output_audio_buffer.started")) {
         set_phase(VOICE_PHASE_SPEAKING);
+    } else if (event_type_is(body, body_len, "output_audio_buffer.cleared")) {
+        /* Server barge-in: user started talking, OpenAI cancelled
+         * the in-flight assistant response. Frames already past the
+         * `cleared` boundary keep playing through I²S TX DMA and end
+         * abruptly — push a brief silence to fade the tail cleanly.
+         * Same helper the explicit-stop path uses. */
+        output_fade_to_silence();
+        voice_phase_t cur = (voice_phase_t)atomic_load(&s_peer.phase);
+        if (cur == VOICE_PHASE_SPEAKING) {
+            set_phase(VOICE_PHASE_READY);
+        }
     } else if (event_type_is(body, body_len, "output_audio_buffer.stopped") ||
                event_type_is(body, body_len, "response.done")) {
         voice_phase_t cur = (voice_phase_t)atomic_load(&s_peer.phase);
         if (cur == VOICE_PHASE_SPEAKING) {
             set_phase(VOICE_PHASE_READY);
         }
+    }
+
+    /* AEC effectiveness probe. The server's VAD fires
+     * `input_audio_buffer.speech_started` whenever it thinks the user
+     * began speaking. While the model is mid-utterance (phase =
+     * SPEAKING), there are two distinct causes:
+     *
+     *   (a) self-interrupt — model audio leaked past AEC, server
+     *       VAD triggered on it. Mic peak (post-AEC) is moderate to
+     *       high but there's no actual user voice in the room.
+     *   (b) real barge-in — user actually spoke. Same elevated peak.
+     *
+     * Same surface signal, different root cause. We can't tell them
+     * apart without an out-of-band "did the user really speak" oracle,
+     * but we CAN log the post-AEC peak alongside the phase so a human
+     * reviewing /api/device/diag can correlate against the assistant
+     * transcript. AEC counters at session-end (pushed/pulled/fail) tell
+     * us how often the canceller couldn't keep up; this per-event probe
+     * tells us when speech_started fires DURING speak.
+     *
+     * Telemetry shape: device_diag_event so the line ships to val.run
+     * even when the device is untethered (voice_diag is local-only). */
+    if (event_type_is(body, body_len, "input_audio_buffer.speech_started")) {
+        voice_phase_t cur = (voice_phase_t)atomic_load(&s_peer.phase);
+        const int peak = voice_mic_last_peak_dbfs();
+        const bool aec_on = voice_aec_is_enabled();
+        char ctx[96];
+        snprintf(ctx, sizeof(ctx),
+            "{\"phase\":\"%s\",\"peak_dbfs\":%d,\"aec\":%s}",
+            phase_name(cur), peak, aec_on ? "true" : "false");
+        const char *msg = (cur == VOICE_PHASE_SPEAKING)
+            ? "speech_started during SPEAKING"
+            : "speech_started";
+        device_diag_event(DIAG_INFO, "voice", msg, ctx);
+        voice_diag_log("speech_started phase=%s peak=%d dBFS aec=%d",
+            phase_name(cur), peak, aec_on ? 1 : 0);
     }
 
     /* Voice cost telemetry (design/18 ph3b): accumulate per-turn token
@@ -996,6 +1065,41 @@ static void check_caps(void) {
 static void worker_task(void *arg) {
     (void)arg;
     ESP_LOGI(TAG, "worker_task started");
+
+    /* Signaling bring-up (mint → ICE info → peer open → SDP exchange)
+     * runs here so voice_peer_start stays non-blocking (design/23).
+     * openai_cfg/sig_cfg live for the whole task; the initial
+     * handshake reads them, and esp_peer_signaling copies what it
+     * retains. impl->start mints (blocking ~2.4 s) then synchronously
+     * fires sig_on_ice_info (opens s_peer.pc) + sig_on_connected
+     * (kicks the offer); the loop below then pumps the SDP exchange. */
+    openai_signaling_cfg_t openai_cfg = {};
+    openai_cfg.token = s_peer.key_copy;
+    openai_cfg.voice = NULL;  /* defaults to marin in the signaling impl */
+    openai_cfg.instructions = s_peer.instructions_copy;
+    openai_cfg.tools_json = s_peer.tools_copy;
+
+    esp_peer_signaling_cfg_t sig_cfg = {};
+    sig_cfg.on_ice_info = sig_on_ice_info;
+    sig_cfg.on_connected = sig_on_connected;
+    sig_cfg.on_msg = sig_on_msg;
+    sig_cfg.on_close = sig_on_close;
+    sig_cfg.extra_cfg = &openai_cfg;
+    sig_cfg.extra_size = sizeof(openai_cfg);
+
+    const esp_peer_signaling_impl_t *impl =
+        esp_signaling_get_openai_signaling();
+    int rc = impl->start(&sig_cfg, &s_peer.sig);
+    if (rc != ESP_PEER_ERR_NONE) {
+        LOGE_DIAG("signaling.start rc=%d — aborting session", rc);
+        set_phase(VOICE_PHASE_IDLE);
+        atomic_store(&s_peer.stop_requested, true);
+        atomic_store(&s_peer.running, false);
+        s_peer.worker = NULL;
+        vTaskDeleteWithCaps(NULL);
+        return;
+    }
+
     while (atomic_load(&s_peer.running)) {
         if (s_peer.pc) {
             esp_peer_main_loop(s_peer.pc);
@@ -1094,41 +1198,26 @@ int voice_peer_start(const char *openai_key, const char *instructions,
      * close to the limit; the worker's 12 KB stack used to land in
      * internal RAM and was the last straw that made the second
      * api.openai.com TLS handshake fail with -0x7F00 on hardware. */
-    BaseType_t ok = xTaskCreateWithCaps(
+    /* The mint + signaling bring-up runs ON the worker (below), not
+     * here — so this call is non-blocking and the UI stays responsive
+     * during the ~2.4 s mint + connect window (design/23). */
+    /* Pinned to CPU 0 (the PRO core). The mic_task is pinned to
+     * CPU 1 (the APP core) and runs opus_encode at the same prio;
+     * with both unpinned-or-on-CPU-1, the encoder + the peer's
+     * audio-rx push into AEC starved IDLE1 long enough to trip
+     * the watchdog ~5 s in. Splitting them across cores gives each
+     * an IDLE task that can actually idle. */
+    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(
         worker_task, "voice_peer", WORKER_STACK_BYTES,
-        NULL, WORKER_PRIO, &s_peer.worker, MALLOC_CAP_SPIRAM);
+        NULL, WORKER_PRIO, &s_peer.worker, 0 /* CPU 0 */,
+        MALLOC_CAP_SPIRAM);
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "xTaskCreate failed");
         free(s_peer.key_copy); s_peer.key_copy = NULL;
         free(s_peer.instructions_copy); s_peer.instructions_copy = NULL;
         free(s_peer.tools_copy); s_peer.tools_copy = NULL;
         atomic_store(&s_peer.running, false);
-        return -1;
-    }
-
-    openai_signaling_cfg_t openai_cfg = {};
-    openai_cfg.token = s_peer.key_copy;
-    openai_cfg.voice = NULL;  /* defaults to alloy */
-    openai_cfg.instructions = s_peer.instructions_copy;
-    openai_cfg.tools_json = s_peer.tools_copy;
-
-    esp_peer_signaling_cfg_t sig_cfg = {};
-    sig_cfg.on_ice_info = sig_on_ice_info;
-    sig_cfg.on_connected = sig_on_connected;
-    sig_cfg.on_msg = sig_on_msg;
-    sig_cfg.on_close = sig_on_close;
-    sig_cfg.extra_cfg = &openai_cfg;
-    sig_cfg.extra_size = sizeof(openai_cfg);
-
-    const esp_peer_signaling_impl_t *impl =
-        esp_signaling_get_openai_signaling();
-    int rc = impl->start(&sig_cfg, &s_peer.sig);
-    if (rc != ESP_PEER_ERR_NONE) {
-        ESP_LOGE(TAG, "signaling.start rc=%d", rc);
-        atomic_store(&s_peer.running, false);
-        free(s_peer.key_copy); s_peer.key_copy = NULL;
-        free(s_peer.instructions_copy); s_peer.instructions_copy = NULL;
-        free(s_peer.tools_copy); s_peer.tools_copy = NULL;
+        set_phase(VOICE_PHASE_IDLE);
         return -1;
     }
 

@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include <atomic>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -338,6 +339,34 @@ static void boot_button_init(void) {
     ESP_ERROR_CHECK(gpio_config(&cfg));
 }
 
+/* BOOT-press watcher: 25 ms cadence falling-edge detection. BOOT is
+ * the dedicated voice start/stop button now (the dev_menu wheel
+ * moved to PWR double-tap). Latches s_boot_press_pending so the
+ * (slow) main loop can consume the event on its next tick — without
+ * this, presses that fit between two main-loop iterations were lost
+ * and read as "BOOT is unresponsive". */
+static std::atomic<bool> s_boot_press_pending{false};
+static void boot_watcher_task(void *) {
+    int prev_level = gpio_get_level((gpio_num_t)MOCHI_BOOT_BUTTON_GPIO);
+    int debounce = 0;
+    constexpr int POLL_MS = 25;
+    constexpr int DEBOUNCE_TICKS = 2;   /* 50 ms */
+    while (true) {
+        if (debounce > 0) debounce--;
+        const int level = gpio_get_level((gpio_num_t)MOCHI_BOOT_BUTTON_GPIO);
+        if (level == 0 && prev_level == 1 && debounce == 0) {
+            debounce = DEBOUNCE_TICKS;
+            s_boot_press_pending.store(true, std::memory_order_release);
+            ESP_LOGI(TAG, "BOOT press latched");
+        }
+        prev_level = level;
+        vTaskDelay(pdMS_TO_TICKS(POLL_MS));
+    }
+}
+static bool boot_press_consume(void) {
+    return s_boot_press_pending.exchange(false, std::memory_order_acq_rel);
+}
+
 static void epd_power_on(void) {
     gpio_config_t cfg = {};
     cfg.pin_bit_mask = 1ULL << MOCHI_EPD_PWR_GPIO;
@@ -552,6 +581,10 @@ static void net_worker(void *arg) {
         }
     }
 
+    /* Warm the voice persona+tools cache so the first long-press pays
+     * no fetch on the session-start path (design/23). Best-effort. */
+    voice::prefetch_config();
+
     vTaskDelete(nullptr);
 }
 
@@ -566,6 +599,11 @@ extern "C" void app_main(void) {
 
     led_init();
     boot_button_init();
+    /* Spawn the BOOT-press watcher on the same core as Wi-Fi (it's a
+     * trivial GPIO poll, so noise on either core is negligible). The
+     * latch is consumed by the main loop's voice start/stop block. */
+    xTaskCreatePinnedToCore(boot_watcher_task, "boot_btn",
+        2048, nullptr, 2, nullptr, 1);
     epd_power_on();
     peripheral_rails_on();
 
@@ -1066,75 +1104,126 @@ extern "C" void app_main(void) {
          * health" cluster — symmetric with the time/clock cluster on
          * the left. */
         constexpr int STATUS_PAD = 4;
-        blit_status_text(time_str, STATUS_PAD);
+        const bool v_active = voice::is_active();
+        const voice::Phase v_phase = voice::phase();
 
-        const int batt_w = (int)strlen(batt_str) * 8;
-        const int batt_x = (int)MOCHI_EPD_WIDTH - STATUS_PAD - batt_w;
-        blit_status_text(batt_str, batt_x);
-
-        const int name_w = (int)strlen(pair.pet_name) * 8;
-        int name_x = ((int)MOCHI_EPD_WIDTH - name_w) / 2;
-        if (name_x < STATUS_PAD) name_x = STATUS_PAD;
-        blit_status_text(pair.pet_name, name_x);
-
-        /* WiFi state glyph — 7×7 px, slotted just left of the centred
-         * pet name. Three patterns:
-         *   Online      ▁▂▃ ascending bars (filled)
-         *   Connecting  ▁▂▃ ascending bars (1-px dotted)
-         *   Offline     a small ✗ over a faint base bar
-         * Drawn directly into the composite framebuffer with the
-         * same MSB-first convention render_chrome uses elsewhere. */
-        {
-            static const uint8_t WIFI_ONLINE[7] = {
-                0b00000000,
-                0b00000010,
-                0b00000010,
-                0b00001010,
-                0b00001010,
-                0b00101010,
-                0b00101010,
+        /* Mic glyph (1× scale, 7×7) at the far left, but ONLY when
+         * voice is reachable (net online + key present). It's no longer
+         * a tap target — BOOT drives voice now (design/24) — so the
+         * scaled-up affordance is gone and the glyph is back to a
+         * passive state indicator. Hidden when offline so the bar
+         * doesn't lie about whether a session would actually connect. */
+        const bool voice_reachable =
+            (s_net_phase == NetPhase::Online) && voice::is_ready();
+        int time_x = STATUS_PAD;
+        if (voice_reachable) {
+            static const uint8_t MIC_GLYPH[7] = {
+                0b00011100, 0b00011100, 0b00011100, 0b00011100,
+                0b00001000, 0b00111110, 0b00001000,
             };
-            static const uint8_t WIFI_CONNECTING[7] = {
-                0b00000000,
-                0b00000010,
-                0b00000000,
-                0b00001000,
-                0b00000010,
-                0b00100000,
-                0b00001000,
-            };
-            static const uint8_t WIFI_OFFLINE[7] = {
-                0b00000000,
-                0b01000100,
-                0b00101000,
-                0b00010000,
-                0b00101000,
-                0b01000100,
-                0b00000000,
-            };
-            const NetPhase phase = s_net_phase;
-            const uint8_t *gly =
-                phase == NetPhase::Online      ? WIFI_ONLINE :
-                phase == NetPhase::Connecting  ? WIFI_CONNECTING :
-                                                 WIFI_OFFLINE;
-            /* Centre vertically inside the bar; horizontally sit
-             * just left of the battery text — 7-px glyph + 3-px gap
-             * before the digits. Right-side cluster (net + battery)
-             * reads as one "device health" group; pet name owns the
-             * centre. */
-            const int gx = batt_x - 10;
-            const int gy = STATUS_TEXT_Y + 1;
+            const int mx = STATUS_PAD;
+            const int my = STATUS_TEXT_Y + 1; /* baseline-aligned with text */
             for (int row = 0; row < 7; row++) {
-                const uint8_t bits = gly[row];
                 for (int col = 0; col < 7; col++) {
-                    if (!((bits >> col) & 1)) continue;
-                    const int px = gx + col;
-                    const int py = gy + row;
+                    const bool on = v_active
+                        ? (row >= 1 && row <= 5 && col >= 1 && col <= 5)
+                        : (((MIC_GLYPH[row] >> col) & 1) != 0);
+                    if (!on) continue;
+                    const int px = mx + col;
+                    const int py = my + row;
                     if (px < 0 || py < 0 ||
                         px >= (int)MOCHI_EPD_WIDTH ||
                         py >= (int)MOCHI_EPD_HEIGHT) continue;
                     const size_t off = (size_t)py * 25 + ((size_t)px >> 3);
                     composite[off] &= (uint8_t)~(1u << (7 - ((size_t)px & 7)));
+                }
+            }
+            time_x = STATUS_PAD + 7 + 3;   /* glyph + small gap */
+        }
+        blit_status_text(time_str, time_x);
+
+        /* Right cluster: WiFi (right-most) + battery (text immediately
+         * left of WiFi). Net status used to sit just left of the battery
+         * digits at 7×7 — too tiny to read at arm's length. Now the
+         * WiFi is the bar's right-most element at 11×9 (described
+         * below) and battery slides left to make room. */
+        constexpr int WIFI_W = 11;
+        constexpr int WIFI_GAP = 3;          /* between battery digits and bars */
+        const int wifi_x = (int)MOCHI_EPD_WIDTH - STATUS_PAD - WIFI_W;
+        const int batt_w = (int)strlen(batt_str) * 8;
+        const int batt_x = wifi_x - WIFI_GAP - batt_w;
+        blit_status_text(batt_str, batt_x);
+
+        /* Centre: pet name normally; during a session, the voice state
+         * word (connecting / listening / talking) so state is
+         * unambiguous regardless of the pet's face. design/23. */
+        const char *center = pair.pet_name;
+        if (v_active) {
+            center = v_phase == voice::Phase::Connecting ? "connecting"
+                   : v_phase == voice::Phase::Speaking   ? "talking"
+                   :                                       "listening";
+        }
+        const int name_w = (int)strlen(center) * 8;
+        int name_x = ((int)MOCHI_EPD_WIDTH - name_w) / 2;
+        if (name_x < 14) name_x = 14;
+        blit_status_text(center, name_x);
+
+        /* WiFi state glyph — 4 ascending bars at the far-right of the
+         * status bar (right of the battery digits). 11×9 px overall:
+         * four 2-px-wide bars separated by a 1-px gutter, climbing in
+         * height from 3→6→7→9 px so the cellular-style "signal" reads
+         * are immediate. The previous 7×7 hairline version was hard
+         * to parse at arm's length on a 200-px panel.
+         *
+         * State mapping is deliberately conservative for the e-ink
+         * panel — no gradients, just filled vs hollow:
+         *   Online      → all 4 bars filled
+         *   Connecting  → bars 1+2 filled (low-fidelity 'searching')
+         *   Offline     → 1×1 dot at the base of each bar slot, plus
+         *                 a diagonal slash through the cluster
+         *                 (clearly NOT signal — easy to spot)
+         * Drawn directly into the composite framebuffer with the
+         * same MSB-first convention render_chrome uses elsewhere. */
+        {
+            const NetPhase phase = s_net_phase;
+            const int gx = wifi_x;
+            const int base_y = STATUS_TEXT_Y + 8;  /* bottom of bars */
+            constexpr int BAR_W = 2;
+            constexpr int BAR_GAP = 1;
+            constexpr int BAR_HEIGHTS[4] = { 3, 5, 7, 9 };
+            auto plot = [&](int px, int py) {
+                if (px < 0 || py < 0 ||
+                    px >= (int)MOCHI_EPD_WIDTH ||
+                    py >= (int)MOCHI_EPD_HEIGHT) return;
+                const size_t off = (size_t)py * 25 + ((size_t)px >> 3);
+                composite[off] &= (uint8_t)~(1u << (7 - ((size_t)px & 7)));
+            };
+            const int filled_bars =
+                phase == NetPhase::Online     ? 4 :
+                phase == NetPhase::Connecting ? 2 : 0;
+            for (int b = 0; b < 4; b++) {
+                const int bar_x = gx + b * (BAR_W + BAR_GAP);
+                if (b < filled_bars) {
+                    /* Solid filled bar from baseline up by its height. */
+                    const int h = BAR_HEIGHTS[b];
+                    for (int dy = 0; dy < h; dy++) {
+                        for (int dx = 0; dx < BAR_W; dx++) {
+                            plot(bar_x + dx, base_y - dy);
+                        }
+                    }
+                } else {
+                    /* Empty: just a 1-px floor pip so the slot still
+                     * registers as part of the same indicator. */
+                    for (int dx = 0; dx < BAR_W; dx++) {
+                        plot(bar_x + dx, base_y);
+                    }
+                }
+            }
+            if (phase == NetPhase::Offline) {
+                /* Diagonal slash from top-right to bottom-left over
+                 * the empty cluster, so offline reads at a glance. */
+                for (int i = 0; i < 9; i++) {
+                    plot(gx + (10 - i), STATUS_TEXT_Y + i);
                 }
             }
         }
@@ -1440,10 +1529,13 @@ extern "C" void app_main(void) {
         ESP_LOGI(TAG, "asleep render committed");
     };
 
-    /* Initial render: pet on scene, neutral. Full refresh seeds the
-     * partial-refresh "previous frame" so subsequent taps are
-     * flicker-free. */
-    if (!render_with_expression("neutral", true, nullptr)) {
+    /* Initial render: pet on scene, neutral. Partial refresh —
+     * EPD_DisplayPartBaseImage was called after the boot splash, so
+     * the panel's "previous frame" buffer is already seeded; a full
+     * here just visibly re-flashes the panel from splash → pet for
+     * no benefit. Subsequent partial refreshes still work because
+     * the splash is the seeded base. */
+    if (!render_with_expression("neutral", false, nullptr)) {
         ESP_LOGE(TAG, "initial neutral render failed; halting");
         while (true) vTaskDelay(pdMS_TO_TICKS(60000));
     }
@@ -1612,7 +1704,11 @@ extern "C" void app_main(void) {
      */
     auto phase_expr = [](voice::Phase p) -> const char * {
         switch (p) {
-            case voice::Phase::Connecting: return "curious";
+            /* Connecting gets its own face ('waking_up') rather than
+             * reusing 'curious' (which also means attention/pat) — so
+             * the connect wait reads as "mochi is waking up to talk",
+             * not generic curiosity. design/23. */
+            case voice::Phase::Connecting: return "waking_up";
             case voice::Phase::Ready:      return "comforted";
             case voice::Phase::Speaking:   return "cheerful_wave";
             case voice::Phase::Idle:
@@ -1639,12 +1735,34 @@ extern "C" void app_main(void) {
      * pair across two ticks on the slow main-loop cadence) doesn't leak
      * into the live touch path and re-fire as a pet-body tap. */
     bool drain_next_touch = false;
+    /* Deferred substrate POST for an EVENT_TALKED that fired at voice
+     * session start. Held until the session ends so the mutate's TLS
+     * handshake doesn't fight the OpenAI signaling handshake for
+     * internal heap (MBEDTLS_ERR_SSL_ALLOC_FAILED otherwise). 0 when
+     * no enqueue is pending. */
+    int64_t s_pending_talked_at = 0;
     bool wifi_dialog_dismissed = false;
     ui_dialog::HitRect wifi_dialog_hit = {};
 
     while (true) {
         touch::Event ev;
-        bool got_touch = touch::wait_event(&ev, 1000);
+        /* Tick cadence: 1 s normally, 100 ms during a voice session
+         * so a BOOT-press to stop is consumed promptly. The previous
+         * 1 s tick let the model talk for up to 1.5 s after the user
+         * tapped to stop — long enough that the model finished a
+         * phrase the user meant to cut. Faster polling tightens the
+         * latency without burning idle CPU when voice is offline. */
+        const int wait_ms = voice::is_active() ? 100 : 1000;
+        bool got_touch = touch::wait_event(&ev, wait_ms);
+
+        /* Tell the sleep_gesture watcher when the wheel or voice owns
+         * the screen. The watcher gates single-tap PWR through
+         * single_tap_advance_consume() in those modes (not the sleep
+         * handoff), eliminating the race where the fallback sleep
+         * render landed on top of an active flow. Polled at the top
+         * of the loop so the gate tracks state edges promptly. */
+        sleep_gesture::set_wheel_active(dev_menu::active());
+        sleep_gesture::set_voice_active(voice::is_active());
 
         /* Touch-drain guard. If a previous tick set this, eat the
          * first touch we see and reset. Lets dev_menu / dialog flows
@@ -1657,26 +1775,93 @@ extern "C" void app_main(void) {
             got_touch = false;
         }
 
-        /* Sleep gesture takes priority over touch. The wait_event
-         * 1-second timeout means we check this at least once per
-         * second even with no taps. When the long-press fires we
-         * claim it (so the watcher's fallback render doesn't race
-         * us), render the rich asleep frame, then commit_sleep()
-         * — never returns. */
+        /* PWR gesture map (design/22 + design/24 update):
+         *
+         *   single-tap PWR      → sleep (when in Live)
+         *                       → advance the dev_menu wheel (when up)
+         *   double-tap PWR      → enter the dev_menu wheel from Live
+         *
+         * sleep_gesture exposes both: requested() (latched once a
+         * single-tap clears its 350 ms double-tap window) and
+         * double_tap_consume() (latched immediately on the second tap).
+         * We service double-tap first so a fast pair doesn't race the
+         * single-tap path into a sleep commit. */
+        if (sleep_gesture::double_tap_consume()) {
+            if (!voice::is_active() && !key_portal::active()) {
+                ESP_LOGI(TAG, "PWR double-tap → enter dev_menu");
+                dev_menu::request_advance();
+            }
+        }
+
+        /* Single-tap PWR while a non-sleep flow owns the screen: the
+         * watcher gates these via set_wheel_active / set_voice_active,
+         * surfaces them through single_tap_advance_consume, and skips
+         * the sleep handoff entirely. main routes by what's currently
+         * active. The earlier in-handoff intercept raced with the
+         * watcher's fallback timeout firing the sleep render on top of
+         * the wheel; this gate-up-front design eliminates that race. */
+        if (sleep_gesture::single_tap_advance_consume()) {
+            if (voice::is_active()) {
+                ESP_LOGI(TAG, "PWR tap (voice active) → stop session");
+                voice::stop_session();
+                render_with_expression("neutral", false, nullptr);
+                last_voice_phase = voice::Phase::Idle;
+                if (s_pending_talked_at != 0) {
+                    pet_sync_enqueue(EVENT_TALKED, s_pending_talked_at);
+                    s_pending_talked_at = 0;
+                }
+            } else if (dev_menu::active()) {
+                ESP_LOGI(TAG, "PWR tap (wheel up) → advance");
+                dev_menu::request_advance();
+            }
+        }
+
         if (sleep_gesture::requested()) {
             sleep_gesture::mark_handled();
-            device_diag_event(DIAG_INFO, "sleep", "long-press → sleep", nullptr);
+            device_diag_event(DIAG_INFO, "sleep", "PWR tap → sleep", nullptr);
             device_diag_flush();   /* push before we power down */
             render_asleep();
             sleep_gesture::commit_sleep();
         }
 
-        /* Manual key-portal trigger: triple-tap PWR. Distinct from
-         * the long-hold sleep gesture and the 10s factory-reset
-         * gesture. Used to replace an already-set key. */
-        if (sleep_gesture::triple_tap_consume() && !voice::is_active()) {
-            ESP_LOGI(TAG, "triple-tap → opening key portal");
-            key_portal::start(epd);
+        /* BOOT short-press → voice start/stop. The dedicated voice
+         * gesture (design/24): BOOT is THE voice button. From Live
+         * a press starts a session; while voice is up a press stops.
+         * Skipped while the dev_menu wheel owns the screen so a
+         * mid-wheel BOOT doesn't collide with whatever PWR-driven
+         * action the user is in the middle of. */
+        if (boot_press_consume() && !dev_menu::active() &&
+            !key_portal::active()) {
+            if (voice::is_active()) {
+                ESP_LOGI(TAG, "BOOT → stop voice session");
+                voice::stop_session();
+                render_with_expression("neutral", false, nullptr);
+                last_voice_phase = voice::Phase::Idle;
+                if (s_pending_talked_at != 0) {
+                    pet_sync_enqueue(EVENT_TALKED, s_pending_talked_at);
+                    s_pending_talked_at = 0;
+                }
+            } else if (voice::is_ready()) {
+                ESP_LOGI(TAG, "BOOT → start voice session");
+                render_with_expression("waking_up", false, nullptr);
+                last_voice_phase = voice::Phase::Connecting;
+                if (voice::start_session() == 0) {
+                    /* Local effects only at start; mutate POST defers
+                     * to session end (avoids the OpenAI vs val.run
+                     * concurrent-TLS heap collision — see v0.1.3). */
+                    const int64_t talked_at = now_ms_wall();
+                    event_log_append(EVENT_TALKED, talked_at);
+                    pet_sync_touch(talked_at);
+                    s_dev_pet.last_interaction_at = talked_at;
+                    s_pending_talked_at = talked_at;
+                } else {
+                    ESP_LOGW(TAG, "voice start failed");
+                    render_with_expression("neutral", false, nullptr);
+                    last_voice_phase = voice::Phase::Idle;
+                }
+            } else {
+                ESP_LOGW(TAG, "BOOT but voice not ready (no key?)");
+            }
         }
 
         /* Dev-menu wheel: BOOT short-press cycles debug screens. While
@@ -1710,11 +1895,117 @@ extern "C" void app_main(void) {
                         (int)ev.x, (int)ev.y);
                     dev_menu::exit_to_live();
                     s_net_render_dirty = true;
-                    if (act == dev_menu::TouchResult::OpenKeyPortal) {
-                        ESP_LOGI(TAG, "dev_menu → opening key portal");
-                        key_portal::start(epd);
-                    } else {
-                        ESP_LOGI(TAG, "touch in dev_menu → exit to live");
+                    /* Small helper: show a one-line "restarting" toast
+                     * before a reboot action so the tap gets visible
+                     * feedback. */
+                    auto reboot_with_msg = [&](const char *l1, const char *l2) {
+                        epd_ui::clear(epd);
+                        epd_ui::draw_text_centered(epd, 84, 1, l1);
+                        epd_ui::draw_text_centered(epd, 104, 1, l2);
+                        epd->EPD_Init_Partial();
+                        epd->EPD_DisplayPart();
+                        vTaskDelay(pdMS_TO_TICKS(1200));
+                        esp_restart();
+                    };
+                    switch (act) {
+                        case dev_menu::TouchResult::OpenKeyPortal:
+                            ESP_LOGI(TAG, "dev_menu → key portal");
+                            key_portal::start(epd);
+                            break;
+                        case dev_menu::TouchResult::UpdateNow:
+                            ESP_LOGI(TAG, "dev_menu → OTA check now");
+                            ota_update::check_now();
+                            epd_ui::clear(epd);
+                            epd_ui::draw_text_centered(epd, 84, 1,
+                                "Checking for");
+                            epd_ui::draw_text_centered(epd, 104, 1,
+                                "updates...");
+                            epd->EPD_Init_Partial();
+                            epd->EPD_DisplayPart();
+                            break;
+                        case dev_menu::TouchResult::ChangeWifi:
+                            ESP_LOGI(TAG, "dev_menu → change WiFi (SoftAP)");
+                            nvs_creds_set_prov_on_boot(true);
+                            reboot_with_msg("Restarting for", "WiFi setup...");
+                            break;
+                        case dev_menu::TouchResult::ForgetWifi: {
+                            char ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
+                            if (s_net_ssid[0]) {
+                                snprintf(ssid, sizeof(ssid), "%s", s_net_ssid);
+                            } else {
+                                struct mochi_wifi_creds c = {};
+                                if (nvs_creds_load_at(0, &c)) {
+                                    snprintf(ssid, sizeof(ssid), "%s", c.ssid);
+                                }
+                            }
+                            ESP_LOGI(TAG, "dev_menu → forget WiFi '%s'", ssid);
+                            nvs_creds_forget(ssid);
+                            reboot_with_msg("Forgetting WiFi", "Restarting...");
+                            break;
+                        }
+                        case dev_menu::TouchResult::RePair:
+                            ESP_LOGI(TAG, "dev_menu → re-pair");
+                            pair_creds_clear();
+                            reboot_with_msg("Re-pairing", "Restarting...");
+                            break;
+                        case dev_menu::TouchResult::GoHome:
+                            ESP_LOGI(TAG, "dev_menu → go home");
+                            /* Network POST; the travel block swaps to the
+                             * home bundle next tick on success. No-op +
+                             * logged if offline. */
+                            pet_sync_enter_place("home");
+                            break;
+                        case dev_menu::TouchResult::WifiSwitch: {
+                            /* Runtime switch to a stored network — no
+                             * reboot (STA→STA). Blocks up to ~15 s on this
+                             * thread behind a toast. On failure, fall back
+                             * to connect_any so we don't strand the device
+                             * offline after dropping the old link. */
+                            char ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
+                            snprintf(ssid, sizeof(ssid), "%s",
+                                     dev_menu::picked_ssid());
+                            ESP_LOGI(TAG, "dev_menu → switch WiFi '%s'", ssid);
+                            struct mochi_wifi_creds c = {};
+                            bool found = false;
+                            for (size_t i = 0; i < nvs_creds_count(); i++) {
+                                struct mochi_wifi_creds t = {};
+                                if (nvs_creds_load_at(i, &t) &&
+                                    strncmp(t.ssid, ssid,
+                                            MOCHI_WIFI_SSID_MAX) == 0) {
+                                    c = t; found = true; break;
+                                }
+                            }
+                            if (!found) { ESP_LOGW(TAG, "ssid not stored"); break; }
+                            epd_ui::clear(epd);
+                            epd_ui::draw_text_centered(epd, 84, 1, "Switching to");
+                            epd_ui::draw_text_centered(epd, 104, 1, ssid);
+                            epd->EPD_Init_Partial();
+                            epd->EPD_DisplayPart();
+                            char ip[16] = {};
+                            if (wifi_sta::switch_to(&c, ip, sizeof(ip))) {
+                                nvs_creds_append(&c);   /* promote to MRU */
+                                snprintf(s_net_ip,   sizeof(s_net_ip),   "%s", ip);
+                                snprintf(s_net_ssid, sizeof(s_net_ssid), "%s", c.ssid);
+                                s_net_phase = NetPhase::Online;
+                                ESP_LOGI(TAG, "switched → %s (%s)", c.ssid, ip);
+                            } else {
+                                ESP_LOGW(TAG, "switch failed; restoring via connect_any");
+                                char rs[MOCHI_WIFI_SSID_MAX + 1] = {};
+                                if (wifi_sta::connect_any(ip, sizeof(ip),
+                                                          rs, sizeof(rs))) {
+                                    snprintf(s_net_ip,   sizeof(s_net_ip),   "%s", ip);
+                                    snprintf(s_net_ssid, sizeof(s_net_ssid), "%s", rs);
+                                    s_net_phase = NetPhase::Online;
+                                } else {
+                                    s_net_phase = NetPhase::Offline;
+                                }
+                            }
+                            break;
+                        }
+                        case dev_menu::TouchResult::None:
+                        default:
+                            ESP_LOGI(TAG, "touch in dev_menu → exit to live");
+                            break;
                     }
                     /* Squelch this gesture: the `continue` below
                      * already skips the live touch handler for THIS
@@ -1841,6 +2132,13 @@ extern "C" void app_main(void) {
             render_with_expression("neutral", false, nullptr);
             last_voice_phase = voice::Phase::Idle;
             device_diag_event(DIAG_INFO, "voice", "session end", nullptr);
+            /* Flush any deferred EVENT_TALKED enqueue now that the
+             * voice session's TLS connection is gone — mbedtls has
+             * its internal heap back. */
+            if (s_pending_talked_at != 0) {
+                pet_sync_enqueue(EVENT_TALKED, s_pending_talked_at);
+                s_pending_talked_at = 0;
+            }
             /* Travel responsiveness (design/17): a move_to_location said
              * during the session only changed pets.location server-side.
              * Pull once now so the travel block below renders the new
@@ -2058,6 +2356,15 @@ extern "C" void app_main(void) {
         int64_t now_us = esp_timer_get_time();
         if (now_us - last_event_us < DEBOUNCE_US) continue;
         last_event_us = now_us;
+
+        /* Voice start/stop is BOOT-driven now (design/24, see the
+         * boot_press_consume block at the top of the loop). The
+         * status-bar mic glyph remains as a passive state indicator
+         * but no longer hosts a tap rect; touches in that area fall
+         * through to the normal care / scene-zone pipeline. While a
+         * session is active a touch anywhere is intentionally NOT
+         * tap-to-stop — kids playing with the panel mid-conversation
+         * shouldn't cut Mochi off accidentally. */
 
         Zone z = classify(ev.x, ev.y);
         /* Thought-bubble taps resolve expr + kind dynamically from
@@ -2306,106 +2613,8 @@ extern "C" void app_main(void) {
                 (unsigned)n);
         }
 
-        /* Voice trigger: long-press of the centre-attention zone
-         * starts a session; tap-anywhere while a session is running
-         * stops it. Same gesture as design/07-voice-architecture.md
-         * specifies. The hold check polls the FT6336 at 50 ms cadence
-         * for up to 800 ms — if the finger stays in the centre zone
-         * the whole time, treat as long-press; otherwise fall through
-         * to the existing tap-to-cycle-expression behaviour. */
-        if (voice::is_active()) {
-            /* Active-session tap rules:
-             *   centre tap → text talk-back (debug path: send a fixed
-             *                user message + response.create over the
-             *                data channel). Validates multi-turn
-             *                lifecycle without committing to mic
-             *                capture (M9.f.2). The pet's expression
-             *                will hop SPEAKING → READY automatically
-             *                via the data-channel event handler.
-             *   anywhere else → stop session.
-             */
-            if (z == Zone::Center) {
-                ESP_LOGI(TAG, "voice active — centre tap → text talk-back");
-                static const char *DEBUG_TEXT =
-                    "Are you still there? Say a quick goodbye and stop.";
-                if (!voice::send_text(DEBUG_TEXT)) {
-                    ESP_LOGW(TAG, "send_text failed; falling through");
-                }
-                continue;
-            }
-            ESP_LOGI(TAG, "voice active — non-centre tap → stop session");
-            voice::stop_session();
-            /* Render neutral immediately so the user sees the
-             * "session over" state. */
-            render_with_expression("neutral", false, nullptr);
-            last_voice_phase = voice::Phase::Idle;
-            continue;
-        } else if (z == Zone::Center && voice::is_ready()) {
-            constexpr int HOLD_POLL_MS = 50;
-            constexpr int HOLD_TARGET_MS = 800;
-            int held_ms = 0;
-            bool released = false;
-            for (; held_ms < HOLD_TARGET_MS; held_ms += HOLD_POLL_MS) {
-                touch::Event hold_ev;
-                if (!touch::current_point(&hold_ev)) {
-                    released = true;
-                    break;
-                }
-                if (classify(hold_ev.x, hold_ev.y) != Zone::Center) {
-                    /* finger drifted off-zone — treat as a tap */
-                    released = true;
-                    break;
-                }
-                vTaskDelay(pdMS_TO_TICKS(HOLD_POLL_MS));
-            }
-            if (!released) {
-                ESP_LOGI(TAG, "long-press → start voice session");
-                /* Visual affordance: render 'curious' immediately so the
-                 * user knows their long-press registered. Without this,
-                 * the user sees nothing for the ~2.4 s mint blocking
-                 * call and tends to keep holding longer to be certain.
-                 * Once the session enters CONNECTING, phase_expr maps
-                 * it to 'curious' too, so the next tick of the touch
-                 * loop won't re-render. */
-                render_with_expression("curious", false, nullptr);
-                last_voice_phase = voice::Phase::Connecting;
-                if (voice::start_session() == 0) {
-                    /* Log the voice turn as a "talked" event — the
-                     * strongest engagement signal in shared/engagement.ts.
-                     * Single-event-per-session for now; M13's bidi
-                     * sync may want finer-grained per-turn entries. */
-                    int64_t talked_at = now_ms_wall();
-                    event_log_append(EVENT_TALKED, talked_at);
-                    pet_sync_enqueue(EVENT_TALKED, talked_at);
-                    pet_sync_touch(talked_at);
-                    s_dev_pet.last_interaction_at = talked_at;
-                    /* Drain pending touch events that piled up while
-                     * start_session was blocked on the mint round-trip
-                     * (~2.4 s). Without this, the still-held finger
-                     * generates a "stale" touch on the next wait_event,
-                     * which trips the is_active() branch above and
-                     * stops the session 1 ms after starting it. */
-                    touch::Event drain;
-                    while (touch::wait_event(&drain, 0)) { /* drain */ }
-                    /* Then wait for finger-up so any in-progress hold
-                     * doesn't trigger an immediate stop on lift-off. */
-                    constexpr int LIFT_TIMEOUT_MS = 5000;
-                    constexpr int LIFT_POLL_MS = 50;
-                    int lifted_ms = 0;
-                    while (lifted_ms < LIFT_TIMEOUT_MS) {
-                        touch::Event probe;
-                        if (!touch::current_point(&probe)) break;
-                        vTaskDelay(pdMS_TO_TICKS(LIFT_POLL_MS));
-                        lifted_ms += LIFT_POLL_MS;
-                    }
-                    /* Drain again — the lift-off itself can leave
-                     * one final ISR marker on the queue. */
-                    while (touch::wait_event(&drain, 0)) { /* drain */ }
-                    continue;
-                }
-                ESP_LOGW(TAG, "voice start failed; falling through to tap UX");
-            }
-        }
+        /* (Voice start/stop is handled up-front via the status-bar mic
+         * affordance — see the voice-control block above. design/23.) */
 
         /* Thought-bubble tap: suppress further bubble renders for
          * THOUGHT_SUPPRESS_MS so the same need can't re-surface

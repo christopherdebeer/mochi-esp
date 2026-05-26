@@ -1,31 +1,34 @@
 /*
- * dev_menu — BOOT-button-driven debug screen wheel.
+ * dev_menu — PWR-double-tap-driven debug screen wheel.
  *
  * Live-by-default home state with a wheel of diagnostic / utility
- * screens reachable by short-pressing the BOOT button. While not in
- * Live, a 5-second inactivity timeout snaps back so the device can't
- * get stranded in a debug screen.
+ * screens reachable by double-tapping PWR (single-tap is sleep). A
+ * 60-second inactivity timeout snaps back to Live so the device
+ * can't get stranded in a debug screen.
  *
- *   Live (default)  ── BOOT ─▶ Splash ── BOOT ─▶ Diagnostics ─┐
- *      ▲                                                       │
- *      │                                          BOOT ────────┘
+ *   Live (default)  ── PWR×2 ─▶ Splash ── PWR ─▶ Settings ──┐
+ *      ▲                                                     │
+ *      │                                          PWR ───────┘
  *      │                              (wraps back to Splash)
  *      │
- *      └── 5 s inactivity / external "exit" call
+ *      └── 60 s inactivity / touch outside any button / external "exit"
  *
- * "Live" is a HOME STATE, not a wheel position. Pressing BOOT while
- * already showing the live pet jumps to the first debug screen
- * (Splash); subsequent presses cycle the rest.
+ * "Live" is a HOME STATE, not a wheel position. PWR-double-tap from
+ * Live enters at the first wheel screen (Splash); each subsequent
+ * single PWR tap (while the wheel is up — sleep is suspended in this
+ * mode) cycles. BOOT is reserved for voice start/stop and never
+ * touches the wheel.
  *
  * The module owns:
- *   - the current mode (Live / Splash / Diagnostics / …)
- *   - debounced edge detection on BOOT
+ *   - the current mode (Live / Splash / Settings / …)
  *   - inactivity timeout
- *   - render dispatchers that draw a complete frame for each mode
+ *   - render dispatchers + per-screen tap-rect hit-testing
  *
  * It does NOT own:
- *   - the pet render path (that's render_resting in main.cpp). When
- *     the wheel exits to Live, dev_menu just clears its mode and
+ *   - input detection. main.cpp drives request_advance() from PWR
+ *     gesture observations.
+ *   - the pet render path (render_resting in main.cpp). When the
+ *     wheel exits to Live, dev_menu just clears its mode and
  *     main.cpp redraws the pet on the next tick.
  *
  * Future modes (WifiSelect, Provision, Pairing, OtaForce) drop into
@@ -43,29 +46,37 @@ namespace dev_menu {
 enum class Mode : uint8_t {
     Live = 0,        /* not in the wheel — home state */
     Splash,
-    Settings,        /* debug info + tappable action buttons */
-    /* future modes plug in here. Settings hosts most actions; whole
-     * new screens make sense for things that need a full panel
-     * (WifiSelect's network list, OtaForce's progress, etc.). */
+    Settings,        /* read-only device info / diagnostics */
+    Actions,         /* tappable action buttons (design/22) */
+    Wifi,            /* known-network list — tap to switch (design/22) */
+    /* future modes plug in here. */
     _Count,
 };
 
-/* Initialises debounce state. Call once at boot, after gpio_config
- * for MOCHI_BOOT_BUTTON_GPIO has run. */
+/* Initialises wheel state. Idempotent. Call once at boot. */
 void init(epaper_driver_display *epd);
 
-/* One-shot poll: read BOOT, advance the wheel on a falling edge,
- * apply the inactivity timeout. Call from the main loop's tick
- * (1 Hz cadence is fine — gestures are at human-press scale).
+/* Latch a "advance the wheel" request. main.cpp calls this:
+ *   - on a PWR double-tap from Live → enters at Splash
+ *   - on a PWR single-tap while the wheel is up → cycles
+ * tick() consumes the latch on its next pass. Multiple requests
+ * within a single main-loop tick collapse to one (intentional —
+ * fast-tap doesn't double-advance). */
+void request_advance(void);
+
+/* One-shot poll: consume a pending advance request, apply the
+ * inactivity timeout. Call from the main loop's tick (1 Hz cadence
+ * is fine — gestures are at human-press scale).
  *
- * Returns true if the mode CHANGED this tick (advanced via BOOT, or
- * timed out back to Live). main.cpp uses this to decide whether to
- * re-draw the pet (mode just returned to Live) or stay quiet.
+ * Returns true if the mode CHANGED this tick (advanced via
+ * request_advance, or timed out back to Live). main.cpp uses this
+ * to decide whether to re-draw the pet (mode just returned to Live)
+ * or stay quiet.
  *
  * `paired` is forwarded to the splash render so it composites the
  * pet zone correctly. `pet_name` / `version` / `ip_str` / `ssid`
- * feed the diagnostics screen. Pass nullptr for any string that
- * isn't yet known. */
+ * feed the Settings screen. Pass nullptr for any string that isn't
+ * yet known. */
 bool tick(epaper_driver_display *epd, bool paired,
           const char *pet_name, const char *version,
           const char *ip_str, const char *ssid,
@@ -89,8 +100,19 @@ void exit_to_live(void);
  * the device couldn't otherwise reach without a serial cable. */
 enum class TouchResult : uint8_t {
     None = 0,         /* no button hit; main.cpp may exit_to_live itself */
-    OpenKeyPortal,    /* "open key portal" button on the Settings screen */
+    OpenKeyPortal,    /* open the OpenAI key-entry portal */
+    ChangeWifi,       /* reboot into SoftAP provisioning (add a network) */
+    ForgetWifi,       /* forget the joined SSID + reboot (flip to next known) */
+    UpdateNow,        /* force an immediate OTA manifest check */
+    RePair,           /* clear pairing + reboot into the pairing flow */
+    GoHome,           /* reset the pet's location to home */
+    WifiSwitch,       /* switch to the picked known network — see picked_ssid() */
 };
+
+/* The SSID picked by the most recent WifiSwitch dispatch (the WiFi
+ * screen). Valid right after dispatch_touch returns WifiSwitch; empty
+ * otherwise. main.cpp reads this to know which stored network to join. */
+const char *picked_ssid(void);
 
 /* Forward an (x, y) touch event into the active wheel screen. Returns
  * the action the user requested, or None if the touch landed outside

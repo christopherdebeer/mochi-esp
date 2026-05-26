@@ -57,4 +57,10 @@ bool reboot_ready();
  * free. Useful for status UI / logs. */
 const char *current_version();
 
+/* Request an immediate manifest check (Settings → "update now")
+ * instead of waiting for the next 24 h poll. Wakes the background
+ * task's inter-check sleep; the actual check + any install still runs
+ * on that task. No-op if the task hasn't started (device offline). */
+void check_now();
+
 }  // namespace ota_update

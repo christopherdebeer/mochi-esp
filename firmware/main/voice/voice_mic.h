@@ -43,6 +43,14 @@ extern "C" {
 bool voice_mic_start(void);
 void voice_mic_stop(void);
 
+/* Latest mic-frame peak amplitude in dBFS (negative; -inf encoded as
+ * -120). Updated each 20 ms PCM read. Used by voice_peer to attach
+ * a "what was the mic doing?" snapshot to `input_audio_buffer.
+ * speech_started` events — lets us tell self-interrupt (model leak
+ * past AEC, near-silent mic) apart from real barge-in (loud mic).
+ * Reads/writes are atomic-ish (single int store/load); no lock. */
+int voice_mic_last_peak_dbfs(void);
+
 #ifdef __cplusplus
 }
 #endif

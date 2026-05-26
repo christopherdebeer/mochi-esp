@@ -8,12 +8,10 @@
 #include "esp_timer.h"
 #include "esp_system.h"
 #include "esp_heap_caps.h"
-#include "driver/gpio.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 
 #include "board_pins.h"
 #include "epd_ui.h"
+#include "nvs_creds.h"
 
 static const char *TAG = "dev_menu";
 
@@ -25,14 +23,8 @@ namespace dev_menu {
  * a fresh BOOT press still exits / advances earlier. */
 static constexpr int64_t INACTIVITY_US = 60LL * 1000 * 1000;
 
-/* Watcher poll cadence — fast enough that a kid's normal short press
- * (~80–150 ms) reliably catches a falling edge. The 1 Hz main-loop
- * tick missed presses entirely when they fit between iterations,
- * which read as "BOOT is unresponsive". */
-static constexpr int POLL_MS = 25;
-/* Debounce: ignore additional edges within this many ticks of the
- * last accepted press. */
-static constexpr int DEBOUNCE_TICKS = 2;   /* 50 ms */
+/* No internal poll loop now — the trigger is request_advance() from
+ * main.cpp, which itself is driven by sleep_gesture's PWR detector. */
 
 static Mode                 s_mode = Mode::Live;
 static int64_t              s_entered_mode_us = 0;
@@ -46,6 +38,8 @@ static const char *mode_name(Mode m) {
         case Mode::Live:     return "live";
         case Mode::Splash:   return "splash";
         case Mode::Settings: return "settings";
+        case Mode::Actions:  return "actions";
+        case Mode::Wifi:     return "wifi";
         default:             return "?";
     }
 }
@@ -63,53 +57,44 @@ struct Button {
     TouchResult action;
     const char *label;
 };
-/* Single Settings button today. The list is sized for headroom; new
- * actions just append + bump the count. */
-static constexpr int MAX_BUTTONS = 4;
+/* Headroom for the Actions screen (6) and the WiFi list (stored
+ * networks, capped to what fits). */
+static constexpr int MAX_BUTTONS = 8;
 static Button   s_buttons[MAX_BUTTONS] = {};
 static int      s_button_count = 0;
+/* Per-button SSID payload for WifiSwitch buttons (the WiFi screen);
+ * empty for action buttons. dispatch_touch copies the tapped one into
+ * s_picked_ssid so main.cpp knows which network to join. */
+static char     s_button_ssid[MAX_BUTTONS][MOCHI_WIFI_SSID_MAX + 1] = {};
+static char     s_picked_ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
 
 static void clear_buttons(void) {
     s_button_count = 0;
-    for (int i = 0; i < MAX_BUTTONS; i++) s_buttons[i] = {};
-}
-
-/* Background watcher: 25 ms cadence falling-edge detection on BOOT.
- * Latches s_press_pending so the (slow) main loop can consume the
- * event on its next tick. Without this, presses that fit entirely
- * between two main-loop ticks were lost. */
-static void watcher_task(void *) {
-    int prev_level = gpio_get_level((gpio_num_t)MOCHI_BOOT_BUTTON_GPIO);
-    int debounce = 0;
-    while (true) {
-        if (debounce > 0) debounce--;
-        const int level = gpio_get_level((gpio_num_t)MOCHI_BOOT_BUTTON_GPIO);
-        /* Falling edge with active-low pull-up = press. */
-        if (level == 0 && prev_level == 1 && debounce == 0) {
-            debounce = DEBOUNCE_TICKS;
-            /* Latch — the main loop will consume on its next pass.
-             * Multiple presses within a single main-loop tick still
-             * register as one (intent: don't double-advance). */
-            s_press_pending.store(true, std::memory_order_release);
-            ESP_LOGI(TAG, "BOOT press latched");
-        }
-        prev_level = level;
-        vTaskDelay(pdMS_TO_TICKS(POLL_MS));
+    for (int i = 0; i < MAX_BUTTONS; i++) {
+        s_buttons[i] = {};
+        s_button_ssid[i][0] = '\0';
     }
 }
 
+const char *picked_ssid(void) { return s_picked_ssid; }
+
+/* dev_menu no longer owns its own button watcher: BOOT is reserved
+ * for voice start/stop, and the wheel is driven by PWR
+ * (sleep_gesture::double_tap_consume to enter, subsequent ticks of
+ * advance() while the wheel is open to cycle). main.cpp wires both
+ * ends, so the latch flag here is set externally rather than from a
+ * polled GPIO. Atomic so the call is safe from the sleep_gesture
+ * task that may detect the gesture on its own core. */
+
 void init(epaper_driver_display * /*epd*/) {
-    /* The BOOT pin is configured for input + pull-up by
-     * boot_button_init() in main.cpp. */
     s_mode = Mode::Live;
     s_entered_mode_us = 0;
     s_press_pending.store(false, std::memory_order_release);
-    if (!s_started) {
-        s_started = true;
-        xTaskCreatePinnedToCore(watcher_task, "dev_menu_btn",
-            2048, nullptr, 2, nullptr, 1);
-        ESP_LOGI(TAG, "watcher started (BOOT poll %d ms)", POLL_MS);
-    }
+    s_started = true;
+}
+
+void request_advance(void) {
+    s_press_pending.store(true, std::memory_order_release);
 }
 
 Mode current(void) { return s_mode; }
@@ -130,6 +115,10 @@ TouchResult dispatch_touch(int x, int y) {
         if (x >= b.x && x < b.x + b.w &&
             y >= b.y && y < b.y + b.h) {
             ESP_LOGI(TAG, "button hit: '%s'", b.label);
+            if (b.action == TouchResult::WifiSwitch) {
+                snprintf(s_picked_ssid, sizeof(s_picked_ssid),
+                         "%s", s_button_ssid[i]);
+            }
             return b.action;
         }
     }
@@ -194,9 +183,12 @@ static void draw_button_border(epaper_driver_display *epd, const Button &b) {
 }
 
 static void register_button(int x, int y, int w, int h,
-                            TouchResult action, const char *label) {
+                            TouchResult action, const char *label,
+                            const char *ssid = nullptr) {
     if (s_button_count >= MAX_BUTTONS) return;
-    s_buttons[s_button_count++] = { x, y, w, h, action, label };
+    const int i = s_button_count++;
+    s_buttons[i] = { x, y, w, h, action, label };
+    snprintf(s_button_ssid[i], sizeof(s_button_ssid[i]), "%s", ssid ? ssid : "");
 }
 
 static void render_settings(epaper_driver_display *epd,
@@ -231,32 +223,104 @@ static void render_settings(epaper_driver_display *epd,
     snprintf(line, sizeof(line), "batt %d%%", batt_pct);
     epd_ui::draw_text(epd, 4, y, 1, line); y += 14;
 
-    /* Action buttons. Layout from the bottom of the panel so info
-     * lines aren't squeezed. Wider + taller than the first cut so
-     * there's a generous tap target — the 16-px-high original was
-     * fiddly to hit at arm's length on the small panel. */
+    /* Read-only screen — the tappable actions live on the next wheel
+     * position. BOOT advances; 60 s inactivity (or a touch) returns
+     * to the live pet. */
+    epd_ui::draw_text(epd, 4, MOCHI_EPD_HEIGHT - 10, 1,
+                      "BOOT: Actions  60s exit");
+
+    epd->EPD_Init_Partial();
+    epd->EPD_DisplayPart();
+}
+
+/* Actions screen — a vertical stack of tappable buttons. Each is a
+ * 1-px bordered full-width rect with a centred label; dispatch_touch
+ * resolves a tap to the button's TouchResult, and main.cpp performs
+ * the action (most reboot, so they exit the wheel implicitly). */
+static void render_actions(epaper_driver_display *epd) {
+    epd_ui::clear(epd);
+    clear_buttons();
+
+    epd_ui::draw_text_centered(epd, 4, 2, "ACTIONS");
+
+    /* Six buttons on the 200-px panel: title + 6×(24+2) + hint fits. */
+    static const struct { TouchResult action; const char *label; } items[] = {
+        { TouchResult::ChangeWifi,    "Change WiFi"     },
+        { TouchResult::ForgetWifi,    "Forget WiFi"     },
+        { TouchResult::UpdateNow,     "Update now"      },
+        { TouchResult::RePair,        "Re-pair device"  },
+        { TouchResult::GoHome,        "Go home"         },
+        { TouchResult::OpenKeyPortal, "OpenAI key"      },
+    };
+    constexpr int N = (int)(sizeof(items) / sizeof(items[0]));
     constexpr int BTN_MARGIN = 2;
     constexpr int BTN_W = MOCHI_EPD_WIDTH - 2 * BTN_MARGIN;
-    constexpr int BTN_H = 28;
-    constexpr int BTN_LEFT = BTN_MARGIN;
-    constexpr int BOTTOM_HINT_Y = MOCHI_EPD_HEIGHT - 10;
-    int by = BOTTOM_HINT_Y - BTN_H - 4;
+    constexpr int BTN_H = 24;
+    constexpr int BTN_GAP = 2;
+    constexpr int TOP_Y = 22;
 
-    {
-        Button b = { BTN_LEFT, by, BTN_W, BTN_H,
-                     TouchResult::OpenKeyPortal, "open key portal" };
+    int by = TOP_Y;
+    for (int i = 0; i < N; i++) {
+        Button b = { BTN_MARGIN, by, BTN_W, BTN_H, items[i].action, items[i].label };
         draw_button_border(epd, b);
         const int label_w = (int)strlen(b.label) * 8;
-        const int lx = b.x + (b.w - label_w) / 2;
-        const int ly = b.y + (b.h - 8) / 2;
-        epd_ui::draw_text(epd, lx, ly, 1, b.label);
+        epd_ui::draw_text(epd, b.x + (b.w - label_w) / 2,
+                          b.y + (b.h - 8) / 2, 1, b.label);
         register_button(b.x, b.y, b.w, b.h, b.action, b.label);
-        by -= BTN_H + 4;
+        by += BTN_H + BTN_GAP;
     }
 
-    /* Wheel-position hint: BOOT advances, 60 s timeout returns to
-     * live, touch-outside-button also exits. */
-    epd_ui::draw_text(epd, 4, BOTTOM_HINT_Y, 1, "BOOT next  60s exit");
+    epd_ui::draw_text(epd, 4, MOCHI_EPD_HEIGHT - 9, 1, "BOOT: WiFi  tap=do");
+
+    epd->EPD_Init_Partial();
+    epd->EPD_DisplayPart();
+}
+
+/* WiFi screen — the stored networks, tap one to switch to it at
+ * runtime (design/22). Listing the MRU creds *is* "the SSIDs we
+ * already have creds for"; esp_wifi_connect does a directed probe so
+ * we don't need a scan to reach a network that isn't beaconing. The
+ * currently-joined SSID is marked "*". */
+static void render_wifi(epaper_driver_display *epd, const char *cur_ssid) {
+    epd_ui::clear(epd);
+    clear_buttons();
+
+    epd_ui::draw_text_centered(epd, 4, 2, "WIFI");
+
+    const size_t stored = nvs_creds_count();
+    constexpr int BTN_MARGIN = 2;
+    constexpr int BTN_W = MOCHI_EPD_WIDTH - 2 * BTN_MARGIN;
+    constexpr int BTN_H = 24;
+    constexpr int BTN_GAP = 2;
+    constexpr int TOP_Y = 22;
+    /* Cap to what fits between the title and the hint. */
+    const int max_rows = (MOCHI_EPD_HEIGHT - TOP_Y - 12) / (BTN_H + BTN_GAP);
+
+    int rows = (int)stored;
+    if (rows > max_rows) rows = max_rows;
+    if (rows > MAX_BUTTONS) rows = MAX_BUTTONS;
+
+    int by = TOP_Y;
+    for (int i = 0; i < rows; i++) {
+        struct mochi_wifi_creds c = {};
+        if (!nvs_creds_load_at((size_t)i, &c)) continue;
+        const bool is_cur = cur_ssid && cur_ssid[0] &&
+                            strncmp(c.ssid, cur_ssid, MOCHI_WIFI_SSID_MAX) == 0;
+        char label[40];
+        snprintf(label, sizeof(label), "%s%.30s", is_cur ? "*" : " ", c.ssid);
+        Button b = { BTN_MARGIN, by, BTN_W, BTN_H, TouchResult::WifiSwitch, "" };
+        draw_button_border(epd, b);
+        epd_ui::draw_text(epd, b.x + 6, b.y + (b.h - 8) / 2, 1, label);
+        register_button(b.x, b.y, b.w, b.h, TouchResult::WifiSwitch, "", c.ssid);
+        by += BTN_H + BTN_GAP;
+    }
+
+    if (rows == 0) {
+        epd_ui::draw_text(epd, 4, TOP_Y + 8, 1, "no saved networks");
+    }
+
+    epd_ui::draw_text(epd, 4, MOCHI_EPD_HEIGHT - 9, 1,
+                      rows > 0 ? "tap=switch  BOOT exit" : "Actions: Change WiFi");
 
     epd->EPD_Init_Partial();
     epd->EPD_DisplayPart();
@@ -273,6 +337,12 @@ static void render_mode(epaper_driver_display *epd, Mode m,
         case Mode::Settings:
             render_settings(epd, pet_name, version, ip_str, ssid,
                             net_phase, batt_pct);
+            break;
+        case Mode::Actions:
+            render_actions(epd);
+            break;
+        case Mode::Wifi:
+            render_wifi(epd, ssid);
             break;
         default:
             /* Live is rendered by main.cpp's render_resting on the

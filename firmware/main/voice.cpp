@@ -15,10 +15,12 @@ extern "C" {
 #include "voice/voice_https.h"
 #include "voice/voice_tools.h"
 #include "esp_peer_signaling.h"
+#include "cJSON.h"
 }
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 namespace voice {
 
@@ -65,54 +67,104 @@ extern "C" void persona_body(http_resp_t *resp, void *ctx) {
     fc->got = true;
 }
 
-/* Fetch persona from mochi.val.run. Returns true if the buffer
- * contains a valid persona string; false on any error. The caller
- * is responsible for its own fallback when this returns false. */
-static bool fetch_persona(const char *pet_id, char *out, size_t cap) {
-    if (!pet_id || !*pet_id || !out || cap < 64) return false;
+/* Session-config buffer sizes. Persona ~2-3 KB; tools array ~7-8 KB
+ * (12 specs × ~600 B) with headroom for per-pet place/costume enums. */
+static constexpr size_t PERSONA_BUF_BYTES = 4096;
+static constexpr size_t TOOLS_BUF_BYTES   = 16384;
 
-    char header[80];
-    snprintf(header, sizeof(header), "X-Pet-Id: %s", pet_id);
-    char *headers[] = { header, nullptr };
+/* Combined persona+tools cache (PSRAM). Populated by prefetch_config()
+ * on the connectivity worker after WiFi is up, reused by start_session
+ * so the session-start critical path skips the fetch entirely. Both
+ * tasks touch it, so it's mutex-guarded. Slightly-stale persona/tools
+ * (a place added since prefetch) is fine — refreshed each prefetch. */
+static SemaphoreHandle_t s_cfg_mtx   = nullptr;
+static char             *s_cfg_instr = nullptr;
+static char             *s_cfg_tools = nullptr;
+/* True while prefetch_config is mid-fetch. start_session checks this
+ * and waits briefly for the in-flight prefetch to land instead of
+ * kicking off its OWN /api/voice/session GET. Without this, a user
+ * tapping BOOT while prefetch was still running gave us two
+ * concurrent TLS sockets to mochi.val.run and one to api.openai.com,
+ * exhausting internal heap (MBEDTLS_ERR_SSL_ALLOC_FAILED). */
+static volatile bool     s_prefetch_in_flight = false;
 
-    fetch_ctx fc = { out, cap, false };
-    char url[] = "https://mochi.val.run/api/voice/realtime-instructions";
-    int rc = https_get(url, headers, persona_body, &fc);
-    if (rc != 0 || !fc.got) {
-        ESP_LOGW(TAG, "persona fetch failed (rc=%d, got=%d)", rc, fc.got);
-        return false;
-    }
-    ESP_LOGI(TAG, "persona fetched: %u bytes", (unsigned)strlen(out));
-    return true;
+static char *voice_psram_strdup(const char *s) {
+    if (!s) return nullptr;
+    size_t n = strlen(s) + 1;
+    char *p = (char *)heap_caps_malloc(n, MALLOC_CAP_SPIRAM);
+    if (p) memcpy(p, s, n);
+    return p;
 }
 
-/* Fetch the per-pet tool spec array from mochi.val.run. The body is
- * a JSON array we hand straight through to openai_signaling.c, which
- * cJSON_Parse's it at mint time and attaches to session.tools.
- *
- * Returns true if `out` contains a JSON array string. Failure is
- * non-fatal — session falls back to no tools (model has nothing to
- * call), same as a pre-tools build. */
-static bool fetch_tools(const char *pet_id, char *out, size_t cap) {
-    if (!pet_id || !*pet_id || !out || cap < 64) return false;
+static void cfg_store(const char *instr, const char *tools) {
+    if (!s_cfg_mtx) return;
+    xSemaphoreTake(s_cfg_mtx, portMAX_DELAY);
+    free(s_cfg_instr);
+    free(s_cfg_tools);
+    s_cfg_instr = (instr && *instr) ? voice_psram_strdup(instr) : nullptr;
+    s_cfg_tools = (tools && *tools) ? voice_psram_strdup(tools) : nullptr;
+    xSemaphoreGive(s_cfg_mtx);
+}
+
+/* Fetch the combined {instructions, tools} bootstrap from
+ * mochi.val.run in ONE round-trip (vs the old two split fetches —
+ * design/23). instr_out gets the persona text; tools_out gets the
+ * tools JSON array re-serialised (empty if absent). Returns true when
+ * at least the instructions parsed. */
+static bool fetch_session_config(const char *pet_id,
+                                 char *instr_out, size_t instr_cap,
+                                 char *tools_out, size_t tools_cap) {
+    if (!pet_id || !*pet_id || !instr_out || instr_cap < 64) return false;
+    if (tools_out && tools_cap) tools_out[0] = 0;
 
     char header[80];
     snprintf(header, sizeof(header), "X-Pet-Id: %s", pet_id);
     char *headers[] = { header, nullptr };
 
-    fetch_ctx fc = { out, cap, false };
-    char url[] = "https://mochi.val.run/api/voice/tools";
+    /* Capture the raw JSON ({instructions, tools}) into a temp buffer:
+     * persona + tools together run ~12 KB, so give headroom. */
+    const size_t RAW_CAP = 24576;
+    char *raw = (char *)heap_caps_calloc(1, RAW_CAP, MALLOC_CAP_SPIRAM);
+    if (!raw) return false;
+
+    fetch_ctx fc = { raw, RAW_CAP, false };
+    char url[] = "https://mochi.val.run/api/voice/session";
     int rc = https_get(url, headers, persona_body, &fc);
-    if (rc != 0 || !fc.got) {
-        ESP_LOGW(TAG, "tools fetch failed (rc=%d, got=%d)", rc, fc.got);
-        return false;
+
+    bool ok = false;
+    if (rc == 0 && fc.got) {
+        cJSON *root = cJSON_Parse(raw);
+        if (root) {
+            cJSON *ji = cJSON_GetObjectItemCaseSensitive(root, "instructions");
+            cJSON *jt = cJSON_GetObjectItemCaseSensitive(root, "tools");
+            if (cJSON_IsString(ji) && ji->valuestring) {
+                snprintf(instr_out, instr_cap, "%s", ji->valuestring);
+                ok = true;
+            }
+            if (tools_out && tools_cap && jt && cJSON_IsArray(jt)) {
+                char *ts = cJSON_PrintUnformatted(jt);
+                if (ts) { snprintf(tools_out, tools_cap, "%s", ts); cJSON_free(ts); }
+            }
+            cJSON_Delete(root);
+        } else {
+            ESP_LOGW(TAG, "session config parse failed");
+        }
+    } else {
+        ESP_LOGW(TAG, "session config fetch failed (rc=%d got=%d)", rc, fc.got);
     }
-    ESP_LOGI(TAG, "tools fetched: %u bytes", (unsigned)strlen(out));
-    return true;
+    free(raw);
+    if (ok) {
+        ESP_LOGI(TAG, "session config: instr=%uB tools=%uB",
+            (unsigned)strlen(instr_out),
+            (unsigned)(tools_out ? strlen(tools_out) : 0));
+    }
+    return ok;
 }
 
 bool init(void) {
     if (s_inited) return true;
+
+    if (!s_cfg_mtx) s_cfg_mtx = xSemaphoreCreateMutex();
 
     if (!i2c_bus::handle()) {
         ESP_LOGE(TAG, "i2c bus not ready; aborting codec init");
@@ -190,11 +242,6 @@ int start_session(void) {
      * Failure-cleanup pattern: jump to `cleanup` so wipes + frees
      * happen on every exit path.
      */
-    constexpr size_t PERSONA_BUF_BYTES = 4096;
-    /* Tools array is currently ~7-8 KB (12 specs × ~600 B each).
-     * 16 KB gives headroom if the canonical list grows or if a pet's
-     * dynamic place / costume enums add description bytes. */
-    constexpr size_t TOOLS_BUF_BYTES = 16384;
     char *openai_key = (char *)heap_caps_calloc(
         1, MOCHI_OPENAI_KEY_MAX + 1, MALLOC_CAP_SPIRAM);
     char *persona_buf = (char *)heap_caps_calloc(
@@ -212,40 +259,75 @@ int start_session(void) {
         goto cleanup;
     }
 
-    /* Persona: fetch from val.run if we have a pet_id, fall back to
-     * the smoke string otherwise. The fetch costs one HTTPS round-
-     * trip (~1 s typical) before the mint round-trip; both happen
-     * before the touch loop sees the session as active, so the user
-     * just sees the long-press → curious render → connecting time
-     * grow by the persona-fetch cost. Fine for v1.
-     *
-     * pet_id also gets handed to the tool-dispatch module so its
-     * worker knows which X-Pet-Id to send when posting tool calls
-     * to /api/voice/tool. */
+    /* Persona + tools: prefer the prefetched cache (filled by
+     * prefetch_config on the connectivity worker), so session start
+     * pays no fetch. On a cache miss, one combined round-trip to
+     * /api/voice/session (design/23). Fall back to the smoke string +
+     * no tools if even that fails. pet_id is also handed to the
+     * tool-dispatch worker so it knows which X-Pet-Id to post. */
     {
         const char *instructions = FALLBACK_INSTRUCTIONS;
         const char *tools_json = nullptr;
+        const char *src = "fallback";
         if (s_have_pair) {
             struct mochi_pair_creds pair = {};
             if (pair_creds_load(&pair)) {
                 voice_tools_set_pet_id(pair.pet_id);
-                if (fetch_persona(pair.pet_id, persona_buf, PERSONA_BUF_BYTES)) {
-                    instructions = persona_buf;
+                bool filled = false;
+                if (s_cfg_mtx) {
+                    xSemaphoreTake(s_cfg_mtx, portMAX_DELAY);
+                    if (s_cfg_instr) {
+                        snprintf(persona_buf, PERSONA_BUF_BYTES, "%s", s_cfg_instr);
+                        if (s_cfg_tools) {
+                            snprintf(tools_buf, TOOLS_BUF_BYTES, "%s", s_cfg_tools);
+                        }
+                        filled = true;
+                        src = "cache";
+                    }
+                    xSemaphoreGive(s_cfg_mtx);
                 }
-                /* Tool spec — canonical shared/voice-tools-spec.ts
-                 * lives on the server. Failure is non-fatal: the
-                 * model just won't have anything to call this
-                 * session (sleep/wake/care unreachable until next
-                 * mint). */
-                if (fetch_tools(pair.pet_id, tools_buf, TOOLS_BUF_BYTES)) {
-                    tools_json = tools_buf;
+                /* If a prefetch is already in flight, wait for it
+                 * to finish (up to ~3 s) instead of opening a second
+                 * TLS connection to the same endpoint. The two-
+                 * concurrent-fetch case raced with the OpenAI
+                 * signaling POST and exhausted internal heap. */
+                if (!filled && s_prefetch_in_flight) {
+                    ESP_LOGI(TAG, "session config: prefetch in flight, waiting");
+                    int waited = 0;
+                    while (s_prefetch_in_flight && waited < 3000) {
+                        vTaskDelay(pdMS_TO_TICKS(50));
+                        waited += 50;
+                    }
+                    if (s_cfg_mtx) {
+                        xSemaphoreTake(s_cfg_mtx, portMAX_DELAY);
+                        if (s_cfg_instr) {
+                            snprintf(persona_buf, PERSONA_BUF_BYTES, "%s", s_cfg_instr);
+                            if (s_cfg_tools) {
+                                snprintf(tools_buf, TOOLS_BUF_BYTES, "%s", s_cfg_tools);
+                            }
+                            filled = true;
+                            src = "cache (post-wait)";
+                        }
+                        xSemaphoreGive(s_cfg_mtx);
+                    }
                 }
+                if (!filled) {
+                    filled = fetch_session_config(pair.pet_id,
+                        persona_buf, PERSONA_BUF_BYTES,
+                        tools_buf, TOOLS_BUF_BYTES);
+                    if (filled) src = "fetch";
+                }
+                if (filled && persona_buf[0]) instructions = persona_buf;
+                if (filled && tools_buf[0])   tools_json = tools_buf;
             }
         }
 
-        ESP_LOGI(TAG, "starting voice session (instructions: %s, tools: %s)…",
-            instructions == persona_buf ? "fetched" : "fallback",
-            tools_json ? "fetched" : "none");
+        const size_t heap_int = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        const size_t heap_int_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+        ESP_LOGI(TAG, "starting voice session (config: %s, tools: %s) "
+                      "heap_int=%uB largest=%uB",
+            src, tools_json ? "yes" : "none",
+            (unsigned)heap_int, (unsigned)heap_int_largest);
         rc = voice_peer_start(openai_key, instructions, tools_json);
         if (rc != 0) {
             ESP_LOGE(TAG, "voice_peer_start rc=%d", rc);
@@ -277,6 +359,25 @@ void stop_session(void) {
     voice_peer_stop();
     s_active = false;
     ESP_LOGI(TAG, "voice session stopped");
+}
+
+void prefetch_config(void) {
+    if (!s_inited || !s_have_pair) return;
+    struct mochi_pair_creds pair = {};
+    if (!pair_creds_load(&pair) || !pair.pet_id[0]) return;
+
+    s_prefetch_in_flight = true;
+    char *instr = (char *)heap_caps_calloc(1, PERSONA_BUF_BYTES, MALLOC_CAP_SPIRAM);
+    char *tools = (char *)heap_caps_calloc(1, TOOLS_BUF_BYTES, MALLOC_CAP_SPIRAM);
+    if (instr && tools &&
+        fetch_session_config(pair.pet_id, instr, PERSONA_BUF_BYTES,
+                             tools, TOOLS_BUF_BYTES)) {
+        cfg_store(instr, tools);
+        ESP_LOGI(TAG, "voice config prefetched");
+    }
+    free(instr);
+    free(tools);
+    s_prefetch_in_flight = false;
 }
 
 Phase phase(void) {
