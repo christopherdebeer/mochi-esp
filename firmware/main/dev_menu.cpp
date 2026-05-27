@@ -9,6 +9,9 @@
 #include "esp_system.h"
 #include "esp_heap_caps.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "lvgl.h"
 #include "lvgl_port.h"
 
@@ -312,12 +315,13 @@ static void build_wifi(void) {
  * already has the position from its own poll. */
 TouchResult dispatch_touch(int /*x*/, int /*y*/) {
     if (s_mode == Mode::Live) return TouchResult::None;
-    /* Run a tick so any click event the indev has already enqueued
-     * gets dispatched to the on_click handler above before we read
-     * s_pending_action. main.cpp's tick happens earlier in the loop,
-     * but a touch arrives later in the same iteration — without this
-     * extra tick, the action wouldn't surface until the next loop. */
-    lvgl_port_tick();
+    /* The dedicated lv_task runs lv_timer_handler at ~33 Hz, so any
+     * click LVGL was about to fire has likely already landed in the
+     * on_click handler by the time main.cpp's touch loop calls us.
+     * Briefly yield to let the dispatcher drain anything it had
+     * queued at exactly this instant (touch::wait_event woke us up
+     * before lv_task got its slice), then read the latch. */
+    vTaskDelay(pdMS_TO_TICKS(40));
     TouchResult r = s_pending_action;
     s_pending_action = TouchResult::None;
     return r;
@@ -326,6 +330,11 @@ TouchResult dispatch_touch(int /*x*/, int /*y*/) {
 /* ─── Render ───────────────────────────────────────────────────────*/
 
 static void render_mode(Mode m) {
+    /* Lock against the dispatcher task (which holds this lock while
+     * running lv_timer_handler). Without it, build_menu's lv_obj
+     * creation can race with the renderer mid-frame and crash inside
+     * lv_obj_pos.c. */
+    lvgl_port_lock();
     switch (m) {
         case Mode::Menu:
             build_menu();
@@ -346,6 +355,7 @@ static void render_mode(Mode m) {
     /* Force a full e-paper refresh on the first frame of each new
      * screen so accumulated ghost from the previous mode clears. */
     lvgl_port_force_full_refresh();
+    lvgl_port_unlock();
 }
 
 bool tick(epaper_driver_display * /*epd*/, bool /*paired*/,
@@ -393,8 +403,11 @@ bool tick(epaper_driver_display * /*epd*/, bool /*paired*/,
         /* Refresh the info header without a screen swap so RAM/PSRAM/
          * batt readings stay live while the menu is up. Cheap; LVGL
          * only re-renders the label's dirty area. The action buttons
-         * below are static — not rebuilt. */
+         * below are static — not rebuilt. Locked against the
+         * dispatcher to keep widget access serialised. */
+        lvgl_port_lock();
         refresh_info();
+        lvgl_port_unlock();
     }
 
     if (s_mode != Mode::Live &&

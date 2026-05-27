@@ -1890,13 +1890,9 @@ extern "C" void app_main(void) {
                 ota_update::current_version(),
                 s_net_ip, s_net_ssid,
                 (int)s_net_phase, batt_pct_now);
-            /* LVGL runs only while the wheel owns the screen. Tick
-             * after dev_menu::tick so any widget mutations the screen
-             * just made are picked up on this iteration. Cheap when
-             * nothing's dirty (LVGL skips the flush_cb entirely). */
-            if (dev_menu::active()) {
-                lvgl_port_tick();
-            }
+            /* (LVGL is pumped by its own dispatcher task at ~33 Hz —
+             * see lvgl_port.cpp's lv_task. Polling here was too slow
+             * for drag-vs-tap discrimination during menu scrolling.) */
             if (dev_menu::active()) {
                 if (got_touch) {
                     /* Action buttons are LVGL widgets now — LVGL's

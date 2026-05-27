@@ -44,13 +44,22 @@ extern "C" {
  * inside the flush_cb. */
 void lvgl_port_init(epaper_driver_display *epd);
 
-/* Drive LVGL's internal scheduler. Call once per main-loop tick (we
- * pass the full main-loop wait_ms to the dev_menu wheel anyway, and
- * lv_timer_handler is cheap when nothing's dirty). Returns the
- * milliseconds until LVGL would like to be called again — caller
- * may use this to bound its sleep, but a fixed cadence is also
- * fine. */
+/* Drain the LVGL scheduler synchronously on the calling task. Mostly
+ * vestigial — a dedicated lv_task pumps lv_timer_handler at ~33 Hz,
+ * which is what makes drag-vs-tap discrimination work. Kept as a
+ * hook for dispatch_touch which wants click events drained
+ * promptly before reading the latched action. Returns the ms until
+ * the next call (informational; the high-cadence task ignores it). */
 int lvgl_port_tick(void);
+
+/* Mutex around the widget tree. Required around any lv_obj_create /
+ * lv_label_set_text / lv_screen_load — LVGL itself is not thread-
+ * safe and the dispatcher task holds this lock while running
+ * lv_timer_handler. The lock is recursive-friendly only inasmuch as
+ * the caller takes care to balance lock/unlock pairs; nested locks
+ * from one task block. */
+void lvgl_port_lock(void);
+void lvgl_port_unlock(void);
 
 /* Force a full-refresh on the next flush. Called when transitioning
  * between wheel screens to bust e-paper ghosting; ordinary partial

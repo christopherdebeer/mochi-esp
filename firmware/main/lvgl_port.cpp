@@ -7,6 +7,10 @@
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+
 #include "lvgl.h"
 
 #include "touch.h"
@@ -33,11 +37,34 @@ static constexpr int FULL_REFRESH_EVERY = 6;
  * 5 ms); a FreeRTOS gptimer or esp_timer is the canonical source. */
 static constexpr int TICK_PERIOD_MS = 5;
 
+/* Dedicated lv_timer_handler task period. We started by calling
+ * lv_timer_handler() once per main-loop iteration (~1 Hz, 10 Hz
+ * with voice) — but LVGL's drag-vs-tap discrimination relies on
+ * indev_read_cb sampling many positions during a single finger
+ * movement. At 1 Hz polling, every drag looks like a stationary
+ * press and fires LV_EVENT_CLICKED on release — i.e. scrolling
+ * the menu also tapped a button.
+ *
+ * 30 ms (~33 Hz) is enough to see ~30 movement samples during a
+ * 1 s drag. The actual e-paper flush only happens when something's
+ * dirty (and is throttled by the panel's own ~300 ms refresh
+ * latency anyway), so the high poll rate doesn't cause display
+ * thrash — it just feeds LVGL enough samples to discriminate. */
+static constexpr int LV_TASK_PERIOD_MS = 30;
+static constexpr int LV_TASK_STACK_BYTES = 8192;
+static constexpr int LV_TASK_PRIO = 2;
+
 static bool                 s_inited = false;
 static epaper_driver_display *s_epd = nullptr;
 static lv_display_t         *s_disp = nullptr;
 static lv_indev_t           *s_indev = nullptr;
 static esp_timer_handle_t    s_tick_timer = nullptr;
+static TaskHandle_t          s_lv_task = nullptr;
+/* Mutex serialising lv_timer_handler() against widget creation
+ * (build_menu, refresh_info, etc.) running on the main task. LVGL's
+ * own _lock/_unlock helpers live behind LV_USE_OS — we use a plain
+ * SemaphoreHandle_t to keep the dependency surface small. */
+static SemaphoreHandle_t     s_lv_mtx = nullptr;
 
 /* Two LVGL draw buffers in PSRAM. LVGL renders into one while the
  * other is being flushed (double-buffering). For 1bpp this is two
@@ -47,6 +74,11 @@ static uint8_t              *s_buf_b = nullptr;
 
 static int                   s_partial_count = 0;
 static volatile bool         s_force_full = false;
+
+/* Forward declarations — these are used by lvgl_port_init below
+ * but defined later in the file (the dispatcher task) or by the
+ * LVGL library itself (the malloc hooks). */
+static void lv_task(void *arg);
 
 /* ─── Memory hooks ──────────────────────────────────────────────────
  * LV_USE_STDLIB_MALLOC=LV_STDLIB_CUSTOM (set via Kconfig) — LVGL
@@ -143,37 +175,20 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 }
 
 /* ─── Touch indev ──────────────────────────────────────────────────
- * LVGL polls this — return the latest finger-down position
- * non-blocking. We translate one touch::Event per call; LVGL itself
- * handles long-press vs tap detection from the (x, y, pressed)
- * stream we feed it.
+ * LVGL polls this — return the current finger-down position via the
+ * non-consuming touch::current_point. We deliberately *don't* drain
+ * touch::wait_event here: main.cpp's loop owns the queue (so it can
+ * still see "a touch happened" → call dispatch_touch). LVGL doesn't
+ * need the queue — it works fine off polled live state, since the
+ * dispatcher runs at ~33 Hz and gets ~30 samples per finger-stay.
  *
- * The FT6336 on the Waveshare panel only reports finger-down (no
- * release event from the queue). To bridge: when wait_event(0)
- * returns nothing, report RELEASED with the last position. The
- * (released → pressed) transition kicks LVGL's button-press logic;
- * the next "no event" tick reports release.
- *
- * This is the simplest correct shape — a more sophisticated bridge
- * would also surface the FT6336's "lift" register if available, but
- * touch::current_point already wraps that and we use it on the
- * release-edge below. */
+ * The state-machine LVGL infers from the (PRESSED, x, y) → (RELEASED,
+ * last_x, last_y) transitions is enough to fire LV_EVENT_CLICKED on
+ * a stable tap, LV_EVENT_SCROLL on a drag, etc. */
 static void indev_read_cb(lv_indev_t * /*indev*/, lv_indev_data_t *data) {
     static int16_t s_last_x = 0;
     static int16_t s_last_y = 0;
 
-    touch::Event ev;
-    if (touch::wait_event(&ev, 0)) {
-        s_last_x = ev.x;
-        s_last_y = ev.y;
-        data->point.x = ev.x;
-        data->point.y = ev.y;
-        data->state = LV_INDEV_STATE_PRESSED;
-        return;
-    }
-
-    /* No queued tap — check whether the finger's still down so the
-     * "press hold" case stays pressed across LVGL polls. */
     touch::Event cur;
     if (touch::current_point(&cur)) {
         s_last_x = cur.x;
@@ -260,6 +275,20 @@ extern "C" void lvgl_port_init(epaper_driver_display *epd) {
         return;
     }
 
+    /* Mutex + dispatcher task. Created last so any earlier failure
+     * leaves nothing for the task to access. */
+    s_lv_mtx = xSemaphoreCreateMutex();
+    if (!s_lv_mtx) {
+        ESP_LOGE(TAG, "lv mutex alloc failed");
+        return;
+    }
+    BaseType_t ok = xTaskCreatePinnedToCore(lv_task, "lv_task",
+        LV_TASK_STACK_BYTES, nullptr, LV_TASK_PRIO, &s_lv_task, 0);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "lv task create failed");
+        return;
+    }
+
     s_inited = true;
     ESP_LOGI(TAG, "LVGL %u.%u.%u up — 1bpp %dx%d",
         lv_version_major(), lv_version_minor(), lv_version_patch(),
@@ -268,12 +297,44 @@ extern "C" void lvgl_port_init(epaper_driver_display *epd) {
 
 extern "C" int lvgl_port_tick(void) {
     if (!s_inited) return 1000;
-    /* Returns ms-until-next-call. dev_menu's main loop already paces
-     * itself, so the value is informational; we still honour it as a
-     * lower bound for sleeps inside the wheel. */
+    /* Pump once on demand. Mostly a no-op now that the dedicated
+     * lv_task drives lv_timer_handler at ~33 Hz; kept as a hook for
+     * dev_menu::dispatch_touch which wants to drain pending click
+     * events from the indev queue before reading s_pending_action. */
+    if (xSemaphoreTake(s_lv_mtx, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return 30;
+    }
     uint32_t next_ms = lv_timer_handler();
+    xSemaphoreGive(s_lv_mtx);
     if (next_ms > 1000) next_ms = 1000;
     return (int)next_ms;
+}
+
+extern "C" void lvgl_port_lock(void) {
+    if (s_lv_mtx) xSemaphoreTake(s_lv_mtx, portMAX_DELAY);
+}
+
+extern "C" void lvgl_port_unlock(void) {
+    if (s_lv_mtx) xSemaphoreGive(s_lv_mtx);
+}
+
+static void lv_task(void * /*arg*/) {
+    /* High-cadence LVGL dispatcher. Runs lv_timer_handler frequently
+     * enough that the indev's stream of (x, y) samples during a
+     * touch-drag lets LVGL distinguish scroll from tap. Without this,
+     * a finger moving over a button still fired LV_EVENT_CLICKED on
+     * release because LVGL never saw movement.
+     *
+     * The mutex serialises against widget mutations on the main task
+     * (build_menu, refresh_info, screen swaps). LVGL itself is not
+     * thread-safe; whoever holds the mutex owns the widget tree. */
+    while (true) {
+        if (xSemaphoreTake(s_lv_mtx, portMAX_DELAY) == pdTRUE) {
+            lv_timer_handler();
+            xSemaphoreGive(s_lv_mtx);
+        }
+        vTaskDelay(pdMS_TO_TICKS(LV_TASK_PERIOD_MS));
+    }
 }
 
 extern "C" void lvgl_port_force_full_refresh(void) {
