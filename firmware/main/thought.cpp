@@ -47,10 +47,17 @@ static const int BUBBLE_TAIL_W = 6;      /* base of the down-pointing tail */
 static const int BUBBLE_TAIL_H = 6;      /* height; tip lands at Y1 + H - 1 */
 static const int HIT_PAD       = 6;      /* enlarge tap target on every side */
 
-/* Two scale-1 text lines, centered horizontally inside the bubble.
- * y values are the top of each glyph (glyphs are 8 rows tall). */
-static const int LINE1_TOP_Y = 48;
-static const int LINE2_TOP_Y = 60;
+/* Text layout — fixed-width font8x8, so chars-per-line = pixels/8.
+ * The renderer word-wraps `text` greedily on spaces (honouring '\n'
+ * as a hard break) and vertically centres the resulting block inside
+ * the bubble's interior rect. */
+static const int GLYPH_W   = 8;
+static const int GLYPH_H   = 8;
+static const int LINE_GAP  = 2;
+static const int LINE_H    = GLYPH_H + LINE_GAP;       /* 10 */
+static const int TEXT_PAD_X = 2;                       /* keep 2 px clear of the L/R border */
+static const int TEXT_PAD_Y = 2;                       /* keep 2 px clear of the T/B border */
+static const int MAX_TEXT_LINES = 3;                   /* 3 × 10 = 30 px fits in 36-px box */
 
 /* ─── Framebuffer helpers ──────────────────────────────────────────
  *
@@ -131,6 +138,96 @@ static void blit_text_centered(uint8_t *dst, size_t dst_w, size_t dst_h,
     }
 }
 
+/* Word-wrap + vertically-centre a single string inside the bubble's
+ * interior rect [box_y0, box_y1). Greedy break on space; '\n' is a
+ * hard break. Fixed-width font lets us pre-compute char-budget per
+ * line (max_chars = (box_x1 - box_x0) / GLYPH_W). At most
+ * MAX_TEXT_LINES lines render; excess content silently truncates.
+ *
+ * Each line is horizontally centred on (box_x0+box_x1)/2 via the
+ * existing blit_text_centered (it owns the per-glyph blit math).
+ * Lines are stacked top-to-bottom; the whole block centres on the
+ * vertical midpoint of the interior. */
+static void blit_text_wrapped(uint8_t *dst, size_t dst_w, size_t dst_h,
+                              const char *text,
+                              int box_x0, int box_y0,
+                              int box_x1, int box_y1) {
+    if (!text || !*text) return;
+    const int interior_w = (box_x1 - TEXT_PAD_X) - (box_x0 + TEXT_PAD_X);
+    if (interior_w < GLYPH_W) return;
+    const int max_chars_int = interior_w / GLYPH_W;
+    /* Clamp to a sane on-stack line buffer so single long words still
+     * blit (truncated) rather than overflowing. 24 chars × 8 px = 192
+     * px is wider than the panel, well past any bubble interior. */
+    enum { LINE_BUF = 24 };
+    const int max_chars = max_chars_int < (LINE_BUF - 1)
+        ? max_chars_int : (LINE_BUF - 1);
+
+    /* Phase 1: scan + layout. Walk the source string, emitting line
+     * boundaries when a hard break ('\n') lands or when the next word
+     * would push past max_chars. Long single words hard-break at
+     * max_chars rather than overflow. */
+    struct { int start; int len; } lines[MAX_TEXT_LINES];
+    int n_lines = 0;
+    const int total = (int)strlen(text);
+    int i = 0;
+    while (i < total && n_lines < MAX_TEXT_LINES) {
+        /* Skip leading whitespace (between-line spaces don't render). */
+        while (i < total && text[i] == ' ') i++;
+        if (i >= total) break;
+        const int line_start = i;
+        int last_space_at = -1;
+        int j = i;
+        while (j < total && text[j] != '\n' && (j - line_start) < max_chars) {
+            if (text[j] == ' ') last_space_at = j;
+            j++;
+        }
+        int line_end;
+        if (j >= total || text[j] == '\n') {
+            line_end = j;
+        } else if (last_space_at > line_start) {
+            /* Hit width with a space available — break there so the
+             * next word stays whole on the next line. */
+            line_end = last_space_at;
+        } else {
+            /* Single word longer than the line width — hard-break it.
+             * Visually ugly but better than silently dropping. */
+            line_end = j;
+        }
+        lines[n_lines].start = line_start;
+        lines[n_lines].len   = line_end - line_start;
+        n_lines++;
+        i = line_end;
+        if (i < total && (text[i] == ' ' || text[i] == '\n')) i++;
+    }
+    if (n_lines == 0) return;
+
+    /* Phase 2: vertical centring. block_h = N×LINE_H minus the
+     * trailing gap (the bottom line doesn't need padding under it).
+     * Clamp start to the interior so a 3-line block never punches
+     * the bottom border. */
+    const int block_h = n_lines * LINE_H - LINE_GAP;
+    const int interior_top = box_y0 + TEXT_PAD_Y;
+    const int interior_bot = box_y1 - TEXT_PAD_Y;
+    const int interior_h   = interior_bot - interior_top;
+    int start_y = interior_top + (interior_h - block_h) / 2;
+    if (start_y < interior_top) start_y = interior_top;
+
+    /* Phase 3: blit each line. Copy into a temp buffer so the existing
+     * blit_text_centered (which expects a NUL-terminated string) can
+     * consume the substring without us reaching into its internals. */
+    const int cx = (box_x0 + box_x1) / 2;
+    for (int li = 0; li < n_lines; li++) {
+        char tmp[LINE_BUF];
+        int len = lines[li].len;
+        if (len > LINE_BUF - 1) len = LINE_BUF - 1;
+        memcpy(tmp, text + lines[li].start, (size_t)len);
+        tmp[len] = '\0';
+        const int y_top = start_y + li * LINE_H;
+        blit_text_centered(dst, dst_w, dst_h, tmp, cx, y_top);
+    }
+}
+
 /* ─── Public API ──────────────────────────────────────────────────── */
 
 extern "C" bool thought_generate(const pet_t *pet, int64_t /*now_ms*/,
@@ -144,8 +241,7 @@ extern "C" bool thought_generate(const pet_t *pet, int64_t /*now_ms*/,
     if (pet->asleep) {
         out->action_kind   = THOUGHT_ACTION_CARE_EVENT;
         out->action_event  = EVENT_WOKE;
-        out->line1         = "zzz...";
-        out->line2         = "tap wake";
+        out->text          = "zzz...\ntap wake";
         out->expires_at_ms = 0;
         return true;
     }
@@ -158,8 +254,7 @@ extern "C" bool thought_generate(const pet_t *pet, int64_t /*now_ms*/,
     if (pet->stats.energy <= SLEEPY_ENERGY_FLOOR) {
         out->action_kind   = THOUGHT_ACTION_CARE_EVENT;
         out->action_event  = EVENT_SLEPT;
-        out->line1         = "sleepy...";
-        out->line2         = "tap sleep";
+        out->text          = "sleepy...\ntap sleep";
         out->expires_at_ms = 0;
         return true;
     }
@@ -190,43 +285,20 @@ extern "C" void thought_for_pet_tap(const pet_t *pet,
 
     const mood_t m = pet ? project_mood(pet, events, event_count, now_ms)
                          : MOOD_CURIOUS;
+    /* Each entry is short enough (≤20 chars incl. the '\n') that the
+     * renderer's word-wrap either keeps the hard break or naturally
+     * stacks the phrase on two lines. Single-line moods omit the '\n'
+     * so they centre as one row in the bubble's vertical axis. */
     switch (m) {
-        case MOOD_SLEEPING:
-            out->line1 = "zzz...";
-            out->line2 = "shh";
-            break;
-        case MOOD_HUNGRY:
-            out->line1 = "hungry...";
-            out->line2 = "got snack?";
-            break;
-        case MOOD_TIRED:
-            out->line1 = "yawn...";
-            out->line2 = "so sleepy";
-            break;
-        case MOOD_LONELY:
-            out->line1 = "miss u...";
-            out->line2 = "where ru?";
-            break;
-        case MOOD_PLAYFUL:
-            out->line1 = "play!";
-            out->line2 = "zoomies!";
-            break;
-        case MOOD_CURIOUS:
-            out->line1 = "hmm...";
-            out->line2 = "what's up?";
-            break;
-        case MOOD_CONTENT:
-            out->line1 = "hi :)";
-            out->line2 = "all good";
-            break;
-        case MOOD_SURPRISED:
-            out->line1 = "oh!";
-            out->line2 = "what was?";
-            break;
-        default:
-            out->line1 = "hi :)";
-            out->line2 = "";
-            break;
+        case MOOD_SLEEPING:  out->text = "zzz...\nshh";          break;
+        case MOOD_HUNGRY:    out->text = "hungry...\ngot snack?"; break;
+        case MOOD_TIRED:     out->text = "yawn...\nso sleepy";   break;
+        case MOOD_LONELY:    out->text = "miss u...\nwhere ru?"; break;
+        case MOOD_PLAYFUL:   out->text = "play!\nzoomies!";      break;
+        case MOOD_CURIOUS:   out->text = "hmm...\nwhat's up?";   break;
+        case MOOD_CONTENT:   out->text = "hi :)\nall good";      break;
+        case MOOD_SURPRISED: out->text = "oh!\nwhat was?";       break;
+        default:             out->text = "hi :)";                break;
     }
 }
 
@@ -315,12 +387,14 @@ extern "C" void thought_render(uint8_t *dst, size_t dst_w, size_t dst_h,
         }
     }
 
-    /* Two scale-1 text lines, centered on the bubble's vertical
-     * midline. Glyphs that exceed the bubble are clipped by the
-     * generic glyph blit's bounds check (safe; the caller is
-     * responsible for keeping text short). */
-    blit_text_centered(dst, dst_w, dst_h, thought->line1, tail_cx, LINE1_TOP_Y);
-    blit_text_centered(dst, dst_w, dst_h, thought->line2, tail_cx, LINE2_TOP_Y);
+    /* Body text — word-wrapped + vertically centred inside the
+     * bubble interior. '\n' in `text` forces a line break where the
+     * producer wants explicit control ("sleepy...\ntap sleep" stays
+     * two lines regardless of width); otherwise greedy wrap on
+     * spaces. Up to MAX_TEXT_LINES (currently 3) render; excess
+     * truncates. */
+    blit_text_wrapped(dst, dst_w, dst_h, thought->text,
+                      BUBBLE_X0, BUBBLE_Y0, BUBBLE_X1, BUBBLE_Y1);
 
     /* Touch hit rectangle — enlarge from the visible shape by
      * HIT_PAD on every side, including past the tail tip so a tap

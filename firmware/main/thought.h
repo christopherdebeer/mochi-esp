@@ -53,12 +53,18 @@ typedef enum {
 /* Pure-data view of one thought. Strings are owned by the producer
  * — for the M1 predicate chain they're string literals in
  * thought.cpp's generator, so callers can hold the pointer across
- * the render call without copying. */
+ * the render call without copying.
+ *
+ * `text` is a single string the renderer word-wraps + vertically
+ * centres inside the bubble interior. Greedy break on space; honours
+ * '\n' as a hard line break so producers can force a split where
+ * the wording calls for it ("sleepy...\ntap sleep" stays as two
+ * conceptual lines regardless of width). Up to three lines fit in
+ * the bubble's 36-px interior. */
 typedef struct {
     thought_action_kind_t action_kind;
     event_kind_t          action_event;   /* CARE_EVENT only */
-    const char           *line1;          /* top label; ≤ 11 scale-1 chars */
-    const char           *line2;          /* sub-line hint; ≤ 11 scale-1 chars */
+    const char           *text;           /* body — wrapped + centred at render */
     int64_t               expires_at_ms;  /* 0 = lifetime tied to need */
     thought_style_t       style;          /* visual register; default = THOUGHT */
 } pet_thought_t;

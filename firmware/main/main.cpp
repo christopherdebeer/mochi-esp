@@ -2427,7 +2427,7 @@ extern "C" void app_main(void) {
                         decayed.stats.happiness, decayed.stats.fullness,
                         decayed.stats.energy,
                         recent_engagement(slice, n, now_ms),
-                        s_thought_active ? s_active_thought.line1 : "(none)");
+                        s_thought_active ? s_active_thought.text : "(none)");
                     if (render_with_expression(render_name, false,
                             s_thought_active ? &s_active_thought : nullptr)) {
                         snprintf(last_resting_expr, sizeof(last_resting_expr),
@@ -2555,18 +2555,19 @@ extern "C" void app_main(void) {
          *                  becomes the model's job.
          *
          *   voice idle:    pop a transient thought bubble carrying
-         *                  the seed text (truncated to fit the
-         *                  bubble's ~22-character budget). No care
-         *                  event lands; the bubble just decorates
-         *                  the next render and stays through the
-         *                  THOUGHT_SUPPRESS_MS window so the kid
-         *                  has time to read it.
+         *                  the raw seed text. The renderer's wrap
+         *                  + vertical-centre helper handles the
+         *                  layout (up to 3 × ~11-char lines fit in
+         *                  the bubble interior); longer seeds
+         *                  silently truncate at the third line. No
+         *                  care event lands; the bubble just
+         *                  decorates the next render and stays
+         *                  through the THOUGHT_SUPPRESS_MS window
+         *                  so the kid has time to read it.
          *
          * The seed pointer is borrowed from the embedded pack and
          * not NUL-terminated; copy it into a local buffer first. */
         static char  s_seed_buf[256];
-        static char  s_seed_line1[24];
-        static char  s_seed_line2[24];
         static pet_thought_t s_seed_thought;
         const pet_thought_t *seed_thought_ptr = nullptr;
         if (scene_hit && scene_act.kind == MPK_ACTION_TALK_SEED) {
@@ -2586,39 +2587,9 @@ extern "C" void app_main(void) {
                 voice::send_text(s_seed_buf);
                 expr = "thinking";
             } else {
-                /* Word-wrap the seed across the two-line bubble.
-                 * Bubble interior is ~92 px = ~11 scale-1 glyphs per
-                 * line. Try to break on a space near col 11; spill
-                 * to line 2; ellipsise overflow. This is intentionally
-                 * naive — talk_seed strings are short evocations
-                 * authored to fit. */
-                const int kPerLine = 11;
-                const int total = (int)strlen(s_seed_buf);
-                int br = (total > kPerLine) ? kPerLine : total;
-                if (total > kPerLine) {
-                    for (int i = kPerLine; i > kPerLine - 5 && i > 0; i--) {
-                        if (s_seed_buf[i] == ' ') { br = i; break; }
-                    }
-                }
-                snprintf(s_seed_line1, sizeof(s_seed_line1),
-                         "%.*s", br, s_seed_buf);
-                int after = br + (s_seed_buf[br] == ' ' ? 1 : 0);
-                int rem = total - after;
-                if (rem <= 0) {
-                    s_seed_line2[0] = '\0';
-                } else if (rem <= kPerLine) {
-                    snprintf(s_seed_line2, sizeof(s_seed_line2),
-                             "%s", s_seed_buf + after);
-                } else {
-                    /* Truncate with a trailing ellipsis (single dot
-                     * to save a column). */
-                    snprintf(s_seed_line2, sizeof(s_seed_line2),
-                             "%.*s.", kPerLine - 1, s_seed_buf + after);
-                }
                 memset(&s_seed_thought, 0, sizeof(s_seed_thought));
                 s_seed_thought.action_kind = THOUGHT_ACTION_NONE;
-                s_seed_thought.line1       = s_seed_line1;
-                s_seed_thought.line2       = s_seed_line2;
+                s_seed_thought.text        = s_seed_buf;
                 /* External speech echo — render with the spoken-style
                  * triangle tail so it visually reads as "what mochi
                  * would have said" rather than internal monologue. */
