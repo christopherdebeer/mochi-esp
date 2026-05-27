@@ -6,21 +6,29 @@
  * 60-second inactivity timeout snaps back to Live so the device
  * can't get stranded in a debug screen.
  *
- *   Live (default)  ── PWR×2 ─▶ Menu ── PWR ─▶ Live
- *      ▲                          │
- *      │                          ├── tap "Switch WiFi" ─▶ WifiModal
- *      │                          │                          │
- *      │                          │                  PWR ────┘
- *      │                          │              (back to Menu)
- *      │
- *      └── 60 s inactivity / dispatch_touch returning a TouchResult
+ *   Live ── PWR×2 ─▶ MenuP1 ── PWR ─▶ MenuP2 ── PWR ─▶ Live
+ *    ▲                 │                  │
+ *    │                 │                  └── tap action ─▶ exit
+ *    │                 ├── tap "Switch WiFi" ─▶ WifiModal
+ *    │                 │                          │
+ *    │                 │                  PWR ────┘
+ *    │                 │              (back to MenuP1)
+ *    │
+ *    └── 60 s inactivity / dispatch_touch returning a TouchResult
  *
- * "Live" is a HOME STATE, not a wheel position. PWR-double-tap from
- * Live enters Menu; PWR while in Menu exits back to Live (no slot
- * cycling — earlier shapes had Splash → Settings → Actions → Wifi
- * but on a 200 px panel that's more PWR taps than necessary; one
- * Menu with the info header + action list reads at a glance).
- * BOOT is reserved for voice start/stop and never touches the wheel.
+ * "Live" is a HOME STATE, not a menu position. PWR-double-tap from
+ * Live enters MenuP1; subsequent PWR taps page through MenuP2 and
+ * out to Live. Pagination beats scrolling on e-ink — the FT6336
+ * doesn't report enough intra-press position movement for LVGL to
+ * recognise drag, and 200 px / partial-refresh hardware can't show
+ * smooth scroll anyway. Two pages of 28-px buttons is significantly
+ * more tappable than one page of 18-px buttons squeezed in.
+ *
+ * Page split (most-used on P1; less common / dangerous on P2):
+ *   MenuP1: info header · Switch WiFi · OpenAI key · Update · Re-pair
+ *   MenuP2: Add WiFi · Forget WiFi · Go home
+ *
+ * BOOT is reserved for voice start/stop and never touches the menu.
  *
  * Modals (WifiModal today; future ones plug in here) push from a
  * Menu button-tap and dismiss on the next PWR tap or a button-tap.
@@ -53,10 +61,11 @@ namespace dev_menu {
 
 enum class Mode : uint8_t {
     Live = 0,        /* not a menu mode — home state */
-    Menu,            /* info header + action buttons */
-    /* WifiModal is pushed from the "Switch WiFi" button on Menu and
-     * torn down on either a button-tap (do) or a PWR-tap (back to
-     * Menu). */
+    MenuP1,          /* page 1 — info header + most-used actions */
+    MenuP2,          /* page 2 — less-used / destructive actions */
+    /* WifiModal is pushed from the "Switch WiFi" button on MenuP1
+     * and torn down on either a button-tap (do) or a PWR-tap (back
+     * to MenuP1). */
     WifiModal,
     _Count,
 };

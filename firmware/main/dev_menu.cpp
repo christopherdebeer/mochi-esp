@@ -63,8 +63,9 @@ static char                 s_picked_ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
  * info header sits above the action buttons inside the same scroll
  * container, so the user sees device state and tappable actions in
  * one glance instead of two PWR taps. */
-static lv_obj_t            *s_menu_scr      = nullptr;
-static lv_obj_t            *s_info_label    = nullptr;   /* lives inside s_menu_scr */
+static lv_obj_t            *s_menu_p1_scr   = nullptr;
+static lv_obj_t            *s_menu_p2_scr   = nullptr;
+static lv_obj_t            *s_info_label    = nullptr;   /* lives inside s_menu_p1_scr */
 static lv_obj_t            *s_wifi_scr      = nullptr;
 
 /* Pending action latched by the click event handler; consumed by
@@ -82,7 +83,8 @@ static TouchResult          s_pending_action = TouchResult::None;
 static const char *mode_name(Mode m) {
     switch (m) {
         case Mode::Live:      return "live";
-        case Mode::Menu:      return "menu";
+        case Mode::MenuP1:    return "menu_p1";
+        case Mode::MenuP2:    return "menu_p2";
         case Mode::WifiModal: return "wifi_modal";
         default:              return "?";
     }
@@ -116,18 +118,18 @@ void exit_to_live(void) {
 }
 
 /* Advance:
- *   Live      → Menu (entered via PWR double-tap from main.cpp)
- *   Menu      → Live (PWR exits the menu — no slot cycling now)
- *   WifiModal → Menu (PWR closes the modal back to the parent menu)
+ *   Live      → MenuP1 (PWR×2 entry from main.cpp)
+ *   MenuP1    → MenuP2 (PWR pages forward)
+ *   MenuP2    → Live   (PWR exits past last page)
+ *   WifiModal → MenuP1 (PWR closes the modal back to its parent)
  *
- * Pre-v0.1.7 there was an Info ↔ Actions cycle; collapsing them
- * into one Menu screen made that loop pointless, so PWR now means
- * "back" once you're past Live. */
+ * Pagination beats scrolling on this hardware — see dev_menu.h. */
 static Mode advance(Mode m) {
     switch (m) {
-        case Mode::Live:      return Mode::Menu;
-        case Mode::Menu:      return Mode::Live;
-        case Mode::WifiModal: return Mode::Menu;
+        case Mode::Live:      return Mode::MenuP1;
+        case Mode::MenuP1:    return Mode::MenuP2;
+        case Mode::MenuP2:    return Mode::Live;
+        case Mode::WifiModal: return Mode::MenuP1;
         default:              return Mode::Live;
     }
 }
@@ -216,20 +218,16 @@ static void refresh_info(void) {
     lv_label_set_text(s_info_label, buf);
 }
 
-/* Add a full-width tappable row to a vertical container. Compact
- * 18 px height so the menu fits seven actions + an info header on
- * the 200 px panel without overflow — earlier versions used 28 px
- * which forced a scroll, but e-ink scrolling on the FT6336 didn't
- * generate the position jitter LVGL needs to recognise drag (drags
- * just fired clicks). The simpler fix is no scroll: tighten heights
- * + drop scrollability so a finger-on-screen never paints a new
- * "would-scroll" frame. */
+/* Add a full-width tappable row to a vertical container. 28 px tall
+ * — generous for finger taps. Pagination (PWR cycles MenuP1 →
+ * MenuP2 → Live) means we don't need to cram many rows onto one
+ * page, so each row gets the room it deserves. */
 static lv_obj_t *add_row(lv_obj_t *parent, const char *label,
                          TouchResult action, const char *ssid_payload) {
     lv_obj_t *btn = lv_button_create(parent);
     lv_obj_set_width(btn, lv_pct(100));
-    lv_obj_set_height(btn, 18);
-    lv_obj_set_style_pad_all(btn, 1, 0);
+    lv_obj_set_height(btn, 28);
+    lv_obj_set_style_pad_all(btn, 2, 0);
     lv_obj_t *lab = lv_label_create(btn);
     lv_label_set_text(lab, label);
     lv_obj_center(lab);
@@ -239,41 +237,57 @@ static lv_obj_t *add_row(lv_obj_t *parent, const char *label,
     return btn;
 }
 
-static void build_menu(void) {
-    if (s_menu_scr) return;
-    s_menu_scr = lv_obj_create(nullptr);
-    lv_obj_set_layout(s_menu_scr, LV_LAYOUT_FLEX);
-    lv_obj_set_flex_flow(s_menu_scr, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(s_menu_scr,
+/* Common: configure a screen as a non-scrolling vertical flex with
+ * tight padding so 4 × 28 px buttons + (optional) info header fit
+ * within 200 px. Used by both menu pages and the wifi modal. */
+static void config_menu_screen(lv_obj_t *scr) {
+    lv_obj_set_layout(scr, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(scr,
         LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_all(s_menu_scr, 2, 0);
-    lv_obj_set_style_pad_gap(s_menu_scr, 1, 0);
-    /* No scroll. Earlier the menu was taller than the panel and
-     * relied on drag-scroll, but the FT6336 doesn't report enough
-     * intra-press position movement for LVGL to detect drag — every
-     * attempted scroll fired a click on whichever button the finger
-     * happened to land on. Disabling scroll means the menu must fit
-     * on 200 px (it does, with the 18 px button heights above). */
-    lv_obj_set_scrollbar_mode(s_menu_scr, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_clear_flag(s_menu_scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(scr, 2, 0);
+    lv_obj_set_style_pad_gap(scr, 2, 0);
+    /* No scroll: pagination replaces it. The FT6336 can't surface
+     * the intra-press position movement LVGL needs to disambiguate
+     * a drag from a held tap, so any "scroll" attempt fires a
+     * click on whichever button the finger happens to be over. */
+    lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+}
 
-    /* Info header — multi-line label rebuilt by refresh_info() each
-     * tick so RAM / PSRAM / batt readings stay fresh while the menu
-     * is up. Compact 3-line format so the action list below stays
-     * fully visible. */
-    s_info_label = lv_label_create(s_menu_scr);
+/* Page 1: most-used actions over the live info header. ~52 px header
+ * + 4 × 28 px buttons + 5 × 2 px gaps + 4 px padding ≈ 178 px. Fits. */
+static void build_menu_p1(void) {
+    if (s_menu_p1_scr) return;
+    s_menu_p1_scr = lv_obj_create(nullptr);
+    config_menu_screen(s_menu_p1_scr);
+
+    /* Info header — refreshed live by refresh_info() so RAM / PSRAM /
+     * batt readings stay current while the page is open. */
+    s_info_label = lv_label_create(s_menu_p1_scr);
     lv_label_set_long_mode(s_info_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(s_info_label, lv_pct(98));
 
-    /* Action buttons. Kept full-width so the 200 px panel turns each
-     * into a generous tap target. */
-    add_row(s_menu_scr, "Switch WiFi",   TouchResult::SwitchWifi,    nullptr);
-    add_row(s_menu_scr, "Add WiFi",      TouchResult::ChangeWifi,    nullptr);
-    add_row(s_menu_scr, "Forget WiFi",   TouchResult::ForgetWifi,    nullptr);
-    add_row(s_menu_scr, "Update now",    TouchResult::UpdateNow,     nullptr);
-    add_row(s_menu_scr, "Re-pair",       TouchResult::RePair,        nullptr);
-    add_row(s_menu_scr, "OpenAI key",    TouchResult::OpenKeyPortal, nullptr);
-    add_row(s_menu_scr, "Go home",       TouchResult::GoHome,        nullptr);
+    add_row(s_menu_p1_scr, "Switch WiFi", TouchResult::SwitchWifi,    nullptr);
+    add_row(s_menu_p1_scr, "OpenAI key",  TouchResult::OpenKeyPortal, nullptr);
+    add_row(s_menu_p1_scr, "Update now",  TouchResult::UpdateNow,     nullptr);
+    add_row(s_menu_p1_scr, "Re-pair",     TouchResult::RePair,        nullptr);
+}
+
+/* Page 2: less-used / destructive actions. Header reads "MORE" so
+ * the user knows there's a second page; PWR exits to Live from here.
+ * 1 header label + 3 × 28 px + gaps ≈ 100 px. Plenty of room. */
+static void build_menu_p2(void) {
+    if (s_menu_p2_scr) return;
+    s_menu_p2_scr = lv_obj_create(nullptr);
+    config_menu_screen(s_menu_p2_scr);
+
+    lv_obj_t *title = lv_label_create(s_menu_p2_scr);
+    lv_label_set_text(title, "MORE  (PWR exits)");
+
+    add_row(s_menu_p2_scr, "Add WiFi",    TouchResult::ChangeWifi,    nullptr);
+    add_row(s_menu_p2_scr, "Forget WiFi", TouchResult::ForgetWifi,    nullptr);
+    add_row(s_menu_p2_scr, "Go home",     TouchResult::GoHome,        nullptr);
 }
 
 /* WiFi modal — built fresh on each entry because the stored-network
@@ -354,10 +368,14 @@ static void render_mode(Mode m) {
      * lv_obj_pos.c. */
     lvgl_port_lock();
     switch (m) {
-        case Mode::Menu:
-            build_menu();
+        case Mode::MenuP1:
+            build_menu_p1();
             refresh_info();
-            lv_screen_load(s_menu_scr);
+            lv_screen_load(s_menu_p1_scr);
+            break;
+        case Mode::MenuP2:
+            build_menu_p2();
+            lv_screen_load(s_menu_p2_scr);
             break;
         case Mode::WifiModal:
             build_wifi();
@@ -417,12 +435,13 @@ bool tick(epaper_driver_display * /*epd*/, bool /*paired*/,
         s_entered_mode_us = now_us;
         render_mode(s_mode);
         changed = true;
-    } else if (s_mode == Mode::Menu) {
+    } else if (s_mode == Mode::MenuP1) {
         /* Refresh the info header without a screen swap so RAM/PSRAM/
-         * batt readings stay live while the menu is up. Cheap; LVGL
+         * batt readings stay live while page 1 is up. Cheap; LVGL
          * only re-renders the label's dirty area. The action buttons
-         * below are static — not rebuilt. Locked against the
-         * dispatcher to keep widget access serialised. */
+         * are static — not rebuilt. MenuP2 has no live header so no
+         * refresh needed there. Locked against the dispatcher to
+         * keep widget access serialised. */
         lvgl_port_lock();
         refresh_info();
         lvgl_port_unlock();
