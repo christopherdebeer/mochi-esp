@@ -41,6 +41,7 @@ idf_component_register(
         "factory_reset.cpp"
         "compositor.cpp"
         "ui_dialog.cpp"
+        "lvgl_port.cpp"
         "dev_menu.cpp"
         "battery.cpp"
         "sleep_gesture.cpp"
@@ -101,6 +102,7 @@ idf_component_register(
         esp_https_ota
         espressif__esp_peer
         espressif__esp-sr
+        lvgl__lvgl
         mbedtls
         log
         esp_hw_support

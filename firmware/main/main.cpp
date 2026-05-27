@@ -41,6 +41,7 @@
 #include "epaper_driver_bsp.h"
 #include "epd_ui.h"
 #include "dev_menu.h"
+#include "lvgl_port.h"
 #include "nvs_creds.h"
 #include "wifi_prov.h"
 #include "wifi_sta.h"
@@ -636,8 +637,14 @@ extern "C" void app_main(void) {
     epd->EPD_Display();
     epd->EPD_DisplayPartBaseImage();
 
-    /* Dev-menu wheel: BOOT short-press cycles splash → diagnostics →
-     * (future modes), 5 s inactivity returns to live. See dev_menu.h. */
+    /* LVGL port — bridges the Waveshare e-paper + FT6336 touch into
+     * LVGL widgets, used by the dev_menu wheel screens (Info /
+     * Actions / WifiModal). Live pet rendering still uses the bare
+     * epd_ui draw helpers; LVGL is opt-in per-screen. */
+    lvgl_port_init(epd);
+
+    /* Dev-menu wheel: PWR-double-tap enters Info; subsequent PWR taps
+     * cycle Info → Actions → Info; 60 s inactivity returns to live. */
     dev_menu::init(epd);
 
     /* Factory-reset watchdog. Runs in parallel with everything from
@@ -1410,14 +1417,17 @@ extern "C" void app_main(void) {
         age_t a = compute_age(decayed.born_at, now_ms);
         sprite_key_t sk = resolve_sprite(&decayed, m, a.stage, now_ms);
 
-        /* M11.5a — compute the active thought for this render. The
-         * suppression window keeps the same need from re-firing
-         * locally before the substrate confirms; outside the
-         * window, the predicate chain in thought_generate is the
-         * only gate. */
+        /* M11.5a — compute the active thought for this render. A
+         * pinned `persistent` bubble (multi-page talk_seed echo)
+         * survives intact; otherwise the predicate chain in
+         * thought_generate is the only gate, modulo the post-tap
+         * suppression window that keeps a freshly-cleared need
+         * from re-firing locally before the substrate confirms. */
         const pet_thought_t *thought_ptr = nullptr;
-        if (now_ms >= s_thought_suppress_until_ms &&
-            thought_generate(&decayed, now_ms, &s_active_thought)) {
+        if (s_thought_active && s_active_thought.persistent) {
+            thought_ptr = &s_active_thought;
+        } else if (now_ms >= s_thought_suppress_until_ms &&
+                   thought_generate(&decayed, now_ms, &s_active_thought)) {
             s_thought_active = true;
             thought_ptr = &s_active_thought;
         } else {
@@ -1446,7 +1456,7 @@ extern "C" void app_main(void) {
      * (the network fetch path) and then re-paint the bar locally.
      * Full refresh because the screen will sit untouched for hours.
      */
-    auto render_asleep = [&]() {
+    auto render_asleep = [&](const char *status_text) {
         /* Pack first, then cache, then network — same priority as
          * render_with_expression. Bundled 'sleeping' makes the
          * PWR-long-press gesture work offline. */
@@ -1496,9 +1506,11 @@ extern "C" void app_main(void) {
                 PET_CELL_W, PET_CELL_H, PET_DX, PET_DY);
         }
 
-        /* Asleep status bar: centred string, no icons. Reuse the
-         * inline glyph blit pattern. */
-        const char *line = "Asleep - PWR to wake";
+        /* Status bar: centred string, no icons. Reuse the inline
+         * glyph blit pattern. Caller supplies the text ("Asleep -
+         * PWR to wake" for the PWR-tap sleep path, "Needs charge -
+         * plug in" for the low-battery soft-power-down). */
+        const char *line = status_text ? status_text : "Asleep";
         const int text_w = (int)strlen(line) * 8;
         int text_x = ((int)MOCHI_EPD_WIDTH - text_w) / 2;
         if (text_x < 0) text_x = 0;
@@ -1764,6 +1776,37 @@ extern "C" void app_main(void) {
         sleep_gesture::set_wheel_active(dev_menu::active());
         sleep_gesture::set_voice_active(voice::is_active());
 
+        /* Critical-battery soft-power-down. LiPo cells damage
+         * permanently below ~3.0 V; render a clear "Needs charge"
+         * screen and commit deep-sleep before the regulator browns
+         * out under load. Three consecutive sub-threshold readings
+         * required so a transient ADC glitch (e.g. mid-WiFi-TX
+         * voltage sag) can't power the device down on a healthy
+         * battery. Skipped while voice is active so a session
+         * mid-conversation doesn't get yanked — the brown-out
+         * detector still catches that case. */
+        static int s_critical_batt_streak = 0;
+        constexpr uint16_t CRITICAL_BATT_MV = 3200;
+        constexpr int      CRITICAL_BATT_CONSEC = 3;
+        if (!voice::is_active()) {
+            uint16_t mv = 0;
+            if (battery_read(&mv, nullptr) && mv > 0 && mv < CRITICAL_BATT_MV) {
+                s_critical_batt_streak++;
+                ESP_LOGW(TAG, "battery critical: %u mV (streak %d/%d)",
+                    mv, s_critical_batt_streak, CRITICAL_BATT_CONSEC);
+                if (s_critical_batt_streak >= CRITICAL_BATT_CONSEC) {
+                    device_diag_eventf(DIAG_WARN, "battery", nullptr,
+                        "soft power-down: %u mV", mv);
+                    device_diag_flush();
+                    render_asleep("Needs charge - plug in");
+                    sleep_gesture::commit_sleep();
+                    /* Unreachable. */
+                }
+            } else {
+                s_critical_batt_streak = 0;
+            }
+        }
+
         /* Touch-drain guard. If a previous tick set this, eat the
          * first touch we see and reset. Lets dev_menu / dialog flows
          * confidently mark "this gesture has been consumed" without
@@ -1811,8 +1854,13 @@ extern "C" void app_main(void) {
                     s_pending_talked_at = 0;
                 }
             } else if (dev_menu::active()) {
-                ESP_LOGI(TAG, "PWR tap (wheel up) → advance");
-                dev_menu::request_advance();
+                /* Single-tap is the escape hatch from any non-Live
+                 * mode — straight back to Live, never destructive.
+                 * Double-tap (handled above) is what pages deeper.
+                 * Mark the screen dirty so the pet redraws this tick. */
+                ESP_LOGI(TAG, "PWR tap (wheel up) → exit to live");
+                dev_menu::exit_to_live();
+                s_net_render_dirty = true;
             }
         }
 
@@ -1820,7 +1868,7 @@ extern "C" void app_main(void) {
             sleep_gesture::mark_handled();
             device_diag_event(DIAG_INFO, "sleep", "PWR tap → sleep", nullptr);
             device_diag_flush();   /* push before we power down */
-            render_asleep();
+            render_asleep("Asleep - PWR to wake");
             sleep_gesture::commit_sleep();
         }
 
@@ -1876,25 +1924,71 @@ extern "C" void app_main(void) {
                 uint16_t mv = 0; uint8_t pct = 0;
                 return battery_read(&mv, &pct) ? (int)pct : -1;
             })();
+            /* Pet-status line for the kid-facing MenuP1 header. One
+             * line: mood label + happiness/fullness/energy. Cheap to
+             * compute (project_mood is the same call the resting
+             * render already makes); we just project against the same
+             * decayed snapshot so the menu matches what the screen
+             * showed a moment ago. Empty string while the menu is up
+             * AND inside the inactivity-driven idle path is fine —
+             * dev_menu's fallback is the pet name. */
+            char pet_status_buf[80] = {};
+            {
+                int64_t now_ms = now_ms_wall();
+                pet_event_t slice[12];
+                size_t n = event_log_load_recent(slice, 12);
+                pet_t decayed = current_pet_decayed(now_ms);
+                mood_t m = project_mood(&decayed, slice, n, now_ms);
+                const char *mname = mood_to_name(m);
+                snprintf(pet_status_buf, sizeof(pet_status_buf),
+                    "%s  %s\nhappy %u  full %u  energy %u",
+                    pair.pet_name[0] ? pair.pet_name : "mochi",
+                    mname ? mname : "?",
+                    (unsigned)decayed.stats.happiness,
+                    (unsigned)decayed.stats.fullness,
+                    (unsigned)decayed.stats.energy);
+            }
             const bool mode_changed = dev_menu::tick(
                 epd,
                 pair.pet_id[0] != '\0',
                 pair.pet_name,
                 ota_update::current_version(),
                 s_net_ip, s_net_ssid,
-                (int)s_net_phase, batt_pct_now);
+                (int)s_net_phase, batt_pct_now,
+                pet_status_buf);
+            /* (LVGL is pumped by its own dispatcher task at ~33 Hz —
+             * see lvgl_port.cpp's lv_task. Polling here was too slow
+             * for drag-vs-tap discrimination during menu scrolling.) */
             if (dev_menu::active()) {
                 if (got_touch) {
-                    /* Action buttons (e.g. Settings → "open key portal")
-                     * are tappable rects on the active screen. A button
-                     * hit dispatches to its action; a miss exits the
-                     * wheel back to live as before. The wheel always
-                     * exits before the action fires so the action's UI
-                     * (key_portal, …) owns the screen cleanly. */
+                    /* Action buttons are LVGL widgets now — LVGL's
+                     * indev hit-tests them itself; dispatch_touch just
+                     * returns whatever click event fired (or None on a
+                     * miss). Pre-LVGL the menu was a hand-rolled
+                     * tap-rect list and any miss exited the wheel —
+                     * but with LVGL the user expects taps to stay in
+                     * the menu (so they can scroll lists, retry a
+                     * misaligned tap, etc.). Only exit when an actual
+                     * action fired, or when the user PWR-taps. */
                     const auto act = dev_menu::dispatch_touch(
                         (int)ev.x, (int)ev.y);
-                    dev_menu::exit_to_live();
-                    s_net_render_dirty = true;
+                    const bool action_fired =
+                        act != dev_menu::TouchResult::None;
+                    /* Placeholders (Memories / Places) display an
+                     * informational toast on tap but keep the menu up
+                     * — there's no commit to confirm and no destructive
+                     * effect to escape from. */
+                    const bool stays_in_menu =
+                        act == dev_menu::TouchResult::Memories ||
+                        act == dev_menu::TouchResult::Places;
+                    /* Only exit when a real action committed. A None
+                     * result means the user tapped a non-actionable
+                     * area (background, scroll gesture, etc.) and
+                     * the menu should stay up. */
+                    if (action_fired && !stays_in_menu) {
+                        dev_menu::exit_to_live();
+                        s_net_render_dirty = true;
+                    }
                     /* Small helper: show a one-line "restarting" toast
                      * before a reboot action so the tap gets visible
                      * feedback. */
@@ -1955,6 +2049,30 @@ extern "C" void app_main(void) {
                              * logged if offline. */
                             pet_sync_enter_place("home");
                             break;
+                        case dev_menu::TouchResult::Memories:
+                        case dev_menu::TouchResult::Places:
+                            /* MenuP1 placeholders — surfaced so the
+                             * page has shape while the substrate
+                             * memory ledger + world places list get
+                             * wired up. For now: brief toast straight
+                             * to e-paper, then force LVGL to repaint
+                             * its (still-loaded) menu screen so the
+                             * kid lands back on MenuP1 rather than a
+                             * stale toast frame. */
+                            ESP_LOGI(TAG, "dev_menu → %s (not yet wired)",
+                                act == dev_menu::TouchResult::Memories
+                                    ? "memories" : "places");
+                            epd_ui::clear(epd);
+                            epd_ui::draw_text_centered(epd, 84, 1,
+                                act == dev_menu::TouchResult::Memories
+                                    ? "Memories" : "Places");
+                            epd_ui::draw_text_centered(epd, 104, 1,
+                                "coming soon...");
+                            epd->EPD_Init_Partial();
+                            epd->EPD_DisplayPart();
+                            vTaskDelay(pdMS_TO_TICKS(1200));
+                            lvgl_port_force_full_refresh();
+                            break;
                         case dev_menu::TouchResult::WifiSwitch: {
                             /* Runtime switch to a stored network — no
                              * reboot (STA→STA). Blocks up to ~15 s on this
@@ -2004,18 +2122,21 @@ extern "C" void app_main(void) {
                         }
                         case dev_menu::TouchResult::None:
                         default:
-                            ESP_LOGI(TAG, "touch in dev_menu → exit to live");
+                            /* Touch missed all buttons (or hit a non-
+                             * actionable area). Stay in the menu —
+                             * pre-LVGL this was the "exit on miss"
+                             * path, but LVGL widgets need touches to
+                             * remain so users can re-aim, scroll, and
+                             * generally interact normally. */
                             break;
                     }
-                    /* Squelch this gesture: the `continue` below
-                     * already skips the live touch handler for THIS
-                     * tick. drain_next_touch covers the FT6336's
-                     * follow-up event (often a release pulse arriving
-                     * a tick later) so a Settings miss doesn't re-
-                     * register as a pet-body tap on the just-revealed
-                     * live render. */
+                    /* Either way, we've consumed this touch event for
+                     * the menu — clear got_touch so the live touch
+                     * handler (icons / pet-tap delight) doesn't also
+                     * see it on a miss. drain_next_touch swallows the
+                     * FT6336's follow-up release pulse on action exit. */
                     got_touch = false;
-                    drain_next_touch = true;
+                    if (action_fired) drain_next_touch = true;
                 }
                 continue;  /* dev_menu owns the screen */
             }
@@ -2342,7 +2463,7 @@ extern "C" void app_main(void) {
                         decayed.stats.happiness, decayed.stats.fullness,
                         decayed.stats.energy,
                         recent_engagement(slice, n, now_ms),
-                        s_thought_active ? s_active_thought.line1 : "(none)");
+                        s_thought_active ? s_active_thought.text : "(none)");
                     if (render_with_expression(render_name, false,
                             s_thought_active ? &s_active_thought : nullptr)) {
                         snprintf(last_resting_expr, sizeof(last_resting_expr),
@@ -2375,6 +2496,36 @@ extern "C" void app_main(void) {
         const pet_thought_t *tapped_thought =
             (z == Zone::Thought && s_thought_active) ? &s_active_thought : nullptr;
 
+        /* Passive-bubble pagination short-circuit (multi-page talk_seed
+         * echoes, future long mood readouts). When the kid taps a
+         * persistent passive bubble that still has pages to show,
+         * advance the page and re-render in place — skip the rest of
+         * the touch pipeline (no event log, no action expression, no
+         * 5s hold). On the LAST page, fall through to the normal
+         * Zone::Thought clear path (THOUGHT_SUPPRESS + memset) so the
+         * tap dismisses the bubble; control then continues through
+         * the !expr early-bail. */
+        if (tapped_thought &&
+            tapped_thought->action_kind == THOUGHT_ACTION_NONE) {
+            if (thought_has_more()) {
+                ESP_LOGI(TAG, "thought tap: advance page %d → %d",
+                    s_active_thought.page, s_active_thought.page + 1);
+                s_active_thought.page++;
+                render_with_expression(last_resting_expr, false,
+                                       &s_active_thought);
+                continue;
+            }
+            ESP_LOGI(TAG, "thought tap: dismiss passive bubble");
+            s_thought_suppress_until_ms = now_ms_wall() + THOUGHT_SUPPRESS_MS;
+            s_thought_active = false;
+            memset(&s_active_thought, 0, sizeof(s_active_thought));
+            /* Repaint the resting pet so the dismissed bubble vanishes
+             * immediately; the !expr path below already short-circuits
+             * the action-render pipeline for action_kind == NONE. */
+            render_with_expression(last_resting_expr, false, nullptr);
+            continue;
+        }
+
         /* Scene-pack zone hit-test (MPK1 build-time scene contract,
          * design/13/14). The pack itself decides what each tap means
          * via a typed action payload (event / nav_scene / nav_relative
@@ -2387,10 +2538,18 @@ extern "C" void app_main(void) {
          * the screen) or while the tap landed in the status-bar
          * stripe (no zones up there).
          *
-         * Forgiving snap: ZONE_SLOP_PX widens each rect by 16 px
-         * before we give up and fall through to corner-quadrant
-         * dispatch. The pet-body case is checked first so a pat near
-         * a zone doesn't get hijacked. */
+         * Forgiving snap: ZONE_SLOP_PX widens each rect by 16 px so a
+         * tap near (but not inside) an authored rect still resolves.
+         *
+         * Lenient overlap policy: scene zones win even when the tap
+         * lands inside the pet sprite's bounding box. The pet
+         * frequently sits over food/heart/play/door icons in scenes_a;
+         * a kid putting their finger on the food bowl shouldn't be
+         * pre-empted by "ah you tapped the pet". The pet is only
+         * resolved as the target if NO scene zone (with slop) and NO
+         * care icon hit. tapped_pet is still tracked for the pet-tap
+         * delight path below — but it's the LAST priority, not the
+         * first. */
         constexpr int ZONE_SLOP_PX = 16;
         const bool tapped_pet =
             (int)ev.x >= PET_DX && (int)ev.x <  PET_DX + (int)PET_CELL_W &&
@@ -2399,9 +2558,8 @@ extern "C" void app_main(void) {
         scene_pack_action_t scene_act = {};
         bool scene_hit = false;
         if (!tapped_thought && (int)ev.y >= STATUS_BAR_H) {
-            const int slop = tapped_pet ? 0 : ZONE_SLOP_PX;
             scene_hit = scene_pack_action_at(
-                (int16_t)ev.x, (int16_t)ev.y, slop, &scene_act);
+                (int16_t)ev.x, (int16_t)ev.y, ZONE_SLOP_PX, &scene_act);
         }
 
         const char *expr = tapped_thought
@@ -2463,18 +2621,19 @@ extern "C" void app_main(void) {
          *                  becomes the model's job.
          *
          *   voice idle:    pop a transient thought bubble carrying
-         *                  the seed text (truncated to fit the
-         *                  bubble's ~22-character budget). No care
-         *                  event lands; the bubble just decorates
-         *                  the next render and stays through the
-         *                  THOUGHT_SUPPRESS_MS window so the kid
-         *                  has time to read it.
+         *                  the raw seed text. The renderer's wrap
+         *                  + vertical-centre helper handles the
+         *                  layout (up to 3 × ~11-char lines fit in
+         *                  the bubble interior); longer seeds
+         *                  silently truncate at the third line. No
+         *                  care event lands; the bubble just
+         *                  decorates the next render and stays
+         *                  through the THOUGHT_SUPPRESS_MS window
+         *                  so the kid has time to read it.
          *
          * The seed pointer is borrowed from the embedded pack and
          * not NUL-terminated; copy it into a local buffer first. */
         static char  s_seed_buf[256];
-        static char  s_seed_line1[24];
-        static char  s_seed_line2[24];
         static pet_thought_t s_seed_thought;
         const pet_thought_t *seed_thought_ptr = nullptr;
         if (scene_hit && scene_act.kind == MPK_ACTION_TALK_SEED) {
@@ -2494,52 +2653,77 @@ extern "C" void app_main(void) {
                 voice::send_text(s_seed_buf);
                 expr = "thinking";
             } else {
-                /* Word-wrap the seed across the two-line bubble.
-                 * Bubble interior is ~92 px = ~11 scale-1 glyphs per
-                 * line. Try to break on a space near col 11; spill
-                 * to line 2; ellipsise overflow. This is intentionally
-                 * naive — talk_seed strings are short evocations
-                 * authored to fit. */
-                const int kPerLine = 11;
-                const int total = (int)strlen(s_seed_buf);
-                int br = (total > kPerLine) ? kPerLine : total;
-                if (total > kPerLine) {
-                    for (int i = kPerLine; i > kPerLine - 5 && i > 0; i--) {
-                        if (s_seed_buf[i] == ' ') { br = i; break; }
-                    }
-                }
-                snprintf(s_seed_line1, sizeof(s_seed_line1),
-                         "%.*s", br, s_seed_buf);
-                int after = br + (s_seed_buf[br] == ' ' ? 1 : 0);
-                int rem = total - after;
-                if (rem <= 0) {
-                    s_seed_line2[0] = '\0';
-                } else if (rem <= kPerLine) {
-                    snprintf(s_seed_line2, sizeof(s_seed_line2),
-                             "%s", s_seed_buf + after);
-                } else {
-                    /* Truncate with a trailing ellipsis (single dot
-                     * to save a column). */
-                    snprintf(s_seed_line2, sizeof(s_seed_line2),
-                             "%.*s.", kPerLine - 1, s_seed_buf + after);
-                }
                 memset(&s_seed_thought, 0, sizeof(s_seed_thought));
                 s_seed_thought.action_kind = THOUGHT_ACTION_NONE;
-                s_seed_thought.line1       = s_seed_line1;
-                s_seed_thought.line2       = s_seed_line2;
+                s_seed_thought.text        = s_seed_buf;
+                /* External speech echo — render with the spoken-style
+                 * triangle tail so it visually reads as "what mochi
+                 * would have said" rather than internal monologue. */
+                s_seed_thought.style       = THOUGHT_STYLE_SPOKEN;
                 seed_thought_ptr           = &s_seed_thought;
                 expr = "thinking";
             }
         }
 
+        /* Pet-tap delight + mood readout. The face rotates through a
+         * pool of expressive sprites (so a kid poking at the pet sees
+         * a reaction) AND a thought-style bubble surfaces the pet's
+         * current dominant mood/need ("hungry...", "miss u...", etc.)
+         * for the 5-second tap hold. The bubble is passive — no event
+         * dispatch, no tap target — it's an at-a-glance "how is mochi
+         * feeling?" answer. EVENT_COMFORTED still lands on the event
+         * log below, so a pat actually comforts the pet.
+         *
+         * Used in two places below: the zoned-scene fallthrough
+         * (no zone hit + tap on pet), and the unzoned-scene
+         * Zone::Center path. */
+        static const char *const DELIGHT_EXPRS[] = {
+            "curious", "cheerful_wave", "excited",
+            "comforted", "thinking",
+        };
+        constexpr int DELIGHT_N = (int)(sizeof(DELIGHT_EXPRS) /
+                                        sizeof(DELIGHT_EXPRS[0]));
+        static int s_delight_idx = 0;
+        static pet_thought_t s_petmood_thought;
+        auto pick_delight = [&]() -> const char * {
+            const char *e = DELIGHT_EXPRS[s_delight_idx % DELIGHT_N];
+            s_delight_idx++;
+            /* Mood bubble piggy-backs on the same transient seed-bubble
+             * channel: the renderer draws it above the pet during the
+             * 5-s tap hold, then the post-hold render_resting() clears
+             * it (its own thought_generate runs against fresh state).
+             * Don't overwrite a talk_seed bubble that already claimed
+             * seed_thought_ptr — talk_seed is the louder signal. */
+            if (!seed_thought_ptr) {
+                pet_event_t slice[12];
+                size_t n = event_log_load_recent(slice, 12);
+                int64_t pmoment = now_ms_wall();
+                pet_t decayed = current_pet_decayed(pmoment);
+                thought_for_pet_tap(&decayed, slice, n, pmoment,
+                                    &s_petmood_thought);
+                seed_thought_ptr = &s_petmood_thought;
+            }
+            return e;
+        };
+
         /* When the current scene has authored zones, the corner-
          * quadrant fallback is suppressed: a tap that misses every
-         * zone (after the snap fallback above) resolves to either
-         * "comforted" (tap landed on the pet body — a pat) or
-         * "curious" (empty scene background). */
+         * zone (after the snap fallback above) resolves to either a
+         * delight expression (pet body — a pat) or "curious" (empty
+         * scene background). */
         const bool zoned = scene_pack_current_has_zones();
         if (zoned && !scene_hit && !tapped_thought) {
-            expr = tapped_pet ? "comforted" : "curious";
+            expr = tapped_pet ? pick_delight() : "curious";
+        }
+
+        /* Unzoned scene + tap on the pet body resolves to a delight
+         * expression too — the legacy zone_to_expr returned "curious"
+         * for Zone::Center, which is fine for non-pet centre taps but
+         * pre-empted the pet-tap delight intent on a tap that landed
+         * on the pet. */
+        if (!zoned && !scene_hit && !tapped_thought &&
+            z == Zone::Center && tapped_pet) {
+            expr = pick_delight();
         }
 
         /* event-kind zones: derive expr from the pack-supplied
@@ -2616,12 +2800,14 @@ extern "C" void app_main(void) {
         /* (Voice start/stop is handled up-front via the status-bar mic
          * affordance — see the voice-control block above. design/23.) */
 
-        /* Thought-bubble tap: suppress further bubble renders for
-         * THOUGHT_SUPPRESS_MS so the same need can't re-surface
-         * locally before the substrate confirms. Clear the active
-         * thought so the subsequent post-hold render_resting() sees
-         * a clean slate (it will re-evaluate the predicate against
-         * the updated substrate snapshot). */
+        /* Thought-bubble tap, action-bubble branch only. The passive-
+         * bubble branch (action_kind == NONE: pagination advance or
+         * last-page dismiss) is handled earlier, right after we
+         * classify the zone, so it can short-circuit before the
+         * !expr continue further down. By the time control reaches
+         * here for a Zone::Thought tap, the bubble must be an
+         * action bubble (thought_action_to_expr returned a non-NULL
+         * expr); commit the action and clear the bubble. */
         if (z == Zone::Thought) {
             s_thought_suppress_until_ms = now_ms + THOUGHT_SUPPRESS_MS;
             s_thought_active = false;
@@ -2645,10 +2831,52 @@ extern "C" void app_main(void) {
             s_thought_suppress_until_ms = now_ms_wall() + THOUGHT_SUPPRESS_MS;
         }
 
-        /* Hold the expression for ~5 s. We block here rather than
-         * scheduling a timer so the next touch event sees a quiet
-         * pet, not a half-finished transition. */
-        vTaskDelay(pdMS_TO_TICKS(RESTING_AFTER_TAP_MS));
+        /* Pagination promotion — the renderer just rendered page 0
+         * of seed_thought_ptr; if its text wrapped past one page,
+         * thought_has_more() is latched true. Promote the seed
+         * bubble into s_active_thought with persistent=true so it
+         * survives the post-hold render_resting (which would
+         * otherwise clear it) and the next Zone::Thought tap
+         * advances pages via the handler above. Skip the 5s hold +
+         * resting transition — the bubble now owns the screen
+         * until the kid taps through. */
+        if (seed_thought_ptr && thought_has_more()) {
+            ESP_LOGI(TAG, "thought overflow: promote seed bubble → persistent");
+            memcpy(&s_active_thought, seed_thought_ptr, sizeof(s_active_thought));
+            s_active_thought.page       = 0;
+            s_active_thought.persistent = true;
+            s_thought_active = true;
+            continue;
+        }
+
+        /* Hold the expression for ~5 s, but in small slices so we can
+         * still service a PWR-tap-to-sleep gesture mid-hold. The
+         * sleep_gesture watcher only waits HANDOFF_GRACE_MS (1500 ms)
+         * before falling back to a bare "Asleep / PWR to wake" text
+         * render — if we block here for the full 5 s the rich
+         * pet-on-scene asleep image never lands. Polling every
+         * 100 ms is well within the grace window and cheap.
+         *
+         * On a mid-hold sleep request: claim it, render the rich
+         * asleep frame, commit. commit_sleep doesn't return. */
+        {
+            constexpr int CHUNK_MS = 100;
+            int remaining = RESTING_AFTER_TAP_MS;
+            while (remaining > 0) {
+                vTaskDelay(pdMS_TO_TICKS(CHUNK_MS));
+                remaining -= CHUNK_MS;
+                if (sleep_gesture::requested()) {
+                    sleep_gesture::mark_handled();
+                    ESP_LOGI(TAG, "sleep requested mid-tap-hold → render asleep");
+                    device_diag_event(DIAG_INFO, "sleep",
+                        "PWR tap (mid-hold) → sleep", nullptr);
+                    device_diag_flush();
+                    render_asleep("Asleep - PWR to wake");
+                    sleep_gesture::commit_sleep();
+                    /* Unreachable. */
+                }
+            }
+        }
 
         /* Settle back to the substrate's current resting expression
          * — driven by project_mood over the dev pet's decayed stats
