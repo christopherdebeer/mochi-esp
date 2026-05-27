@@ -59,14 +59,24 @@ typedef enum {
  * centres inside the bubble interior. Greedy break on space; honours
  * '\n' as a hard line break so producers can force a split where
  * the wording calls for it ("sleepy...\ntap sleep" stays as two
- * conceptual lines regardless of width). Up to three lines fit in
- * the bubble's 36-px interior. */
+ * conceptual lines regardless of width). When the wrap overflows
+ * the bubble's per-page line budget the renderer trails the last
+ * visible line with "..." and surfaces overflow via
+ * thought_has_more(); callers route a Zone::Thought tap to bump
+ * `page` (passive bubbles only) until the last page is reached, at
+ * which point the next tap dismisses. */
 typedef struct {
     thought_action_kind_t action_kind;
     event_kind_t          action_event;   /* CARE_EVENT only */
     const char           *text;           /* body — wrapped + centred at render */
     int64_t               expires_at_ms;  /* 0 = lifetime tied to need */
     thought_style_t       style;          /* visual register; default = THOUGHT */
+    int                   page;           /* 0-indexed; only meaningful for passive bubbles */
+    bool                  persistent;     /* true = caller pinned this bubble; the auto-
+                                           * generate path (thought_generate inside the
+                                           * resting render) must not overwrite or clear
+                                           * it. Used by multi-page talk_seed echoes that
+                                           * need to outlive a single tap hold. */
 } pet_thought_t;
 
 /* Tap hit rectangle, panel coordinates. Half-open: [x0, x1) × [y0, y1). */
@@ -122,6 +132,17 @@ void thought_render(uint8_t *dst, size_t dst_w, size_t dst_h,
  * (returns false). Used by the touch classify path so a callsite
  * doesn't have to inline the bounds check. */
 bool thought_hit_contains(const thought_hit_rect_t *r, int x, int y);
+
+/* True iff the most-recent thought_render() ran out of vertical
+ * room — i.e. the rendered `page` exposed fewer lines than the
+ * text would wrap to total. The render also painted "..." at the
+ * end of the last visible line as the visual cue. Callers (the
+ * Zone::Thought tap handler) consult this to decide whether the
+ * next tap should bump the page (more to read) or dismiss (last
+ * page reached). Only meaningful for passive bubbles
+ * (action_kind == THOUGHT_ACTION_NONE) — action bubbles use the
+ * tap for the action itself, never pagination. */
+bool thought_has_more(void);
 
 #ifdef __cplusplus
 }  /* extern "C" */

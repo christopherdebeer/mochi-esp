@@ -1417,14 +1417,17 @@ extern "C" void app_main(void) {
         age_t a = compute_age(decayed.born_at, now_ms);
         sprite_key_t sk = resolve_sprite(&decayed, m, a.stage, now_ms);
 
-        /* M11.5a — compute the active thought for this render. The
-         * suppression window keeps the same need from re-firing
-         * locally before the substrate confirms; outside the
-         * window, the predicate chain in thought_generate is the
-         * only gate. */
+        /* M11.5a — compute the active thought for this render. A
+         * pinned `persistent` bubble (multi-page talk_seed echo)
+         * survives intact; otherwise the predicate chain in
+         * thought_generate is the only gate, modulo the post-tap
+         * suppression window that keeps a freshly-cleared need
+         * from re-firing locally before the substrate confirms. */
         const pet_thought_t *thought_ptr = nullptr;
-        if (now_ms >= s_thought_suppress_until_ms &&
-            thought_generate(&decayed, now_ms, &s_active_thought)) {
+        if (s_thought_active && s_active_thought.persistent) {
+            thought_ptr = &s_active_thought;
+        } else if (now_ms >= s_thought_suppress_until_ms &&
+                   thought_generate(&decayed, now_ms, &s_active_thought)) {
             s_thought_active = true;
             thought_ptr = &s_active_thought;
         } else {
@@ -2460,6 +2463,36 @@ extern "C" void app_main(void) {
         const pet_thought_t *tapped_thought =
             (z == Zone::Thought && s_thought_active) ? &s_active_thought : nullptr;
 
+        /* Passive-bubble pagination short-circuit (multi-page talk_seed
+         * echoes, future long mood readouts). When the kid taps a
+         * persistent passive bubble that still has pages to show,
+         * advance the page and re-render in place — skip the rest of
+         * the touch pipeline (no event log, no action expression, no
+         * 5s hold). On the LAST page, fall through to the normal
+         * Zone::Thought clear path (THOUGHT_SUPPRESS + memset) so the
+         * tap dismisses the bubble; control then continues through
+         * the !expr early-bail. */
+        if (tapped_thought &&
+            tapped_thought->action_kind == THOUGHT_ACTION_NONE) {
+            if (thought_has_more()) {
+                ESP_LOGI(TAG, "thought tap: advance page %d → %d",
+                    s_active_thought.page, s_active_thought.page + 1);
+                s_active_thought.page++;
+                render_with_expression(last_resting_expr, false,
+                                       &s_active_thought);
+                continue;
+            }
+            ESP_LOGI(TAG, "thought tap: dismiss passive bubble");
+            s_thought_suppress_until_ms = now_ms_wall() + THOUGHT_SUPPRESS_MS;
+            s_thought_active = false;
+            memset(&s_active_thought, 0, sizeof(s_active_thought));
+            /* Repaint the resting pet so the dismissed bubble vanishes
+             * immediately; the !expr path below already short-circuits
+             * the action-render pipeline for action_kind == NONE. */
+            render_with_expression(last_resting_expr, false, nullptr);
+            continue;
+        }
+
         /* Scene-pack zone hit-test (MPK1 build-time scene contract,
          * design/13/14). The pack itself decides what each tap means
          * via a typed action payload (event / nav_scene / nav_relative
@@ -2734,12 +2767,14 @@ extern "C" void app_main(void) {
         /* (Voice start/stop is handled up-front via the status-bar mic
          * affordance — see the voice-control block above. design/23.) */
 
-        /* Thought-bubble tap: suppress further bubble renders for
-         * THOUGHT_SUPPRESS_MS so the same need can't re-surface
-         * locally before the substrate confirms. Clear the active
-         * thought so the subsequent post-hold render_resting() sees
-         * a clean slate (it will re-evaluate the predicate against
-         * the updated substrate snapshot). */
+        /* Thought-bubble tap, action-bubble branch only. The passive-
+         * bubble branch (action_kind == NONE: pagination advance or
+         * last-page dismiss) is handled earlier, right after we
+         * classify the zone, so it can short-circuit before the
+         * !expr continue further down. By the time control reaches
+         * here for a Zone::Thought tap, the bubble must be an
+         * action bubble (thought_action_to_expr returned a non-NULL
+         * expr); commit the action and clear the bubble. */
         if (z == Zone::Thought) {
             s_thought_suppress_until_ms = now_ms + THOUGHT_SUPPRESS_MS;
             s_thought_active = false;
@@ -2761,6 +2796,24 @@ extern "C" void app_main(void) {
         if (!render_with_expression(expr, false, seed_thought_ptr)) continue;
         if (seed_thought_ptr) {
             s_thought_suppress_until_ms = now_ms_wall() + THOUGHT_SUPPRESS_MS;
+        }
+
+        /* Pagination promotion — the renderer just rendered page 0
+         * of seed_thought_ptr; if its text wrapped past one page,
+         * thought_has_more() is latched true. Promote the seed
+         * bubble into s_active_thought with persistent=true so it
+         * survives the post-hold render_resting (which would
+         * otherwise clear it) and the next Zone::Thought tap
+         * advances pages via the handler above. Skip the 5s hold +
+         * resting transition — the bubble now owns the screen
+         * until the kid taps through. */
+        if (seed_thought_ptr && thought_has_more()) {
+            ESP_LOGI(TAG, "thought overflow: promote seed bubble → persistent");
+            memcpy(&s_active_thought, seed_thought_ptr, sizeof(s_active_thought));
+            s_active_thought.page       = 0;
+            s_active_thought.persistent = true;
+            s_thought_active = true;
+            continue;
         }
 
         /* Hold the expression for ~5 s. We block here rather than

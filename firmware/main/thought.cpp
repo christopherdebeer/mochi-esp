@@ -50,7 +50,8 @@ static const int HIT_PAD       = 6;      /* enlarge tap target on every side */
 /* Text layout — fixed-width font8x8, so chars-per-line = pixels/8.
  * The renderer word-wraps `text` greedily on spaces (honouring '\n'
  * as a hard break) and vertically centres the resulting block inside
- * the bubble's interior rect. */
+ * the bubble's interior rect. Lines past the page budget overflow
+ * to the next page (caller bumps pet_thought_t.page on tap). */
 static const int GLYPH_W   = 8;
 static const int GLYPH_H   = 8;
 static const int LINE_GAP  = 2;
@@ -58,6 +59,14 @@ static const int LINE_H    = GLYPH_H + LINE_GAP;       /* 10 */
 static const int TEXT_PAD_X = 2;                       /* keep 2 px clear of the L/R border */
 static const int TEXT_PAD_Y = 2;                       /* keep 2 px clear of the T/B border */
 static const int MAX_TEXT_LINES = 3;                   /* 3 × 10 = 30 px fits in 36-px box */
+static const int MAX_TOTAL_LINES = 16;                 /* upper bound across all pages (~5 pages worth) */
+static const int ACTION_ICON_RESERVE_PX = 10;          /* bottom row when action_kind != NONE */
+
+/* Overflow latch — written by blit_text_wrapped, read by callers
+ * via thought_has_more(). Module-scope so thought_render can stay
+ * `void` (callers don't need a return path; just consult the latch
+ * after the call). */
+static bool s_has_more = false;
 
 /* ─── Framebuffer helpers ──────────────────────────────────────────
  *
@@ -111,6 +120,151 @@ static void draw_vline_black(uint8_t *dst, size_t dst_w, size_t dst_h,
     for (int y = y0; y < y1; y++) pixel_black(dst, stride, x, y);
 }
 
+/* ─── Cloud-shape geometry (THOUGHT_STYLE_THOUGHT only) ──────────────
+ *
+ * The cloud is modelled as the UNION of (1) the central bubble rect
+ * and (2) a ring of small filled discs around its perimeter. Each
+ * disc protrudes ~r pixels outward; adjacent discs overlap slightly
+ * so the union outline reads as a continuous scalloped curve. The
+ * bottom-centre has a gap (no disc near x=100) so the trailing
+ * thought-dots can emerge cleanly from the cloud's underside.
+ *
+ * Render is brute-force: for every pixel in the cloud bounding box
+ * we test "inside cloud?" via inside_cloud(); the interior fills
+ * with paper-white and the boundary (interior pixel whose 4-neighbour
+ * is exterior) draws black. ~50×50 px × ~20 disc checks per pixel
+ * is a few hundred kilo-ops per render — negligible on ESP32, and
+ * we only re-render when the bubble actually shows. */
+
+struct cloud_disc { int8_t cx, cy, r; };
+
+/* Disc positions tuned for the 92×36 central rect. Stagger the
+ * vertical offsets slightly between adjacent top/bottom discs so
+ * the silhouette doesn't read as a perfect grid of bumps. */
+static const struct cloud_disc CLOUD_DISCS[] = {
+    /* Top row — six bumps along y ≈ BUBBLE_Y0-2 = 40. */
+    { 60, 40, 4 }, { 72, 39, 4 }, { 86, 40, 4 },
+    {114, 40, 4 }, {128, 39, 4 }, {140, 40, 4 },
+    /* Right side. */
+    {148, 50, 4 }, {148, 60, 4 }, {148, 70, 4 },
+    /* Bottom row — gap around x=100 for the trailing thought tail. */
+    {140, 80, 4 }, {128, 81, 4 }, {114, 80, 4 },
+    { 86, 80, 4 }, { 72, 81, 4 }, { 60, 80, 4 },
+    /* Left side. */
+    { 52, 70, 4 }, { 52, 60, 4 }, { 52, 50, 4 },
+};
+static const int CLOUD_DISC_COUNT =
+    (int)(sizeof(CLOUD_DISCS) / sizeof(CLOUD_DISCS[0]));
+
+/* True iff (x, y) is inside the union (central rect ∪ all discs).
+ * Used by both the fill pass and the border-detection pass. */
+static inline bool inside_cloud(int x, int y) {
+    if (x >= BUBBLE_X0 && x < BUBBLE_X1 &&
+        y >= BUBBLE_Y0 && y < BUBBLE_Y1) return true;
+    for (int i = 0; i < CLOUD_DISC_COUNT; i++) {
+        const int dx = x - CLOUD_DISCS[i].cx;
+        const int dy = y - CLOUD_DISCS[i].cy;
+        const int r  = CLOUD_DISCS[i].r;
+        if (dx * dx + dy * dy <= r * r) return true;
+    }
+    return false;
+}
+
+/* Paint the cloud silhouette: paper-white interior, black scalloped
+ * border. Caller is responsible for the trailing tail dots, which
+ * sit outside the cloud's bounding box and have their own draw
+ * code. */
+static void draw_cloud_silhouette(uint8_t *dst, size_t dst_w, size_t dst_h) {
+    const int xb0 = BUBBLE_X0 - 8;
+    const int xb1 = BUBBLE_X1 + 8;
+    const int yb0 = BUBBLE_Y0 - 8;
+    const int yb1 = BUBBLE_Y1 + 8;
+    const size_t stride = (dst_w + 7) >> 3;
+
+    /* Phase 1: fill the interior with paper. */
+    for (int y = yb0; y < yb1; y++) {
+        if (y < 0 || y >= (int)dst_h) continue;
+        for (int x = xb0; x < xb1; x++) {
+            if (x < 0 || x >= (int)dst_w) continue;
+            if (inside_cloud(x, y)) pixel_white(dst, stride, x, y);
+        }
+    }
+    /* Phase 2: trace the boundary — interior pixel with at least one
+     * 4-neighbour outside the cloud. */
+    for (int y = yb0; y < yb1; y++) {
+        if (y < 0 || y >= (int)dst_h) continue;
+        for (int x = xb0; x < xb1; x++) {
+            if (x < 0 || x >= (int)dst_w) continue;
+            if (!inside_cloud(x, y)) continue;
+            if (!inside_cloud(x - 1, y) || !inside_cloud(x + 1, y) ||
+                !inside_cloud(x, y - 1) || !inside_cloud(x, y + 1)) {
+                pixel_black(dst, stride, x, y);
+            }
+        }
+    }
+}
+
+/* ─── Inline action icons (CARE_EVENT only) ─────────────────────────
+ *
+ * 8×8 1bpp glyphs, one per event_kind_t the bubble might carry.
+ * Each row is a byte; bit 7 = leftmost column, bit set = ink.
+ * Rendered at fixed bottom-centre of the bubble interior when
+ * action_kind == CARE_EVENT (the only kind today that actually
+ * needs a "do X" affordance — passive bubbles get no icon, and
+ * TALK_SEED / NAVIGATE land on this path only via future producers).
+ * Icons are intentionally chunky at 8×8 — readable at the panel's
+ * 1:1 device-pixel scale without antialiasing tricks the 1-bit
+ * pipeline can't represent. */
+typedef struct { event_kind_t k; const uint8_t rows[8]; } action_icon_t;
+
+static const action_icon_t ACTION_ICONS[] = {
+    /* SLEPT — uppercase "Z" (universal "asleep"). */
+    { EVENT_SLEPT,    { 0xFC, 0x04, 0x08, 0x10, 0x20, 0x40, 0xFC, 0x00 } },
+    /* WOKE — upward arrow (rising / waking). */
+    { EVENT_WOKE,     { 0x10, 0x38, 0x54, 0x10, 0x10, 0x10, 0x10, 0x10 } },
+    /* FED — bowl with food. */
+    { EVENT_FED,      { 0x00, 0xFE, 0x82, 0x82, 0x44, 0x7C, 0x38, 0x00 } },
+    /* PLAYED — ball with stitching. */
+    { EVENT_PLAYED,   { 0x78, 0x84, 0xB4, 0xB4, 0x84, 0x78, 0x00, 0x00 } },
+    /* COMFORTED — heart. */
+    { EVENT_COMFORTED,{ 0x6C, 0xFE, 0xFE, 0x7C, 0x38, 0x10, 0x00, 0x00 } },
+    /* CHEERED — exclamation. */
+    { EVENT_CHEERED,  { 0x10, 0x10, 0x10, 0x10, 0x10, 0x00, 0x10, 0x00 } },
+    /* HUGGED — "X" (crossed arms). */
+    { EVENT_HUGGED,   { 0x81, 0x42, 0x24, 0x18, 0x18, 0x24, 0x42, 0x81 } },
+    /* TALKED — speech wave (mouth). */
+    { EVENT_TALKED,   { 0x00, 0x7C, 0x82, 0x82, 0xAA, 0x7C, 0x00, 0x00 } },
+    /* TAPPED — finger pointing down (tap). */
+    { EVENT_TAPPED,   { 0x10, 0x10, 0x50, 0x54, 0x54, 0x7C, 0x38, 0x38 } },
+};
+static const int ACTION_ICON_COUNT =
+    (int)(sizeof(ACTION_ICONS) / sizeof(ACTION_ICONS[0]));
+
+static const uint8_t *icon_for_event(event_kind_t k) {
+    for (int i = 0; i < ACTION_ICON_COUNT; i++) {
+        if (ACTION_ICONS[i].k == k) return ACTION_ICONS[i].rows;
+    }
+    return NULL;
+}
+
+/* Blit an 8×8 icon at the given top-left, set bits draw ink. */
+static void blit_icon_8x8(uint8_t *dst, size_t dst_w, size_t dst_h,
+                          const uint8_t *rows, int x_left, int y_top) {
+    const size_t stride = (dst_w + 7) >> 3;
+    for (int row = 0; row < 8; row++) {
+        const uint8_t bits = rows[row];
+        for (int col = 0; col < 8; col++) {
+            /* bit 7 = leftmost column (MSB-first within byte). */
+            if (!((bits >> (7 - col)) & 1)) continue;
+            const int px = x_left + col;
+            const int py = y_top + row;
+            if (px < 0 || py < 0 ||
+                px >= (int)dst_w || py >= (int)dst_h) continue;
+            pixel_black(dst, stride, px, py);
+        }
+    }
+}
+
 /* Centered scale-1 glyph blit. Mirrors the inline pattern in
  * main.cpp's render_chrome — bit 0 of each row is the leftmost
  * column, set bits draw black, unset bits leave the framebuffer
@@ -138,20 +292,31 @@ static void blit_text_centered(uint8_t *dst, size_t dst_w, size_t dst_h,
     }
 }
 
-/* Word-wrap + vertically-centre a single string inside the bubble's
- * interior rect [box_y0, box_y1). Greedy break on space; '\n' is a
- * hard break. Fixed-width font lets us pre-compute char-budget per
- * line (max_chars = (box_x1 - box_x0) / GLYPH_W). At most
- * MAX_TEXT_LINES lines render; excess content silently truncates.
+/* Word-wrap + vertically-centre a paged slice of a single string
+ * inside the bubble's interior rect [box_y0, box_y1).
  *
- * Each line is horizontally centred on (box_x0+box_x1)/2 via the
- * existing blit_text_centered (it owns the per-glyph blit math).
- * Lines are stacked top-to-bottom; the whole block centres on the
- * vertical midpoint of the interior. */
+ *   - Greedy break on space; '\n' is a hard break.
+ *   - Fixed-width font → max_chars per line = interior_w / GLYPH_W.
+ *   - Wraps the FULL string into up to MAX_TOTAL_LINES line spans,
+ *     then renders the slice [page * lines_per_page,
+ *     (page+1) * lines_per_page).
+ *   - `reserved_bottom_px` shrinks the interior height (used by the
+ *     action-icon row so text doesn't overlap the icon).
+ *   - When the page-end exposes fewer lines than wrapped total, the
+ *     last visible line gets a trailing "..." (truncating the line
+ *     content if needed to fit) and the module-scope s_has_more
+ *     latch is raised — tap handlers consult thought_has_more() to
+ *     decide between "advance page" and "dismiss".
+ *
+ * Returns silently if `text` is empty; the latch is cleared at the
+ * top so a previous call's overflow doesn't leak into the next.
+ */
 static void blit_text_wrapped(uint8_t *dst, size_t dst_w, size_t dst_h,
                               const char *text,
                               int box_x0, int box_y0,
-                              int box_x1, int box_y1) {
+                              int box_x1, int box_y1,
+                              int page, int reserved_bottom_px) {
+    s_has_more = false;
     if (!text || !*text) return;
     const int interior_w = (box_x1 - TEXT_PAD_X) - (box_x0 + TEXT_PAD_X);
     if (interior_w < GLYPH_W) return;
@@ -163,16 +328,14 @@ static void blit_text_wrapped(uint8_t *dst, size_t dst_w, size_t dst_h,
     const int max_chars = max_chars_int < (LINE_BUF - 1)
         ? max_chars_int : (LINE_BUF - 1);
 
-    /* Phase 1: scan + layout. Walk the source string, emitting line
-     * boundaries when a hard break ('\n') lands or when the next word
-     * would push past max_chars. Long single words hard-break at
-     * max_chars rather than overflow. */
-    struct { int start; int len; } lines[MAX_TEXT_LINES];
-    int n_lines = 0;
+    /* Phase 1: scan the FULL string into line spans (not just the
+     * current page's worth), so we can compute total_pages + the
+     * has_more latch correctly. */
+    struct { int start; int len; } lines[MAX_TOTAL_LINES];
+    int total_lines = 0;
     const int total = (int)strlen(text);
     int i = 0;
-    while (i < total && n_lines < MAX_TEXT_LINES) {
-        /* Skip leading whitespace (between-line spaces don't render). */
+    while (i < total && total_lines < MAX_TOTAL_LINES) {
         while (i < total && text[i] == ' ') i++;
         if (i >= total) break;
         const int line_start = i;
@@ -186,42 +349,83 @@ static void blit_text_wrapped(uint8_t *dst, size_t dst_w, size_t dst_h,
         if (j >= total || text[j] == '\n') {
             line_end = j;
         } else if (last_space_at > line_start) {
-            /* Hit width with a space available — break there so the
-             * next word stays whole on the next line. */
             line_end = last_space_at;
         } else {
-            /* Single word longer than the line width — hard-break it.
-             * Visually ugly but better than silently dropping. */
+            /* Single word longer than the line — hard-break. */
             line_end = j;
         }
-        lines[n_lines].start = line_start;
-        lines[n_lines].len   = line_end - line_start;
-        n_lines++;
+        lines[total_lines].start = line_start;
+        lines[total_lines].len   = line_end - line_start;
+        total_lines++;
         i = line_end;
         if (i < total && (text[i] == ' ' || text[i] == '\n')) i++;
     }
-    if (n_lines == 0) return;
+    if (total_lines == 0) return;
 
-    /* Phase 2: vertical centring. block_h = N×LINE_H minus the
-     * trailing gap (the bottom line doesn't need padding under it).
-     * Clamp start to the interior so a 3-line block never punches
-     * the bottom border. */
-    const int block_h = n_lines * LINE_H - LINE_GAP;
+    /* Phase 2: compute the page slice. Interior height after the
+     * action-icon reserve dictates how many lines fit per page.
+     * Clamp to MAX_TEXT_LINES so the bubble never tries to cram
+     * more than its hardware limit. */
     const int interior_top = box_y0 + TEXT_PAD_Y;
-    const int interior_bot = box_y1 - TEXT_PAD_Y;
+    const int interior_bot = box_y1 - TEXT_PAD_Y - reserved_bottom_px;
     const int interior_h   = interior_bot - interior_top;
+    if (interior_h < GLYPH_H) return;
+    int lines_per_page = (interior_h + LINE_GAP) / LINE_H;
+    if (lines_per_page < 1) lines_per_page = 1;
+    if (lines_per_page > MAX_TEXT_LINES) lines_per_page = MAX_TEXT_LINES;
+
+    /* Clamp page to [0, total_pages-1]. Caller may have bumped it
+     * past the end on a stale tap; degrade gracefully to the last
+     * page rather than rendering an empty bubble. */
+    const int total_pages =
+        (total_lines + lines_per_page - 1) / lines_per_page;
+    int p = page;
+    if (p < 0) p = 0;
+    if (p >= total_pages) p = total_pages - 1;
+
+    const int slice_start = p * lines_per_page;
+    int slice_end = slice_start + lines_per_page;
+    if (slice_end > total_lines) slice_end = total_lines;
+    const int n_visible = slice_end - slice_start;
+    if (n_visible <= 0) return;
+
+    /* There's more content past this page iff we're not on the last
+     * page. The last visible line on a non-last page gets a "..."
+     * suffix as the overflow cue. */
+    const bool more = (p < total_pages - 1);
+    s_has_more = more;
+
+    /* Vertical centring of the visible slice inside the (shrunk)
+     * interior — same math as the original, just over n_visible
+     * rather than total_lines. */
+    const int block_h = n_visible * LINE_H - LINE_GAP;
     int start_y = interior_top + (interior_h - block_h) / 2;
     if (start_y < interior_top) start_y = interior_top;
 
-    /* Phase 3: blit each line. Copy into a temp buffer so the existing
-     * blit_text_centered (which expects a NUL-terminated string) can
-     * consume the substring without us reaching into its internals. */
+    /* Phase 3: blit each visible line. For the last line on a
+     * not-last page, splice "..." onto the end — truncating the
+     * payload chars if needed so the total fits the line budget. */
+    static const char ELLIPSIS[] = "...";
+    const int ELLIPSIS_LEN = (int)(sizeof(ELLIPSIS) - 1);
     const int cx = (box_x0 + box_x1) / 2;
-    for (int li = 0; li < n_lines; li++) {
+    for (int li = 0; li < n_visible; li++) {
         char tmp[LINE_BUF];
-        int len = lines[li].len;
+        const int span_idx = slice_start + li;
+        int len = lines[span_idx].len;
         if (len > LINE_BUF - 1) len = LINE_BUF - 1;
-        memcpy(tmp, text + lines[li].start, (size_t)len);
+        memcpy(tmp, text + lines[span_idx].start, (size_t)len);
+        const bool is_last_visible = (li == n_visible - 1);
+        if (is_last_visible && more) {
+            /* Ensure "..." fits — trim payload + any trailing space. */
+            int keep = max_chars - ELLIPSIS_LEN;
+            if (keep < 0) keep = 0;
+            if (len > keep) len = keep;
+            while (len > 0 && tmp[len - 1] == ' ') len--;
+            int copy_n = ELLIPSIS_LEN;
+            if (copy_n > LINE_BUF - 1 - len) copy_n = LINE_BUF - 1 - len;
+            memcpy(tmp + len, ELLIPSIS, (size_t)copy_n);
+            len += copy_n;
+        }
         tmp[len] = '\0';
         const int y_top = start_y + li * LINE_H;
         blit_text_centered(dst, dst_w, dst_h, tmp, cx, y_top);
@@ -307,20 +511,21 @@ extern "C" void thought_render(uint8_t *dst, size_t dst_w, size_t dst_h,
                                thought_hit_rect_t *out_hit) {
     if (!dst || !thought) return;
 
-    /* Interior fill — paper-white inside the bubble. Anything the
-     * scene or pet had drawn here gets covered; the bubble owns
-     * this rect. */
-    fill_rect_white(dst, dst_w, dst_h,
-                    BUBBLE_X0, BUBBLE_Y0, BUBBLE_X1, BUBBLE_Y1);
-
-    /* 1-px border with chamfered corners. Top + bottom horizontals
-     * are 1 pixel shorter on each side; left + right verticals are
-     * 1 pixel shorter on each end. No per-corner pixels are drawn,
-     * which reads as a soft rounded shape at this scale. */
-    draw_hline_black(dst, dst_w, dst_h, BUBBLE_X0 + 1, BUBBLE_X1 - 1, BUBBLE_Y0);
-    draw_hline_black(dst, dst_w, dst_h, BUBBLE_X0 + 1, BUBBLE_X1 - 1, BUBBLE_Y1 - 1);
-    draw_vline_black(dst, dst_w, dst_h, BUBBLE_X0, BUBBLE_Y0 + 1, BUBBLE_Y1 - 1);
-    draw_vline_black(dst, dst_w, dst_h, BUBBLE_X1 - 1, BUBBLE_Y0 + 1, BUBBLE_Y1 - 1);
+    /* Silhouette: speech bubbles get the classic chamfered rectangle;
+     * thought bubbles get the scalloped cloud outline (paper-white
+     * fill across the union of the central rect + the perimeter
+     * discs, then the boundary traced in black). */
+    if (thought->style == THOUGHT_STYLE_SPOKEN) {
+        fill_rect_white(dst, dst_w, dst_h,
+                        BUBBLE_X0, BUBBLE_Y0, BUBBLE_X1, BUBBLE_Y1);
+        /* 1-px border with chamfered corners. */
+        draw_hline_black(dst, dst_w, dst_h, BUBBLE_X0 + 1, BUBBLE_X1 - 1, BUBBLE_Y0);
+        draw_hline_black(dst, dst_w, dst_h, BUBBLE_X0 + 1, BUBBLE_X1 - 1, BUBBLE_Y1 - 1);
+        draw_vline_black(dst, dst_w, dst_h, BUBBLE_X0, BUBBLE_Y0 + 1, BUBBLE_Y1 - 1);
+        draw_vline_black(dst, dst_w, dst_h, BUBBLE_X1 - 1, BUBBLE_Y0 + 1, BUBBLE_Y1 - 1);
+    } else {
+        draw_cloud_silhouette(dst, dst_w, dst_h);
+    }
 
     /* Tail — two visual registers:
      *
@@ -387,23 +592,46 @@ extern "C" void thought_render(uint8_t *dst, size_t dst_w, size_t dst_h,
         }
     }
 
-    /* Body text — word-wrapped + vertically centred inside the
-     * bubble interior. '\n' in `text` forces a line break where the
-     * producer wants explicit control ("sleepy...\ntap sleep" stays
-     * two lines regardless of width); otherwise greedy wrap on
-     * spaces. Up to MAX_TEXT_LINES (currently 3) render; excess
-     * truncates. */
+    /* Action icon (CARE_EVENT only) — sits in a reserved row along
+     * the bottom of the interior, centred horizontally. Passive
+     * bubbles (action_kind == NONE) skip the icon and the reserve,
+     * giving them the full 3-line text budget. */
+    const uint8_t *icon = NULL;
+    if (thought->action_kind == THOUGHT_ACTION_CARE_EVENT) {
+        icon = icon_for_event(thought->action_event);
+    }
+    const int reserved_bottom = icon ? ACTION_ICON_RESERVE_PX : 0;
+
+    /* Body text — word-wrapped, vertically centred, paginated. The
+     * helper raises the module-scope `s_has_more` latch when this
+     * page exposes fewer than the wrapped total; the renderer then
+     * trails the last visible line with "..." so the kid sees the
+     * overflow cue, and main.cpp's tap handler bumps `page` or
+     * dismisses based on thought_has_more(). */
     blit_text_wrapped(dst, dst_w, dst_h, thought->text,
-                      BUBBLE_X0, BUBBLE_Y0, BUBBLE_X1, BUBBLE_Y1);
+                      BUBBLE_X0, BUBBLE_Y0, BUBBLE_X1, BUBBLE_Y1,
+                      thought->page, reserved_bottom);
+
+    if (icon) {
+        /* Drop the icon centred on the bubble's vertical axis, 1 px
+         * above the bottom interior edge so it doesn't kiss the
+         * scalloped border. */
+        const int icon_x = (BUBBLE_X0 + BUBBLE_X1) / 2 - 4;
+        const int icon_y = BUBBLE_Y1 - TEXT_PAD_Y - 8;
+        blit_icon_8x8(dst, dst_w, dst_h, icon, icon_x, icon_y);
+    }
 
     /* Touch hit rectangle — enlarge from the visible shape by
      * HIT_PAD on every side, including past the tail tip so a tap
-     * just under the bubble still registers. */
+     * just under the bubble still registers. THOUGHT-style adds a
+     * couple of extra px because the scalloped silhouette extends
+     * past the rect by the disc radius. */
     if (out_hit) {
-        out_hit->x0 = BUBBLE_X0 - HIT_PAD;
-        out_hit->y0 = BUBBLE_Y0 - HIT_PAD;
-        out_hit->x1 = BUBBLE_X1 + HIT_PAD;
-        out_hit->y1 = BUBBLE_Y1 + BUBBLE_TAIL_H + HIT_PAD;
+        const int scallop = (thought->style == THOUGHT_STYLE_THOUGHT) ? 6 : 0;
+        out_hit->x0 = BUBBLE_X0 - HIT_PAD - scallop;
+        out_hit->y0 = BUBBLE_Y0 - HIT_PAD - scallop;
+        out_hit->x1 = BUBBLE_X1 + HIT_PAD + scallop;
+        out_hit->y1 = BUBBLE_Y1 + BUBBLE_TAIL_H + HIT_PAD + scallop;
     }
 }
 
@@ -411,4 +639,8 @@ extern "C" bool thought_hit_contains(const thought_hit_rect_t *r,
                                      int x, int y) {
     if (!r) return false;
     return x >= r->x0 && x < r->x1 && y >= r->y0 && y < r->y1;
+}
+
+extern "C" bool thought_has_more(void) {
+    return s_has_more;
 }
