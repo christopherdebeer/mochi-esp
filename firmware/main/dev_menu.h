@@ -1,32 +1,38 @@
 /*
- * dev_menu — PWR-double-tap-driven debug screen wheel.
+ * dev_menu — PWR-driven settings + diagnostics wheel.
  *
- * Live-by-default home state with a wheel of diagnostic / utility
- * screens reachable by double-tapping PWR (single-tap is sleep). A
- * 60-second inactivity timeout snaps back to Live so the device
- * can't get stranded in a debug screen.
+ * Live-by-default home state. Pages are ordered by increasing risk;
+ * a deliberate double-tap is what pages deeper into more destructive
+ * territory, while a single-tap always pops straight back to Live.
  *
- *   Live ── PWR×2 ─▶ MenuP1 ── PWR ─▶ MenuP2 ── PWR ─▶ Live
- *    ▲                 │                  │
- *    │                 │                  └── tap action ─▶ exit
- *    │                 ├── tap "Switch WiFi" ─▶ WifiModal
- *    │                 │                          │
- *    │                 │                  PWR ────┘
- *    │                 │              (back to MenuP1)
- *    │
- *    └── 60 s inactivity / dispatch_touch returning a TouchResult
+ *   Live ── PWR×2 ─▶ MenuP1 ── PWR×2 ─▶ MenuP2 ── PWR×2 ─▶ MenuP3 ──┐
+ *    ▲                 │                  │                  │  (PWR×2 wraps to P1)
+ *    │                 │ PWR×1            │ PWR×1            │ PWR×1
+ *    │                 ▼                  ▼                  ▼
+ *    └────────────── Live ───────────── Live ─────────────── Live
+ *                          │
+ *                          ├── tap action ─▶ exit
+ *                          └── tap "Switch WiFi" (P2) ─▶ WifiModal
+ *                                                          │ PWR×1
+ *                                                          ▼
+ *                                                         Live
  *
- * "Live" is a HOME STATE, not a menu position. PWR-double-tap from
- * Live enters MenuP1; subsequent PWR taps page through MenuP2 and
- * out to Live. Pagination beats scrolling on e-ink — the FT6336
- * doesn't report enough intra-press position movement for LVGL to
- * recognise drag, and 200 px / partial-refresh hardware can't show
- * smooth scroll anyway. Two pages of 28-px buttons is significantly
- * more tappable than one page of 18-px buttons squeezed in.
+ * "Live" is a HOME STATE, not a menu position. Gesture model:
+ *   - PWR×1 in Live    → sleep (handled by main.cpp, not us)
+ *   - PWR×2 in Live    → MenuP1 (kid-facing main page)
+ *   - PWR×1 in any menu→ exit to Live (escape hatch — never destroys)
+ *   - PWR×2 in any menu→ page deeper into riskier territory
  *
- * Page split (most-used on P1; less common / dangerous on P2):
- *   MenuP1: info header · Switch WiFi · OpenAI key · Update · Re-pair
- *   MenuP2: Add WiFi · Forget WiFi · Go home
+ * Pagination beats scrolling on e-ink — the FT6336 doesn't report
+ * enough intra-press position movement for LVGL to recognise drag,
+ * and 200 px / partial-refresh hardware can't show smooth scroll
+ * anyway. Three pages of 28-px buttons is significantly more
+ * tappable than one page of 18-px buttons squeezed in.
+ *
+ * Page split (kid → settings → destructive):
+ *   MenuP1 (kid):  pet status header · Memories · Places · Go home
+ *   MenuP2 (set):  network header · Switch WiFi · OpenAI key
+ *   MenuP3 (risk): warning · Update now · Add WiFi · Forget WiFi · Re-pair
  *
  * BOOT is reserved for voice start/stop and never touches the menu.
  *
@@ -61,11 +67,11 @@ namespace dev_menu {
 
 enum class Mode : uint8_t {
     Live = 0,        /* not a menu mode — home state */
-    MenuP1,          /* page 1 — info header + most-used actions */
-    MenuP2,          /* page 2 — less-used / destructive actions */
-    /* WifiModal is pushed from the "Switch WiFi" button on MenuP1
-     * and torn down on either a button-tap (do) or a PWR-tap (back
-     * to MenuP1). */
+    MenuP1,          /* page 1 — kid-facing main page (pet status + memories/places/go home) */
+    MenuP2,          /* page 2 — settings (network info + Switch WiFi + OpenAI key) */
+    MenuP3,          /* page 3 — destructive actions (update / re-pair / forget) */
+    /* WifiModal is pushed from the "Switch WiFi" button on MenuP2
+     * and torn down on either a button-tap (do) or PWR×1 (Live). */
     WifiModal,
     _Count,
 };
@@ -73,13 +79,14 @@ enum class Mode : uint8_t {
 /* Initialises wheel state. Idempotent. Call once at boot. */
 void init(epaper_driver_display *epd);
 
-/* Latch a "PWR press observed" request. main.cpp calls this:
- *   - on a PWR double-tap from Live → enters Menu
- *   - on a PWR single-tap while a menu/modal is up → exits
- *     (Menu→Live, WifiModal→Menu)
- * tick() consumes the latch on its next pass. Multiple requests
- * within a single main-loop tick collapse to one (intentional —
- * fast-tap doesn't double-fire). */
+/* Latch a "page-deeper request" — main.cpp calls this:
+ *   - on a PWR double-tap from Live (enters MenuP1)
+ *   - on a PWR double-tap while a menu page is up (advances to the
+ *     next, riskier page; MenuP3 wraps back to MenuP1)
+ * Single-tap-in-menu is NOT routed through here — that's an exit
+ * straight to Live via exit_to_live() (see main.cpp's gesture
+ * handling). tick() consumes the latch on its next pass; multiple
+ * requests within a single main-loop tick collapse to one. */
 void request_advance(void);
 
 /* One-shot poll: consume a pending advance request, apply the
@@ -98,7 +105,11 @@ void request_advance(void);
 bool tick(epaper_driver_display *epd, bool paired,
           const char *pet_name, const char *version,
           const char *ip_str, const char *ssid,
-          int net_phase, int batt_pct);
+          int net_phase, int batt_pct,
+          /* Pet status snapshot for MenuP1's kid-facing header.
+           * Formatted by the caller (mood + happiness/fullness/energy);
+           * dev_menu just renders it verbatim. nullptr → blank. */
+          const char *pet_status);
 
 /* Current wheel mode. Mode::Live means main.cpp owns the screen. */
 Mode current(void);
@@ -126,6 +137,12 @@ enum class TouchResult : uint8_t {
     GoHome,           /* reset the pet's location to home */
     SwitchWifi,       /* push the WifiModal sub-screen (in-place) */
     WifiSwitch,       /* (modal) commit a switch to the picked SSID — see picked_ssid() */
+    /* Placeholders surfaced on the kid-facing MenuP1. Both currently
+     * land in main.cpp as a "not implemented yet" toast — the rows
+     * exist so the page has shape while the underlying data (memory
+     * ledger / world places list) is wired up. */
+    Memories,
+    Places,
 };
 
 /* The SSID picked by the most recent WifiSwitch dispatch (the WiFi

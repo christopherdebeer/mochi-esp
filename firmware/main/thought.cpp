@@ -14,6 +14,7 @@
 
 #include "thought.h"
 #include "font8x8.h"
+#include "mood.h"
 
 #include <string.h>
 
@@ -167,6 +168,68 @@ extern "C" bool thought_generate(const pet_t *pet, int64_t /*now_ms*/,
     return false;
 }
 
+/* ─── Pet-tap mood readout ────────────────────────────────────────
+ *
+ * Unlike thought_generate (which silences itself unless a real need
+ * is firing), this always produces a bubble — the user just tapped
+ * the pet and is asking "how are you?". Lines are pre-curated to
+ * fit the 11-char-per-line scale-1 budget; one line is a short
+ * vocalisation, the second is a phrase. action_kind = NONE so the
+ * bubble can't be tapped to dispatch anything — it's a passive
+ * register of feelings, not a care affordance. */
+extern "C" void thought_for_pet_tap(const pet_t *pet,
+                                    const pet_event_t *events,
+                                    size_t event_count,
+                                    int64_t now_ms,
+                                    pet_thought_t *out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    out->action_kind   = THOUGHT_ACTION_NONE;
+    out->style         = THOUGHT_STYLE_THOUGHT;
+    out->expires_at_ms = 0;
+
+    const mood_t m = pet ? project_mood(pet, events, event_count, now_ms)
+                         : MOOD_CURIOUS;
+    switch (m) {
+        case MOOD_SLEEPING:
+            out->line1 = "zzz...";
+            out->line2 = "shh";
+            break;
+        case MOOD_HUNGRY:
+            out->line1 = "hungry...";
+            out->line2 = "got snack?";
+            break;
+        case MOOD_TIRED:
+            out->line1 = "yawn...";
+            out->line2 = "so sleepy";
+            break;
+        case MOOD_LONELY:
+            out->line1 = "miss u...";
+            out->line2 = "where ru?";
+            break;
+        case MOOD_PLAYFUL:
+            out->line1 = "play!";
+            out->line2 = "zoomies!";
+            break;
+        case MOOD_CURIOUS:
+            out->line1 = "hmm...";
+            out->line2 = "what's up?";
+            break;
+        case MOOD_CONTENT:
+            out->line1 = "hi :)";
+            out->line2 = "all good";
+            break;
+        case MOOD_SURPRISED:
+            out->line1 = "oh!";
+            out->line2 = "what was?";
+            break;
+        default:
+            out->line1 = "hi :)";
+            out->line2 = "";
+            break;
+    }
+}
+
 extern "C" void thought_render(uint8_t *dst, size_t dst_w, size_t dst_h,
                                const pet_thought_t *thought,
                                thought_hit_rect_t *out_hit) {
@@ -187,31 +250,67 @@ extern "C" void thought_render(uint8_t *dst, size_t dst_w, size_t dst_h,
     draw_vline_black(dst, dst_w, dst_h, BUBBLE_X0, BUBBLE_Y0 + 1, BUBBLE_Y1 - 1);
     draw_vline_black(dst, dst_w, dst_h, BUBBLE_X1 - 1, BUBBLE_Y0 + 1, BUBBLE_Y1 - 1);
 
-    /* Tail — small filled triangle pointing down at the pet's head.
-     * Row 0 of the tail is the widest (BUBBLE_TAIL_W); each
-     * successive row narrows by 2. Drawn as a stack of short black
-     * h-lines centered on tail_cx. */
+    /* Tail — two visual registers:
+     *
+     *   SPOKEN: filled triangle pointing down at the pet's head —
+     *           comic convention for "what the speaker said".
+     *   THOUGHT: two small filled blobs trailing down — comic
+     *            convention for "what the speaker is thinking".
+     *
+     * Both fit inside BUBBLE_TAIL_H so the hit-rect math below is
+     * the same shape regardless of style. */
     const int tail_cx = (BUBBLE_X0 + BUBBLE_X1) / 2;
-    for (int row = 0; row < BUBBLE_TAIL_H; row++) {
-        const int half_w = (BUBBLE_TAIL_W - 2 * row) / 2;
-        if (half_w <= 0) break;
-        const int y = BUBBLE_Y1 + row;
-        if (y >= (int)dst_h) break;
-        draw_hline_black(dst, dst_w, dst_h,
-                         tail_cx - half_w, tail_cx + half_w + 1, y);
-    }
-    /* Hollow the very top row of the tail back to paper so the
-     * bubble's bottom border + the tail's top read as continuous
-     * outline rather than a black bar. Two pixels wide is enough
-     * at this scale; the tail edges stay black. */
-    {
-        const size_t stride = (dst_w + 7) >> 3;
-        const int y = BUBBLE_Y1;
-        if (y >= 0 && y < (int)dst_h) {
-            for (int x = tail_cx - 1; x <= tail_cx + 1; x++) {
-                if (x >= 0 && x < (int)dst_w) {
-                    pixel_white(dst, stride, x, y);
+    if (thought->style == THOUGHT_STYLE_SPOKEN) {
+        for (int row = 0; row < BUBBLE_TAIL_H; row++) {
+            const int half_w = (BUBBLE_TAIL_W - 2 * row) / 2;
+            if (half_w <= 0) break;
+            const int y = BUBBLE_Y1 + row;
+            if (y >= (int)dst_h) break;
+            draw_hline_black(dst, dst_w, dst_h,
+                             tail_cx - half_w, tail_cx + half_w + 1, y);
+        }
+        /* Hollow the very top row of the tail back to paper so the
+         * bubble's bottom border + the tail's top read as continuous
+         * outline rather than a black bar. */
+        {
+            const size_t stride = (dst_w + 7) >> 3;
+            const int y = BUBBLE_Y1;
+            if (y >= 0 && y < (int)dst_h) {
+                for (int x = tail_cx - 1; x <= tail_cx + 1; x++) {
+                    if (x >= 0 && x < (int)dst_w) {
+                        pixel_white(dst, stride, x, y);
+                    }
                 }
+            }
+        }
+    } else {
+        /* THOUGHT — two trailing blobs. Upper blob is a 3×3 with the
+         * top-left/top-right corners off (reads as a 3-px rounded
+         * dot at this scale). Lower blob is a 2×2 sitting one px
+         * below. Both centered on tail_cx, fitting inside BUBBLE_TAIL_H. */
+        const size_t stride = (dst_w + 7) >> 3;
+        /* Upper blob — y rows BUBBLE_Y1+1 .. BUBBLE_Y1+3. */
+        for (int dy = 1; dy <= 3; dy++) {
+            const int y = BUBBLE_Y1 + dy;
+            if (y < 0 || y >= (int)dst_h) continue;
+            for (int dx = -1; dx <= 1; dx++) {
+                /* Soft-corner the top row of the 3×3 so it reads as a dot. */
+                if (dy == 1 && (dx == -1 || dx == 1)) continue;
+                const int x = tail_cx + dx;
+                if (x < 0 || x >= (int)dst_w) continue;
+                pixel_black(dst, stride, x, y);
+            }
+        }
+        /* Lower blob — 2×2 at y rows BUBBLE_Y1+4 .. BUBBLE_Y1+5,
+         * offset half a pixel left of centre so the pair reads as
+         * trailing diagonally toward the pet. */
+        for (int dy = 4; dy <= 5; dy++) {
+            const int y = BUBBLE_Y1 + dy;
+            if (y < 0 || y >= (int)dst_h) continue;
+            for (int dx = -1; dx <= 0; dx++) {
+                const int x = tail_cx + dx;
+                if (x < 0 || x >= (int)dst_w) continue;
+                pixel_black(dst, stride, x, y);
             }
         }
     }

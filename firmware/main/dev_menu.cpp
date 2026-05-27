@@ -45,6 +45,7 @@ static char                 s_ip_str[24]   = {};
 static char                 s_ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
 static int                  s_net_phase    = 0;
 static int                  s_batt_pct     = 0;
+static char                 s_pet_status[80] = {};
 
 /* Picked SSID payload — populated by dispatch_touch when the user
  * commits a switch in the WifiModal; consumed by main.cpp's
@@ -63,10 +64,12 @@ static char                 s_picked_ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
  * info header sits above the action buttons inside the same scroll
  * container, so the user sees device state and tappable actions in
  * one glance instead of two PWR taps. */
-static lv_obj_t            *s_menu_p1_scr   = nullptr;
-static lv_obj_t            *s_menu_p2_scr   = nullptr;
-static lv_obj_t            *s_info_label    = nullptr;   /* lives inside s_menu_p1_scr */
-static lv_obj_t            *s_wifi_scr      = nullptr;
+static lv_obj_t            *s_menu_p1_scr      = nullptr;
+static lv_obj_t            *s_menu_p2_scr      = nullptr;
+static lv_obj_t            *s_menu_p3_scr      = nullptr;
+static lv_obj_t            *s_pet_status_label = nullptr; /* lives inside s_menu_p1_scr */
+static lv_obj_t            *s_info_label       = nullptr; /* lives inside s_menu_p2_scr */
+static lv_obj_t            *s_wifi_scr         = nullptr;
 
 /* Pending action latched by the click event handler; consumed by
  * dispatch_touch on the next call. LVGL's click events fire on
@@ -85,6 +88,7 @@ static const char *mode_name(Mode m) {
         case Mode::Live:      return "live";
         case Mode::MenuP1:    return "menu_p1";
         case Mode::MenuP2:    return "menu_p2";
+        case Mode::MenuP3:    return "menu_p3";
         case Mode::WifiModal: return "wifi_modal";
         default:              return "?";
     }
@@ -117,19 +121,27 @@ void exit_to_live(void) {
     }
 }
 
-/* Advance:
- *   Live      → MenuP1 (PWR×2 entry from main.cpp)
- *   MenuP1    → MenuP2 (PWR pages forward)
- *   MenuP2    → Live   (PWR exits past last page)
- *   WifiModal → MenuP1 (PWR closes the modal back to its parent)
+/* Advance (PWR×2 from anywhere): pages deeper into riskier territory.
+ *
+ *   Live      → MenuP1 (entry — kid-facing main page)
+ *   MenuP1    → MenuP2 (settings — Switch WiFi / OpenAI key)
+ *   MenuP2    → MenuP3 (destructive — Update / Add / Forget / Re-pair)
+ *   MenuP3    → MenuP1 (wrap back to the safe page)
+ *   WifiModal → MenuP2 (a modal isn't a "page" — bounce back to parent;
+ *               in practice the user uses PWR×1 to exit to Live instead)
+ *
+ * PWR×1 from anywhere non-Live is handled by exit_to_live() up in
+ * main.cpp — it never enters the advance() table. That keeps the
+ * "single tap escapes" rule absolute regardless of which page is up.
  *
  * Pagination beats scrolling on this hardware — see dev_menu.h. */
 static Mode advance(Mode m) {
     switch (m) {
         case Mode::Live:      return Mode::MenuP1;
         case Mode::MenuP1:    return Mode::MenuP2;
-        case Mode::MenuP2:    return Mode::Live;
-        case Mode::WifiModal: return Mode::MenuP1;
+        case Mode::MenuP2:    return Mode::MenuP3;
+        case Mode::MenuP3:    return Mode::MenuP1;
+        case Mode::WifiModal: return Mode::MenuP2;
         default:              return Mode::Live;
     }
 }
@@ -196,6 +208,7 @@ static const char *phase_label(int phase) {
     }
 }
 
+/* P2 (settings) header — the network / device-state info. */
 static void refresh_info(void) {
     if (!s_info_label) return;
     const size_t free_int = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
@@ -216,6 +229,15 @@ static void refresh_info(void) {
         (unsigned)(free_psr / 1024));
     (void)free_int;
     lv_label_set_text(s_info_label, buf);
+}
+
+/* P1 (kid) header — the pet's mood + stats. Caller formats the
+ * string; we just blit it. Empty payload renders a tactful fallback
+ * so the page isn't blank before the first tick. */
+static void refresh_pet_status(void) {
+    if (!s_pet_status_label) return;
+    lv_label_set_text(s_pet_status_label,
+        s_pet_status[0] ? s_pet_status : "Mochi");
 }
 
 /* Add a full-width tappable row to a vertical container. 28 px tall
@@ -255,39 +277,68 @@ static void config_menu_screen(lv_obj_t *scr) {
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 }
 
-/* Page 1: most-used actions over the live info header. ~52 px header
- * + 4 × 28 px buttons + 5 × 2 px gaps + 4 px padding ≈ 178 px. Fits. */
+/* Page 1: kid-facing main page. Pet-status header at the top, then
+ * the safe exploratory actions (Memories, Places, Go home). No
+ * configuration knobs here — those live one PWR×2 deeper on P2.
+ * 1 status line + 3 × 28 px buttons + gaps ≈ 100 px. */
 static void build_menu_p1(void) {
     if (s_menu_p1_scr) return;
     s_menu_p1_scr = lv_obj_create(nullptr);
     config_menu_screen(s_menu_p1_scr);
 
-    /* Info header — refreshed live by refresh_info() so RAM / PSRAM /
-     * batt readings stay current while the page is open. */
-    s_info_label = lv_label_create(s_menu_p1_scr);
-    lv_label_set_long_mode(s_info_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(s_info_label, lv_pct(98));
+    /* Mood + stats — refreshed live by refresh_pet_status(). Caller
+     * passes the formatted string; we just render it. */
+    s_pet_status_label = lv_label_create(s_menu_p1_scr);
+    lv_label_set_long_mode(s_pet_status_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_pet_status_label, lv_pct(98));
+    lv_obj_set_style_text_align(s_pet_status_label, LV_TEXT_ALIGN_CENTER, 0);
 
-    add_row(s_menu_p1_scr, "Switch WiFi", TouchResult::SwitchWifi,    nullptr);
-    add_row(s_menu_p1_scr, "OpenAI key",  TouchResult::OpenKeyPortal, nullptr);
-    add_row(s_menu_p1_scr, "Update now",  TouchResult::UpdateNow,     nullptr);
-    add_row(s_menu_p1_scr, "Re-pair",     TouchResult::RePair,        nullptr);
+    /* Memories + Places are placeholders: main.cpp surfaces a "not
+     * yet" toast on tap so the page has shape while the underlying
+     * data (memory ledger / world places list) is wired up. */
+    add_row(s_menu_p1_scr, "Memories", TouchResult::Memories, nullptr);
+    add_row(s_menu_p1_scr, "Places",   TouchResult::Places,   nullptr);
+    add_row(s_menu_p1_scr, "Go home",  TouchResult::GoHome,   nullptr);
 }
 
-/* Page 2: less-used / destructive actions. Header reads "MORE" so
- * the user knows there's a second page; PWR exits to Live from here.
- * 1 header label + 3 × 28 px + gaps ≈ 100 px. Plenty of room. */
+/* Page 2: settings — network info header + the configuration actions
+ * (Switch WiFi → modal, OpenAI key). One PWR×2 into the menu from
+ * Live, so the kid won't land here by accident. ~52 px header + 2 ×
+ * 28 px + gaps ≈ 115 px. */
 static void build_menu_p2(void) {
     if (s_menu_p2_scr) return;
     s_menu_p2_scr = lv_obj_create(nullptr);
     config_menu_screen(s_menu_p2_scr);
 
     lv_obj_t *title = lv_label_create(s_menu_p2_scr);
-    lv_label_set_text(title, "MORE  (PWR exits)");
+    lv_label_set_text(title, "SETTINGS  (PWR×1 exits)");
 
-    add_row(s_menu_p2_scr, "Add WiFi",    TouchResult::ChangeWifi,    nullptr);
-    add_row(s_menu_p2_scr, "Forget WiFi", TouchResult::ForgetWifi,    nullptr);
-    add_row(s_menu_p2_scr, "Go home",     TouchResult::GoHome,        nullptr);
+    /* Network/version/IP header — refreshed live by refresh_info(). */
+    s_info_label = lv_label_create(s_menu_p2_scr);
+    lv_label_set_long_mode(s_info_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_info_label, lv_pct(98));
+
+    add_row(s_menu_p2_scr, "Switch WiFi", TouchResult::SwitchWifi,    nullptr);
+    add_row(s_menu_p2_scr, "OpenAI key",  TouchResult::OpenKeyPortal, nullptr);
+}
+
+/* Page 3: destructive territory. Two PWR×2 into the menu from Live;
+ * single-tap escapes back. A "RISK" header makes the page register
+ * different from P1/P2 at a glance. 1 header + 4 × 28 px + gaps ≈
+ * 130 px. */
+static void build_menu_p3(void) {
+    if (s_menu_p3_scr) return;
+    s_menu_p3_scr = lv_obj_create(nullptr);
+    config_menu_screen(s_menu_p3_scr);
+
+    lv_obj_t *title = lv_label_create(s_menu_p3_scr);
+    lv_label_set_text(title, "RISK  (PWR×1 exits)");
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+
+    add_row(s_menu_p3_scr, "Update now",  TouchResult::UpdateNow,  nullptr);
+    add_row(s_menu_p3_scr, "Add WiFi",    TouchResult::ChangeWifi, nullptr);
+    add_row(s_menu_p3_scr, "Forget WiFi", TouchResult::ForgetWifi, nullptr);
+    add_row(s_menu_p3_scr, "Re-pair",     TouchResult::RePair,     nullptr);
 }
 
 /* WiFi modal — built fresh on each entry because the stored-network
@@ -334,7 +385,7 @@ static void build_wifi(void) {
     }
     if (rendered == 0) {
         lv_obj_t *empty = lv_label_create(s_wifi_scr);
-        lv_label_set_text(empty, "no saved networks\nAdd via Actions");
+        lv_label_set_text(empty, "no saved networks\nAdd WiFi on the next page");
         lv_obj_set_style_text_align(empty, LV_TEXT_ALIGN_CENTER, 0);
     }
 }
@@ -370,12 +421,17 @@ static void render_mode(Mode m) {
     switch (m) {
         case Mode::MenuP1:
             build_menu_p1();
-            refresh_info();
+            refresh_pet_status();
             lv_screen_load(s_menu_p1_scr);
             break;
         case Mode::MenuP2:
             build_menu_p2();
+            refresh_info();
             lv_screen_load(s_menu_p2_scr);
+            break;
+        case Mode::MenuP3:
+            build_menu_p3();
+            lv_screen_load(s_menu_p3_scr);
             break;
         case Mode::WifiModal:
             build_wifi();
@@ -397,7 +453,8 @@ static void render_mode(Mode m) {
 bool tick(epaper_driver_display * /*epd*/, bool /*paired*/,
           const char *pet_name, const char *version,
           const char *ip_str, const char *ssid,
-          int net_phase, int batt_pct) {
+          int net_phase, int batt_pct,
+          const char *pet_status) {
     const int64_t now_us = esp_timer_get_time();
     bool changed = false;
 
@@ -405,10 +462,11 @@ bool tick(epaper_driver_display * /*epd*/, bool /*paired*/,
      * receive params) can still see current values. Snapshot before
      * we decide whether to render so the snapshot reflects the most
      * recent main-loop state. */
-    if (pet_name) snprintf(s_pet_name, sizeof(s_pet_name), "%s", pet_name);
-    if (version)  snprintf(s_version,  sizeof(s_version),  "%s", version);
-    if (ip_str)   snprintf(s_ip_str,   sizeof(s_ip_str),   "%s", ip_str);
-    if (ssid)     snprintf(s_ssid,     sizeof(s_ssid),     "%s", ssid);
+    if (pet_name)   snprintf(s_pet_name,   sizeof(s_pet_name),   "%s", pet_name);
+    if (version)    snprintf(s_version,    sizeof(s_version),    "%s", version);
+    if (ip_str)     snprintf(s_ip_str,     sizeof(s_ip_str),     "%s", ip_str);
+    if (ssid)       snprintf(s_ssid,       sizeof(s_ssid),       "%s", ssid);
+    if (pet_status) snprintf(s_pet_status, sizeof(s_pet_status), "%s", pet_status);
     s_net_phase = net_phase;
     s_batt_pct  = batt_pct;
 
@@ -436,12 +494,16 @@ bool tick(epaper_driver_display * /*epd*/, bool /*paired*/,
         render_mode(s_mode);
         changed = true;
     } else if (s_mode == Mode::MenuP1) {
-        /* Refresh the info header without a screen swap so RAM/PSRAM/
-         * batt readings stay live while page 1 is up. Cheap; LVGL
-         * only re-renders the label's dirty area. The action buttons
-         * are static — not rebuilt. MenuP2 has no live header so no
-         * refresh needed there. Locked against the dispatcher to
-         * keep widget access serialised. */
+        /* Refresh the pet-status header on every tick so mood/stats
+         * stay live while the kid is reading. The action buttons are
+         * static — not rebuilt. Locked against the dispatcher to keep
+         * widget access serialised. */
+        lvgl_port_lock();
+        refresh_pet_status();
+        lvgl_port_unlock();
+    } else if (s_mode == Mode::MenuP2) {
+        /* Same idea for the network/RAM/batt header on the settings
+         * page — readings should tick live while up. */
         lvgl_port_lock();
         refresh_info();
         lvgl_port_unlock();

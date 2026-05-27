@@ -1818,8 +1818,13 @@ extern "C" void app_main(void) {
                     s_pending_talked_at = 0;
                 }
             } else if (dev_menu::active()) {
-                ESP_LOGI(TAG, "PWR tap (wheel up) → advance");
-                dev_menu::request_advance();
+                /* Single-tap is the escape hatch from any non-Live
+                 * mode — straight back to Live, never destructive.
+                 * Double-tap (handled above) is what pages deeper.
+                 * Mark the screen dirty so the pet redraws this tick. */
+                ESP_LOGI(TAG, "PWR tap (wheel up) → exit to live");
+                dev_menu::exit_to_live();
+                s_net_render_dirty = true;
             }
         }
 
@@ -1883,13 +1888,38 @@ extern "C" void app_main(void) {
                 uint16_t mv = 0; uint8_t pct = 0;
                 return battery_read(&mv, &pct) ? (int)pct : -1;
             })();
+            /* Pet-status line for the kid-facing MenuP1 header. One
+             * line: mood label + happiness/fullness/energy. Cheap to
+             * compute (project_mood is the same call the resting
+             * render already makes); we just project against the same
+             * decayed snapshot so the menu matches what the screen
+             * showed a moment ago. Empty string while the menu is up
+             * AND inside the inactivity-driven idle path is fine —
+             * dev_menu's fallback is the pet name. */
+            char pet_status_buf[80] = {};
+            {
+                int64_t now_ms = now_ms_wall();
+                pet_event_t slice[12];
+                size_t n = event_log_load_recent(slice, 12);
+                pet_t decayed = current_pet_decayed(now_ms);
+                mood_t m = project_mood(&decayed, slice, n, now_ms);
+                const char *mname = mood_to_name(m);
+                snprintf(pet_status_buf, sizeof(pet_status_buf),
+                    "%s  %s\nhappy %u  full %u  energy %u",
+                    pair.pet_name[0] ? pair.pet_name : "mochi",
+                    mname ? mname : "?",
+                    (unsigned)decayed.stats.happiness,
+                    (unsigned)decayed.stats.fullness,
+                    (unsigned)decayed.stats.energy);
+            }
             const bool mode_changed = dev_menu::tick(
                 epd,
                 pair.pet_id[0] != '\0',
                 pair.pet_name,
                 ota_update::current_version(),
                 s_net_ip, s_net_ssid,
-                (int)s_net_phase, batt_pct_now);
+                (int)s_net_phase, batt_pct_now,
+                pet_status_buf);
             /* (LVGL is pumped by its own dispatcher task at ~33 Hz —
              * see lvgl_port.cpp's lv_task. Polling here was too slow
              * for drag-vs-tap discrimination during menu scrolling.) */
@@ -1908,11 +1938,18 @@ extern "C" void app_main(void) {
                         (int)ev.x, (int)ev.y);
                     const bool action_fired =
                         act != dev_menu::TouchResult::None;
-                    /* Only exit when an action committed. A None
+                    /* Placeholders (Memories / Places) display an
+                     * informational toast on tap but keep the menu up
+                     * — there's no commit to confirm and no destructive
+                     * effect to escape from. */
+                    const bool stays_in_menu =
+                        act == dev_menu::TouchResult::Memories ||
+                        act == dev_menu::TouchResult::Places;
+                    /* Only exit when a real action committed. A None
                      * result means the user tapped a non-actionable
                      * area (background, scroll gesture, etc.) and
                      * the menu should stay up. */
-                    if (action_fired) {
+                    if (action_fired && !stays_in_menu) {
                         dev_menu::exit_to_live();
                         s_net_render_dirty = true;
                     }
@@ -1975,6 +2012,30 @@ extern "C" void app_main(void) {
                              * home bundle next tick on success. No-op +
                              * logged if offline. */
                             pet_sync_enter_place("home");
+                            break;
+                        case dev_menu::TouchResult::Memories:
+                        case dev_menu::TouchResult::Places:
+                            /* MenuP1 placeholders — surfaced so the
+                             * page has shape while the substrate
+                             * memory ledger + world places list get
+                             * wired up. For now: brief toast straight
+                             * to e-paper, then force LVGL to repaint
+                             * its (still-loaded) menu screen so the
+                             * kid lands back on MenuP1 rather than a
+                             * stale toast frame. */
+                            ESP_LOGI(TAG, "dev_menu → %s (not yet wired)",
+                                act == dev_menu::TouchResult::Memories
+                                    ? "memories" : "places");
+                            epd_ui::clear(epd);
+                            epd_ui::draw_text_centered(epd, 84, 1,
+                                act == dev_menu::TouchResult::Memories
+                                    ? "Memories" : "Places");
+                            epd_ui::draw_text_centered(epd, 104, 1,
+                                "coming soon...");
+                            epd->EPD_Init_Partial();
+                            epd->EPD_DisplayPart();
+                            vTaskDelay(pdMS_TO_TICKS(1200));
+                            lvgl_port_force_full_refresh();
                             break;
                         case dev_menu::TouchResult::WifiSwitch: {
                             /* Runtime switch to a stored network — no
@@ -2558,20 +2619,23 @@ extern "C" void app_main(void) {
                 s_seed_thought.action_kind = THOUGHT_ACTION_NONE;
                 s_seed_thought.line1       = s_seed_line1;
                 s_seed_thought.line2       = s_seed_line2;
+                /* External speech echo — render with the spoken-style
+                 * triangle tail so it visually reads as "what mochi
+                 * would have said" rather than internal monologue. */
+                s_seed_thought.style       = THOUGHT_STYLE_SPOKEN;
                 seed_thought_ptr           = &s_seed_thought;
                 expr = "thinking";
             }
         }
 
-        /* Pet-tap delight pool. v0.1.6: now that BOOT owns voice
-         * start/stop, taps on the pet body are free to express
-         * personality. We rotate through a small pool of expressive
-         * faces so a kid poking at the pet feels like the pet is
-         * reacting (rather than always settling to the same
-         * "comforted"). No event_log entry — purely visual delight,
-         * the substrate stats stay untouched. The rotation is
-         * deterministic by tap count rather than RNG so a fast tap
-         * sequence cycles instead of repeating.
+        /* Pet-tap delight + mood readout. The face rotates through a
+         * pool of expressive sprites (so a kid poking at the pet sees
+         * a reaction) AND a thought-style bubble surfaces the pet's
+         * current dominant mood/need ("hungry...", "miss u...", etc.)
+         * for the 5-second tap hold. The bubble is passive — no event
+         * dispatch, no tap target — it's an at-a-glance "how is mochi
+         * feeling?" answer. EVENT_COMFORTED still lands on the event
+         * log below, so a pat actually comforts the pet.
          *
          * Used in two places below: the zoned-scene fallthrough
          * (no zone hit + tap on pet), and the unzoned-scene
@@ -2583,9 +2647,25 @@ extern "C" void app_main(void) {
         constexpr int DELIGHT_N = (int)(sizeof(DELIGHT_EXPRS) /
                                         sizeof(DELIGHT_EXPRS[0]));
         static int s_delight_idx = 0;
+        static pet_thought_t s_petmood_thought;
         auto pick_delight = [&]() -> const char * {
             const char *e = DELIGHT_EXPRS[s_delight_idx % DELIGHT_N];
             s_delight_idx++;
+            /* Mood bubble piggy-backs on the same transient seed-bubble
+             * channel: the renderer draws it above the pet during the
+             * 5-s tap hold, then the post-hold render_resting() clears
+             * it (its own thought_generate runs against fresh state).
+             * Don't overwrite a talk_seed bubble that already claimed
+             * seed_thought_ptr — talk_seed is the louder signal. */
+            if (!seed_thought_ptr) {
+                pet_event_t slice[12];
+                size_t n = event_log_load_recent(slice, 12);
+                int64_t pmoment = now_ms_wall();
+                pet_t decayed = current_pet_decayed(pmoment);
+                thought_for_pet_tap(&decayed, slice, n, pmoment,
+                                    &s_petmood_thought);
+                seed_thought_ptr = &s_petmood_thought;
+            }
             return e;
         };
 
