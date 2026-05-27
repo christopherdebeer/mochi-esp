@@ -71,6 +71,12 @@ CONFIG_MBEDTLS_SSL_DTLS_SRTP=y
 CONFIG_LV_CONF_SKIP=y
 CONFIG_LV_COLOR_DEPTH_1=y
 CONFIG_LV_COLOR_DEPTH=1
+# Memory: route through our PSRAM-aware lv_malloc_core/etc in
+# lvgl_port.cpp. CUSTOM_MALLOC opts out of LVGL's built-in pool +
+# clib bridge, leaving the lv_malloc_core symbols for us to define.
+CONFIG_LV_USE_CUSTOM_MALLOC=y
+CONFIG_LV_USE_BUILTIN_MALLOC=n
+CONFIG_LV_USE_CLIB_MALLOC=n
 # Animation off — e-ink ghosts; partial refresh ~300 ms; animations
 # look worse than no animation.
 CONFIG_LV_USE_ANIMATION=n

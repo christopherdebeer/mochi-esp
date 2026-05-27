@@ -9,6 +9,9 @@
 #include "esp_system.h"
 #include "esp_heap_caps.h"
 
+#include "lvgl.h"
+#include "lvgl_port.h"
+
 #include "board_pins.h"
 #include "epd_ui.h"
 #include "nvs_creds.h"
@@ -30,6 +33,45 @@ static int64_t              s_entered_mode_us = 0;
 static std::atomic<bool>    s_press_pending{false};
 static bool                 s_started = false;
 
+/* Most recent Info data — cached so dispatch-time mode pushes
+ * (e.g. SwitchWifi → render WifiModal) don't need to be re-handed
+ * the params. tick() refreshes these on every advance/render. */
+static char                 s_pet_name[40] = {};
+static char                 s_version[40]  = {};
+static char                 s_ip_str[24]   = {};
+static char                 s_ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
+static int                  s_net_phase    = 0;
+static int                  s_batt_pct     = 0;
+
+/* Picked SSID payload — populated by dispatch_touch when the user
+ * commits a switch in the WifiModal; consumed by main.cpp's
+ * picked_ssid() shortly after. */
+static char                 s_picked_ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
+
+/* LVGL screens — one per non-Live mode. We keep them as separate
+ * lv_obj_t* so swap-on-advance is just lv_screen_load(). Each is
+ * lazily created on first entry to avoid burning RAM during boot.
+ *
+ * Buttons use user_data to carry the TouchResult enum back through
+ * the click event; dispatch_touch reads it from `lv_event_get_target`
+ * and returns it to main.cpp. */
+static lv_obj_t            *s_info_scr      = nullptr;
+static lv_obj_t            *s_info_label    = nullptr;
+static lv_obj_t            *s_actions_scr   = nullptr;
+static lv_obj_t            *s_wifi_scr      = nullptr;
+
+/* Pending action latched by the click event handler; consumed by
+ * dispatch_touch on the next call. LVGL's click events fire on
+ * release inside its own dispatcher (called from lv_timer_handler),
+ * which runs on the main task — so a single static is safe.
+ *
+ * Why this indirection: we want the existing dev_menu.h API where
+ * main.cpp calls dispatch_touch(x,y) and gets a TouchResult. With
+ * LVGL, the click is already routed by LVGL's hit-testing — the
+ * click handler stamps the result and dispatch_touch just hands it
+ * back. */
+static TouchResult          s_pending_action = TouchResult::None;
+
 static const char *mode_name(Mode m) {
     switch (m) {
         case Mode::Live:      return "live";
@@ -37,36 +79,6 @@ static const char *mode_name(Mode m) {
         case Mode::Actions:   return "actions";
         case Mode::WifiModal: return "wifi_modal";
         default:              return "?";
-    }
-}
-
-/* ─── Tappable button registry ─────────────────────────────────────
- *
- * Each tappable region renders a 1-px bordered rect with its label
- * centred inside. Hit-tests resolve via dispatch_touch() at the
- * coords stored here. Coordinates are panel pixels.
- *
- * Buttons live only while their owning screen is up; clear_buttons()
- * runs before each render so a stale Info hit-rect can't leak into a
- * touch dispatched against the next screen. */
-struct Button {
-    int x, y, w, h;
-    TouchResult action;
-    const char *label;
-};
-/* Headroom for the Actions screen (7) plus the WiFi modal's stored
- * networks (capped to fit on the panel). */
-static constexpr int MAX_BUTTONS = 10;
-static Button   s_buttons[MAX_BUTTONS] = {};
-static int      s_button_count = 0;
-static char     s_button_ssid[MAX_BUTTONS][MOCHI_WIFI_SSID_MAX + 1] = {};
-static char     s_picked_ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
-
-static void clear_buttons(void) {
-    s_button_count = 0;
-    for (int i = 0; i < MAX_BUTTONS; i++) {
-        s_buttons[i] = {};
-        s_button_ssid[i][0] = '\0';
     }
 }
 
@@ -90,14 +102,17 @@ void exit_to_live(void) {
     if (s_mode != Mode::Live) {
         ESP_LOGI(TAG, "exit → live");
         s_mode = Mode::Live;
-        clear_buttons();
+        /* Don't delete the LVGL screens — they're cheap to keep
+         * around in PSRAM and recreate-on-reentry has noticeable
+         * latency. main.cpp's render_resting renders directly to
+         * the e-paper, bypassing LVGL while in Live. */
     }
 }
 
 /* Advance: Live → Info → Actions → Info (wraps). The WifiModal mode
  * is *not* in the cycle — it's pushed by the SwitchWifi button on
  * Actions, and a PWR-tap from inside the modal advances back to Info
- * (i.e. one tap past Actions). */
+ * (one tap past Actions). */
 static Mode advance(Mode m) {
     switch (m) {
         case Mode::Live:      return Mode::Info;
@@ -108,11 +123,67 @@ static Mode advance(Mode m) {
     }
 }
 
-/* ─── Mode renderers ─────────────────────────────────────────────── */
+/* ─── Click handler ────────────────────────────────────────────────
+ *
+ * Bound to every actionable widget. user_data carries the TouchResult
+ * (cast to a uintptr_t-sized pointer); for SwitchWifi specifically
+ * the SSID is also read out of the button's child label.
+ *
+ * Clicks land on press-release; LVGL's default click feedback (style
+ * change on press) is what the user sees during the ~300 ms partial
+ * refresh. */
+static void on_click(lv_event_t *ev) {
+    TouchResult action = (TouchResult)(uintptr_t)lv_event_get_user_data(ev);
+    if (action == TouchResult::WifiSwitch) {
+        /* Read SSID from the bound label (set when the row was built). */
+        lv_obj_t *target = (lv_obj_t *)lv_event_get_target(ev);
+        const char *ssid = (const char *)lv_obj_get_user_data(target);
+        if (ssid) {
+            snprintf(s_picked_ssid, sizeof(s_picked_ssid), "%s", ssid);
+        }
+        s_pending_action = action;
+        return;
+    }
+    if (action == TouchResult::SwitchWifi) {
+        /* Internal: push the WifiModal screen. main.cpp doesn't see
+         * this. We swap the LVGL active screen here and bump
+         * s_entered_mode_us so the inactivity timer resets. */
+        s_mode = Mode::WifiModal;
+        s_entered_mode_us = esp_timer_get_time();
+        s_press_pending.store(true, std::memory_order_release);
+        s_pending_action = TouchResult::None;
+        return;
+    }
+    s_pending_action = action;
+}
+
+/* ─── Builders ─────────────────────────────────────────────────────
+ *
+ * Each lazily creates an lv_obj_t* screen tree on first entry. Once
+ * built, subsequent visits just refresh the dynamic labels (Info)
+ * and re-attach to the active screen. Building is cheap (~10 ms
+ * for ~6 widgets) but rebuilding on every entry would burn PSRAM
+ * via LVGL's allocator churn, hence the cache. */
+
+static void build_info(void) {
+    if (s_info_scr) return;
+    s_info_scr = lv_obj_create(nullptr);
+    /* Title */
+    lv_obj_t *title = lv_label_create(s_info_scr);
+    lv_label_set_text(title, "INFO");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 4);
+    /* Body label — single multi-line text we rebuild on each tick. */
+    s_info_label = lv_label_create(s_info_scr);
+    lv_label_set_long_mode(s_info_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_info_label, lv_pct(95));
+    lv_obj_align(s_info_label, LV_ALIGN_TOP_LEFT, 4, 24);
+    /* Footer hint */
+    lv_obj_t *hint = lv_label_create(s_info_scr);
+    lv_label_set_text(hint, "PWR: Actions  60s exit");
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
+}
 
 static const char *phase_label(int phase) {
-    /* NetPhase enum lives in main.cpp — passed through as int to keep
-     * dev_menu free of that header. 0 Connecting, 1 Online, 2 Offline. */
     switch (phase) {
         case 0:  return "connecting";
         case 1:  return "online";
@@ -121,265 +192,215 @@ static const char *phase_label(int phase) {
     }
 }
 
-static void draw_button_border(epaper_driver_display *epd, const Button &b) {
-    for (int dx = 0; dx < b.w; dx++) {
-        epd->EPD_DrawColorPixel(b.x + dx, b.y, DRIVER_COLOR_BLACK);
-        epd->EPD_DrawColorPixel(b.x + dx, b.y + b.h - 1, DRIVER_COLOR_BLACK);
-    }
-    for (int dy = 0; dy < b.h; dy++) {
-        epd->EPD_DrawColorPixel(b.x, b.y + dy, DRIVER_COLOR_BLACK);
-        epd->EPD_DrawColorPixel(b.x + b.w - 1, b.y + dy, DRIVER_COLOR_BLACK);
-    }
-}
-
-static void register_button(int x, int y, int w, int h,
-                            TouchResult action, const char *label,
-                            const char *ssid = nullptr) {
-    if (s_button_count >= MAX_BUTTONS) return;
-    const int i = s_button_count++;
-    s_buttons[i] = { x, y, w, h, action, label };
-    snprintf(s_button_ssid[i], sizeof(s_button_ssid[i]), "%s", ssid ? ssid : "");
-}
-
-/* Info screen — merges what used to be Splash + Settings. The boot
- * splash already has a polished design (pet face, version banner) so
- * we re-use it for the visual top of the screen, then overlay the
- * compact Settings text block over the lower half. */
-static void render_info(epaper_driver_display *epd,
-                        const char *pet_name, const char *version,
-                        const char *ip_str, const char *ssid,
-                        int net_phase, int batt_pct) {
-    epd_ui::clear(epd);
-    clear_buttons();
-
-    epd_ui::draw_text_centered(epd, 4, 2, "INFO");
-
-    char line[40];
-    int y = 26;
-    snprintf(line, sizeof(line), "fw   %s", version ? version : "?");
-    epd_ui::draw_text(epd, 4, y, 1, line); y += 10;
-    snprintf(line, sizeof(line), "pet  %s", pet_name ? pet_name : "?");
-    epd_ui::draw_text(epd, 4, y, 1, line); y += 10;
-    snprintf(line, sizeof(line), "net  %s", phase_label(net_phase));
-    epd_ui::draw_text(epd, 4, y, 1, line); y += 10;
-    snprintf(line, sizeof(line), "ip   %s", ip_str && *ip_str ? ip_str : "-");
-    epd_ui::draw_text(epd, 4, y, 1, line); y += 10;
-    snprintf(line, sizeof(line), "ssid %.30s", ssid && *ssid ? ssid : "-");
-    epd_ui::draw_text(epd, 4, y, 1, line); y += 10;
-
+static void refresh_info(void) {
+    if (!s_info_label) return;
     const size_t free_int = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     const size_t free_psr = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    snprintf(line, sizeof(line), "ram  %uK", (unsigned)(free_int / 1024));
-    epd_ui::draw_text(epd, 4, y, 1, line); y += 10;
-    snprintf(line, sizeof(line), "psr  %uK", (unsigned)(free_psr / 1024));
-    epd_ui::draw_text(epd, 4, y, 1, line); y += 10;
-    snprintf(line, sizeof(line), "batt %d%%", batt_pct);
-    epd_ui::draw_text(epd, 4, y, 1, line); y += 10;
-
-    epd_ui::draw_text(epd, 4, MOCHI_EPD_HEIGHT - 10, 1,
-                      "PWR: Actions  60s exit");
-
-    epd->EPD_Init_Partial();
-    epd->EPD_DisplayPart();
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+        "fw   %s\n"
+        "pet  %s\n"
+        "net  %s\n"
+        "ip   %s\n"
+        "ssid %.20s\n"
+        "ram  %uK\n"
+        "psr  %uK\n"
+        "batt %d%%",
+        s_version[0]  ? s_version  : "?",
+        s_pet_name[0] ? s_pet_name : "?",
+        phase_label(s_net_phase),
+        s_ip_str[0] ? s_ip_str : "-",
+        s_ssid[0]   ? s_ssid   : "-",
+        (unsigned)(free_int / 1024),
+        (unsigned)(free_psr / 1024),
+        s_batt_pct);
+    lv_label_set_text(s_info_label, buf);
 }
 
-/* Actions screen — vertical stack of tappable buttons. Each is a
- * 1-px bordered full-width rect with a centred label; dispatch_touch
- * resolves a tap to the button's TouchResult, and main.cpp performs
- * the action (most reboot, so they exit the wheel implicitly).
- *
- * v0.1.6: added "Switch WiFi" — pushes the WiFi modal in-place rather
- * than the modal living as its own wheel slot. The 200×200 panel fits
- * 7 buttons at 22 px tall (was 24, lost 2 to make room). */
-static void render_actions(epaper_driver_display *epd) {
-    epd_ui::clear(epd);
-    clear_buttons();
+/* Add a full-width tappable row to a vertical container. */
+static lv_obj_t *add_row(lv_obj_t *parent, const char *label,
+                         TouchResult action, const char *ssid_payload) {
+    lv_obj_t *btn = lv_button_create(parent);
+    lv_obj_set_width(btn, lv_pct(100));
+    lv_obj_set_height(btn, 28);
+    lv_obj_t *lab = lv_label_create(btn);
+    lv_label_set_text(lab, label);
+    lv_obj_center(lab);
+    lv_obj_set_user_data(btn, (void *)ssid_payload);
+    lv_obj_add_event_cb(btn, on_click, LV_EVENT_CLICKED,
+        (void *)(uintptr_t)action);
+    return btn;
+}
 
-    epd_ui::draw_text_centered(epd, 4, 2, "ACTIONS");
+static void build_actions(void) {
+    if (s_actions_scr) return;
+    s_actions_scr = lv_obj_create(nullptr);
+    lv_obj_set_layout(s_actions_scr, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(s_actions_scr, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_actions_scr,
+        LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(s_actions_scr, 4, 0);
+    lv_obj_set_style_pad_gap(s_actions_scr, 4, 0);
 
-    static const struct { TouchResult action; const char *label; } items[] = {
-        { TouchResult::SwitchWifi,    "Switch WiFi"     },
-        { TouchResult::ChangeWifi,    "Add WiFi"        },
-        { TouchResult::ForgetWifi,    "Forget WiFi"     },
-        { TouchResult::UpdateNow,     "Update now"      },
-        { TouchResult::RePair,        "Re-pair device"  },
-        { TouchResult::GoHome,        "Go home"         },
-        { TouchResult::OpenKeyPortal, "OpenAI key"      },
-    };
-    constexpr int N = (int)(sizeof(items) / sizeof(items[0]));
-    constexpr int BTN_MARGIN = 2;
-    constexpr int BTN_W = MOCHI_EPD_WIDTH - 2 * BTN_MARGIN;
-    constexpr int BTN_H = 22;
-    constexpr int BTN_GAP = 2;
-    constexpr int TOP_Y = 18;
+    lv_obj_t *title = lv_label_create(s_actions_scr);
+    lv_label_set_text(title, "ACTIONS");
 
-    int by = TOP_Y;
-    for (int i = 0; i < N; i++) {
-        Button b = { BTN_MARGIN, by, BTN_W, BTN_H, items[i].action, items[i].label };
-        draw_button_border(epd, b);
-        const int label_w = (int)strlen(b.label) * 8;
-        epd_ui::draw_text(epd, b.x + (b.w - label_w) / 2,
-                          b.y + (b.h - 8) / 2, 1, b.label);
-        register_button(b.x, b.y, b.w, b.h, b.action, b.label);
-        by += BTN_H + BTN_GAP;
+    add_row(s_actions_scr, "Switch WiFi",   TouchResult::SwitchWifi,    nullptr);
+    add_row(s_actions_scr, "Add WiFi",      TouchResult::ChangeWifi,    nullptr);
+    add_row(s_actions_scr, "Forget WiFi",   TouchResult::ForgetWifi,    nullptr);
+    add_row(s_actions_scr, "Update now",    TouchResult::UpdateNow,     nullptr);
+    add_row(s_actions_scr, "Re-pair",       TouchResult::RePair,        nullptr);
+    add_row(s_actions_scr, "OpenAI key",    TouchResult::OpenKeyPortal, nullptr);
+    add_row(s_actions_scr, "Go home",       TouchResult::GoHome,        nullptr);
+}
+
+/* WiFi modal — built fresh on each entry because the stored-network
+ * list is dynamic (NVS may have grown/shrunk since last entry).
+ * Earlier dev_menu state cleared button rects on re-render; LVGL's
+ * version replaces the whole screen tree. */
+static void build_wifi(void) {
+    if (s_wifi_scr) {
+        lv_obj_del(s_wifi_scr);
+        s_wifi_scr = nullptr;
     }
+    s_wifi_scr = lv_obj_create(nullptr);
+    lv_obj_set_layout(s_wifi_scr, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(s_wifi_scr, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_wifi_scr,
+        LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(s_wifi_scr, 4, 0);
+    lv_obj_set_style_pad_gap(s_wifi_scr, 4, 0);
 
-    epd->EPD_Init_Partial();
-    epd->EPD_DisplayPart();
-}
-
-/* WiFi modal — pushed from the Actions/SwitchWifi button. Lists the
- * stored networks (NVS MRU); tap one to commit the switch. Exits on
- * either a button-tap (handled in main.cpp) or the next PWR-tap
- * (advances back to Info). */
-static void render_wifi_modal(epaper_driver_display *epd, const char *cur_ssid) {
-    epd_ui::clear(epd);
-    clear_buttons();
-
-    epd_ui::draw_text_centered(epd, 4, 2, "SWITCH WIFI");
+    lv_obj_t *title = lv_label_create(s_wifi_scr);
+    lv_label_set_text(title, "SWITCH WIFI");
 
     const size_t stored = nvs_creds_count();
-    constexpr int BTN_MARGIN = 2;
-    constexpr int BTN_W = MOCHI_EPD_WIDTH - 2 * BTN_MARGIN;
-    constexpr int BTN_H = 24;
-    constexpr int BTN_GAP = 2;
-    constexpr int TOP_Y = 22;
-    const int max_rows = (MOCHI_EPD_HEIGHT - TOP_Y - 12) / (BTN_H + BTN_GAP);
-
-    int rows = (int)stored;
-    if (rows > max_rows) rows = max_rows;
-    if (rows > MAX_BUTTONS) rows = MAX_BUTTONS;
-
-    int by = TOP_Y;
-    for (int i = 0; i < rows; i++) {
+    int rendered = 0;
+    /* Borrow a static buffer per row for the SSID payload (lifetime
+     * = until the next build_wifi). 8 networks max; nvs_creds_count
+     * is implicitly bounded by the NVS-creds module's own cap. */
+    static char s_row_ssids[8][MOCHI_WIFI_SSID_MAX + 1];
+    static char s_row_labels[8][MOCHI_WIFI_SSID_MAX + 4];
+    for (size_t i = 0; i < stored && i < 8; i++) {
         struct mochi_wifi_creds c = {};
-        if (!nvs_creds_load_at((size_t)i, &c)) continue;
-        const bool is_cur = cur_ssid && cur_ssid[0] &&
-                            strncmp(c.ssid, cur_ssid, MOCHI_WIFI_SSID_MAX) == 0;
-        char label[40];
-        snprintf(label, sizeof(label), "%s%.30s", is_cur ? "*" : " ", c.ssid);
-        Button b = { BTN_MARGIN, by, BTN_W, BTN_H, TouchResult::WifiSwitch, "" };
-        draw_button_border(epd, b);
-        epd_ui::draw_text(epd, b.x + 6, b.y + (b.h - 8) / 2, 1, label);
-        register_button(b.x, b.y, b.w, b.h, TouchResult::WifiSwitch, "", c.ssid);
-        by += BTN_H + BTN_GAP;
+        if (!nvs_creds_load_at(i, &c)) continue;
+        const bool is_cur = s_ssid[0] &&
+            strncmp(c.ssid, s_ssid, MOCHI_WIFI_SSID_MAX) == 0;
+        snprintf(s_row_ssids[rendered], sizeof(s_row_ssids[rendered]),
+            "%s", c.ssid);
+        snprintf(s_row_labels[rendered], sizeof(s_row_labels[rendered]),
+            "%s%s", is_cur ? "* " : "  ", c.ssid);
+        add_row(s_wifi_scr, s_row_labels[rendered],
+            TouchResult::WifiSwitch, s_row_ssids[rendered]);
+        rendered++;
     }
-
-    if (rows == 0) {
-        epd_ui::draw_text(epd, 4, TOP_Y + 8, 1, "no saved networks");
+    if (rendered == 0) {
+        lv_obj_t *empty = lv_label_create(s_wifi_scr);
+        lv_label_set_text(empty, "no saved networks\nAdd via Actions");
+        lv_obj_set_style_text_align(empty, LV_TEXT_ALIGN_CENTER, 0);
     }
-
-    epd_ui::draw_text(epd, 4, MOCHI_EPD_HEIGHT - 9, 1,
-                      rows > 0 ? "tap=switch  PWR exit" : "Add WiFi from Actions");
-
-    epd->EPD_Init_Partial();
-    epd->EPD_DisplayPart();
 }
 
-/* Last-known SSID for the WifiModal render; the modal is pushed in
- * dispatch_touch (no main.cpp params there), so we cache the value
- * during the most recent tick() / Actions render. Initialised empty;
- * a dispatch_touch happening before the first tick() falls back to
- * "no current network" which is fine. */
-static char s_last_ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
-
-TouchResult dispatch_touch(int x, int y) {
+/* ─── dispatch ─────────────────────────────────────────────────────
+ *
+ * With LVGL hit-testing in charge, dispatch_touch is now a thin
+ * adapter: it just exchanges the s_pending_action latch. The caller
+ * (main.cpp) feeds in (x, y) but they're unused here — LVGL's indev
+ * already has the position from its own poll. */
+TouchResult dispatch_touch(int /*x*/, int /*y*/) {
     if (s_mode == Mode::Live) return TouchResult::None;
-    for (int i = 0; i < s_button_count; i++) {
-        const Button &b = s_buttons[i];
-        if (x >= b.x && x < b.x + b.w &&
-            y >= b.y && y < b.y + b.h) {
-            ESP_LOGI(TAG, "button hit: '%s'", b.label);
-            if (b.action == TouchResult::SwitchWifi) {
-                /* Internal mode push — main.cpp doesn't see this. The
-                 * EPD render happens inline so the user sees the modal
-                 * the same tick they tapped. */
-                /* Need an epd to render. This one is held in tick()'s
-                 * call; we don't have it here — but we don't need to
-                 * re-render right now because tick() will run on the
-                 * next main loop iteration and pick up the new mode.
-                 * Touch in dispatch is dispatched from main's touch
-                 * handler which then re-runs tick() / render. As a
-                 * shortcut we mark the mode and the next tick handles
-                 * render: keep the user's touch frame fresh by
-                 * forcing s_press_pending so tick re-renders. */
-                s_mode = Mode::WifiModal;
-                s_entered_mode_us = esp_timer_get_time();
-                s_press_pending.store(true, std::memory_order_release);
-                return TouchResult::None;   /* swallowed by dev_menu */
-            }
-            if (b.action == TouchResult::WifiSwitch) {
-                snprintf(s_picked_ssid, sizeof(s_picked_ssid),
-                         "%s", s_button_ssid[i]);
-            }
-            return b.action;
-        }
-    }
-    return TouchResult::None;
+    /* Run a tick so any click event the indev has already enqueued
+     * gets dispatched to the on_click handler above before we read
+     * s_pending_action. main.cpp's tick happens earlier in the loop,
+     * but a touch arrives later in the same iteration — without this
+     * extra tick, the action wouldn't surface until the next loop. */
+    lvgl_port_tick();
+    TouchResult r = s_pending_action;
+    s_pending_action = TouchResult::None;
+    return r;
 }
 
-static void render_mode(epaper_driver_display *epd, Mode m,
-                        bool /*paired*/, const char *pet_name,
-                        const char *version, const char *ip_str,
-                        const char *ssid, int net_phase, int batt_pct) {
-    if (ssid) {
-        snprintf(s_last_ssid, sizeof(s_last_ssid), "%s", ssid);
-    }
+/* ─── Render ───────────────────────────────────────────────────────*/
+
+static void render_mode(Mode m) {
     switch (m) {
         case Mode::Info:
-            render_info(epd, pet_name, version, ip_str, ssid,
-                        net_phase, batt_pct);
+            build_info();
+            refresh_info();
+            lv_screen_load(s_info_scr);
             break;
         case Mode::Actions:
-            render_actions(epd);
+            build_actions();
+            lv_screen_load(s_actions_scr);
             break;
         case Mode::WifiModal:
-            render_wifi_modal(epd, s_last_ssid);
+            build_wifi();
+            lv_screen_load(s_wifi_scr);
             break;
+        case Mode::Live:
         default:
             /* Live is rendered by main.cpp's render_resting on the
-             * next tick after we exit; we just clear the mode. */
+             * next tick after we exit; we don't load any LVGL
+             * screen. */
             break;
     }
+    /* Force a full e-paper refresh on the first frame of each new
+     * screen so accumulated ghost from the previous mode clears. */
+    lvgl_port_force_full_refresh();
 }
 
-bool tick(epaper_driver_display *epd, bool paired,
+bool tick(epaper_driver_display * /*epd*/, bool /*paired*/,
           const char *pet_name, const char *version,
           const char *ip_str, const char *ssid,
           int net_phase, int batt_pct) {
     const int64_t now_us = esp_timer_get_time();
     bool changed = false;
 
+    /* Cache the freshest data so the WifiModal push (which doesn't
+     * receive params) can still see current values. Snapshot before
+     * we decide whether to render so the snapshot reflects the most
+     * recent main-loop state. */
+    if (pet_name) snprintf(s_pet_name, sizeof(s_pet_name), "%s", pet_name);
+    if (version)  snprintf(s_version,  sizeof(s_version),  "%s", version);
+    if (ip_str)   snprintf(s_ip_str,   sizeof(s_ip_str),   "%s", ip_str);
+    if (ssid)     snprintf(s_ssid,     sizeof(s_ssid),     "%s", ssid);
+    s_net_phase = net_phase;
+    s_batt_pct  = batt_pct;
+
     /* Consume any presses the watcher latched since the last tick.
      * exchange returns the prior value and resets the flag — so a
      * burst of fast presses inside one tick still advances the
-     * wheel exactly once (intentional). The SwitchWifi dispatch path
-     * also sets this flag — to force a re-render on the same tick
-     * the modal was pushed without doing the actual mode advance.
-     * We disambiguate by checking whether dispatch already changed
-     * s_mode to WifiModal: if it did, render-only; else, advance. */
+     * wheel exactly once. The SwitchWifi click handler also sets
+     * this flag (already having mutated s_mode) to force an
+     * immediate render of the modal on the same tick. */
     const bool pressed = s_press_pending.exchange(false, std::memory_order_acq_rel);
 
     if (pressed) {
-        if (s_mode != Mode::WifiModal) {
+        /* on_click already mutated s_mode for the SwitchWifi case
+         * (Mode::WifiModal). For the wheel-advance case, advance
+         * here. */
+        if (s_mode != Mode::WifiModal ||
+            (now_us - s_entered_mode_us) > 50 * 1000) {
             const Mode next = advance(s_mode);
             ESP_LOGI(TAG, "PWR: %s → %s", mode_name(s_mode), mode_name(next));
-            clear_buttons();
             s_mode = next;
         } else {
             ESP_LOGI(TAG, "modal push → wifi_modal");
-            /* Mode already set by dispatch_touch; just re-render.
-             * Buttons cleared inside render_wifi_modal. */
         }
         s_entered_mode_us = now_us;
-        render_mode(epd, s_mode, paired, pet_name, version,
-                    ip_str, ssid, net_phase, batt_pct);
+        render_mode(s_mode);
         changed = true;
-    } else if (s_mode != Mode::Live &&
-               (now_us - s_entered_mode_us) >= INACTIVITY_US) {
+    } else if (s_mode == Mode::Info) {
+        /* Refresh Info content without a screen swap so RAM/PSRAM/
+         * batt readings stay live while the screen is up. Cheap;
+         * LVGL only re-renders the label's dirty area. */
+        refresh_info();
+    }
+
+    if (s_mode != Mode::Live &&
+        (now_us - s_entered_mode_us) >= INACTIVITY_US && !changed) {
         ESP_LOGI(TAG, "inactivity timeout → live");
         s_mode = Mode::Live;
-        clear_buttons();
         changed = true;
     }
     return changed;

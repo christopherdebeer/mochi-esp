@@ -41,6 +41,7 @@
 #include "epaper_driver_bsp.h"
 #include "epd_ui.h"
 #include "dev_menu.h"
+#include "lvgl_port.h"
 #include "nvs_creds.h"
 #include "wifi_prov.h"
 #include "wifi_sta.h"
@@ -636,8 +637,14 @@ extern "C" void app_main(void) {
     epd->EPD_Display();
     epd->EPD_DisplayPartBaseImage();
 
-    /* Dev-menu wheel: BOOT short-press cycles splash → diagnostics →
-     * (future modes), 5 s inactivity returns to live. See dev_menu.h. */
+    /* LVGL port — bridges the Waveshare e-paper + FT6336 touch into
+     * LVGL widgets, used by the dev_menu wheel screens (Info /
+     * Actions / WifiModal). Live pet rendering still uses the bare
+     * epd_ui draw helpers; LVGL is opt-in per-screen. */
+    lvgl_port_init(epd);
+
+    /* Dev-menu wheel: PWR-double-tap enters Info; subsequent PWR taps
+     * cycle Info → Actions → Info; 60 s inactivity returns to live. */
     dev_menu::init(epd);
 
     /* Factory-reset watchdog. Runs in parallel with everything from
@@ -1883,6 +1890,13 @@ extern "C" void app_main(void) {
                 ota_update::current_version(),
                 s_net_ip, s_net_ssid,
                 (int)s_net_phase, batt_pct_now);
+            /* LVGL runs only while the wheel owns the screen. Tick
+             * after dev_menu::tick so any widget mutations the screen
+             * just made are picked up on this iteration. Cheap when
+             * nothing's dirty (LVGL skips the flush_cb entirely). */
+            if (dev_menu::active()) {
+                lvgl_port_tick();
+            }
             if (dev_menu::active()) {
                 if (got_touch) {
                     /* Action buttons (e.g. Settings → "open key portal")
