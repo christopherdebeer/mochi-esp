@@ -136,7 +136,9 @@ static void draw_vline_black(uint8_t *dst, size_t dst_w, size_t dst_h,
  * is a few hundred kilo-ops per render — negligible on ESP32, and
  * we only re-render when the bubble actually shows. */
 
-struct cloud_disc { int8_t cx, cy, r; };
+/* Panel coords exceed int8_t (max 127) for the bubble's right + bottom
+ * disc rows — use int16_t for cx/cy. r stays int8_t (always 4 today). */
+struct cloud_disc { int16_t cx, cy; int8_t r; };
 
 /* Disc positions tuned for the 92×36 central rect. Stagger the
  * vertical offsets slightly between adjacent top/bottom discs so
