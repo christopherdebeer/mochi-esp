@@ -1,21 +1,23 @@
 # Partition table for ESP32-S3-N8R8 (8MB flash).
 #
-# Layout (OTA-capable, post-M14):
-#   0x00000   bootloader (~32KB, managed by ESP-IDF)
-#   0x08000   partition table (4KB)
-#   0x09000   nvs              16KB    WiFi creds, pairing token, prefs
-#   0x0D000   otadata           8KB    Boot-slot selector (two sectors)
-#   0x0F000   phy_init          4KB    Radio calibration
-#   0x10000   ota_0             2MB    Application slot A
-#   0x210000  ota_1             2MB    Application slot B
-#   0x410000  storage          ~4MB    Sprite cache + event log (LittleFS)
+# Layout (OTA-capable, post-v0.1.5 partition bump):
+#   0x000000  bootloader (~32KB, managed by ESP-IDF)
+#   0x008000  partition table (4KB)
+#   0x009000  nvs              16KB    WiFi creds, pairing token, prefs
+#   0x00D000  otadata           8KB    Boot-slot selector (two sectors)
+#   0x00F000  phy_init          4KB    Radio calibration
+#   0x010000  ota_0             3MB    Application slot A
+#   0x310000  ota_1             3MB    Application slot B
+#   0x610000  storage         ~1.9MB   Sprite cache + event log (LittleFS)
 #   0x800000  end (8MB)
 #
-# History: through M13 this was a single 2 MB `factory` slot with a
-# ~6 MB `storage` tail. M14 introduced OTA, swapping factory for the
-# canonical ota_0 + ota_1 + otadata trio. `storage` shrank from ~6 MB
-# to ~4 MB — still generous headroom for the sprite cache (which sits
-# well under 1 MB resident) and future event log.
+# History:
+#   M14: factory-only → ota_0 (2MB) + ota_1 (2MB) + storage (~4MB).
+#   v0.1.6: ota slots bumped 2MB → 3MB; storage shrinks 4MB → ~1.9MB.
+#   The voice + AEC + LVGL-curious path was eating the 2 MB slot
+#   (build hit 99% full at v0.1.5). Storage residency is well under
+#   1 MB (sprite cache + event log + voice diag), so the headroom
+#   trade-off goes to the application slot.
 #
 # With no `factory` partition the bootloader follows `otadata` to
 # choose between ota_0 and ota_1. First USB flash writes to ota_0
@@ -23,22 +25,23 @@
 # to first valid ota_X). Every subsequent OTA update writes to the
 # *other* slot and atomically flips otadata on reboot.
 #
-# IMPORTANT: this layout is binary-incompatible with the old
-# factory-only one. The first install of an OTA-capable image MUST
-# come over USB; we can't stage a new bootloader + new partition
-# table from an old image's runtime. After that one reflash, all
-# further updates can go OTA. The reflash wipes the LittleFS
-# storage partition too (it moves from 0x210000 → 0x410000), so any
-# cached sprites are re-fetched on first boot of the OTA image.
+# IMPORTANT: this layout is binary-incompatible with the previous
+# 2 MB / 2 MB / 4 MB layout. The first install of an image with
+# this partition table MUST come over USB; we can't stage a new
+# bootloader + new partition table from an old image's runtime.
+# The reflash wipes the LittleFS storage partition (it moves from
+# 0x410000 → 0x610000), so any cached sprites are re-fetched on
+# first boot. WiFi creds + pairing in NVS survive (NVS offset is
+# unchanged at 0x9000).
 #
 # Application code mounts the LittleFS partition by label `storage`,
-# not by offset/subtype, so sprite_cache + future event log code
-# keeps working unchanged.
+# not by offset/subtype, so sprite_cache + event log code keeps
+# working unchanged.
 
 # Name,    Type, SubType, Offset,   Size,    Flags
 nvs,       data, nvs,     0x9000,   0x4000,
 otadata,   data, ota,     0xd000,   0x2000,
 phy_init,  data, phy,     0xf000,   0x1000,
-ota_0,     app,  ota_0,   0x10000,  0x200000,
-ota_1,     app,  ota_1,   0x210000, 0x200000,
-storage,   data, littlefs, 0x410000, 0x3f0000,
+ota_0,     app,  ota_0,   0x10000,  0x300000,
+ota_1,     app,  ota_1,   0x310000, 0x300000,
+storage,   data, littlefs, 0x610000, 0x1f0000,

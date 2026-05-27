@@ -2387,10 +2387,18 @@ extern "C" void app_main(void) {
          * the screen) or while the tap landed in the status-bar
          * stripe (no zones up there).
          *
-         * Forgiving snap: ZONE_SLOP_PX widens each rect by 16 px
-         * before we give up and fall through to corner-quadrant
-         * dispatch. The pet-body case is checked first so a pat near
-         * a zone doesn't get hijacked. */
+         * Forgiving snap: ZONE_SLOP_PX widens each rect by 16 px so a
+         * tap near (but not inside) an authored rect still resolves.
+         *
+         * Lenient overlap policy: scene zones win even when the tap
+         * lands inside the pet sprite's bounding box. The pet
+         * frequently sits over food/heart/play/door icons in scenes_a;
+         * a kid putting their finger on the food bowl shouldn't be
+         * pre-empted by "ah you tapped the pet". The pet is only
+         * resolved as the target if NO scene zone (with slop) and NO
+         * care icon hit. tapped_pet is still tracked for the pet-tap
+         * delight path below — but it's the LAST priority, not the
+         * first. */
         constexpr int ZONE_SLOP_PX = 16;
         const bool tapped_pet =
             (int)ev.x >= PET_DX && (int)ev.x <  PET_DX + (int)PET_CELL_W &&
@@ -2399,9 +2407,8 @@ extern "C" void app_main(void) {
         scene_pack_action_t scene_act = {};
         bool scene_hit = false;
         if (!tapped_thought && (int)ev.y >= STATUS_BAR_H) {
-            const int slop = tapped_pet ? 0 : ZONE_SLOP_PX;
             scene_hit = scene_pack_action_at(
-                (int16_t)ev.x, (int16_t)ev.y, slop, &scene_act);
+                (int16_t)ev.x, (int16_t)ev.y, ZONE_SLOP_PX, &scene_act);
         }
 
         const char *expr = tapped_thought
@@ -2532,14 +2539,50 @@ extern "C" void app_main(void) {
             }
         }
 
+        /* Pet-tap delight pool. v0.1.6: now that BOOT owns voice
+         * start/stop, taps on the pet body are free to express
+         * personality. We rotate through a small pool of expressive
+         * faces so a kid poking at the pet feels like the pet is
+         * reacting (rather than always settling to the same
+         * "comforted"). No event_log entry — purely visual delight,
+         * the substrate stats stay untouched. The rotation is
+         * deterministic by tap count rather than RNG so a fast tap
+         * sequence cycles instead of repeating.
+         *
+         * Used in two places below: the zoned-scene fallthrough
+         * (no zone hit + tap on pet), and the unzoned-scene
+         * Zone::Center path. */
+        static const char *const DELIGHT_EXPRS[] = {
+            "curious", "cheerful_wave", "excited",
+            "comforted", "thinking",
+        };
+        constexpr int DELIGHT_N = (int)(sizeof(DELIGHT_EXPRS) /
+                                        sizeof(DELIGHT_EXPRS[0]));
+        static int s_delight_idx = 0;
+        auto pick_delight = [&]() -> const char * {
+            const char *e = DELIGHT_EXPRS[s_delight_idx % DELIGHT_N];
+            s_delight_idx++;
+            return e;
+        };
+
         /* When the current scene has authored zones, the corner-
          * quadrant fallback is suppressed: a tap that misses every
-         * zone (after the snap fallback above) resolves to either
-         * "comforted" (tap landed on the pet body — a pat) or
-         * "curious" (empty scene background). */
+         * zone (after the snap fallback above) resolves to either a
+         * delight expression (pet body — a pat) or "curious" (empty
+         * scene background). */
         const bool zoned = scene_pack_current_has_zones();
         if (zoned && !scene_hit && !tapped_thought) {
-            expr = tapped_pet ? "comforted" : "curious";
+            expr = tapped_pet ? pick_delight() : "curious";
+        }
+
+        /* Unzoned scene + tap on the pet body resolves to a delight
+         * expression too — the legacy zone_to_expr returned "curious"
+         * for Zone::Center, which is fine for non-pet centre taps but
+         * pre-empted the pet-tap delight intent on a tap that landed
+         * on the pet. */
+        if (!zoned && !scene_hit && !tapped_thought &&
+            z == Zone::Center && tapped_pet) {
+            expr = pick_delight();
         }
 
         /* event-kind zones: derive expr from the pack-supplied

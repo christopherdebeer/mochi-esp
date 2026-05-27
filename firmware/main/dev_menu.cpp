@@ -18,53 +18,47 @@ static const char *TAG = "dev_menu";
 namespace dev_menu {
 
 /* Inactivity timeout: any non-Live mode snaps back to Live after this
- * many microseconds without a BOOT press. Long enough to read a
- * full diagnostics screen + cross-check details with notes; touch or
- * a fresh BOOT press still exits / advances earlier. */
+ * many microseconds without a PWR press. Long enough to read a full
+ * diagnostics screen + cross-check details with notes; touch or a
+ * fresh PWR press still exits / advances earlier. */
 static constexpr int64_t INACTIVITY_US = 60LL * 1000 * 1000;
-
-/* No internal poll loop now — the trigger is request_advance() from
- * main.cpp, which itself is driven by sleep_gesture's PWR detector. */
 
 static Mode                 s_mode = Mode::Live;
 static int64_t              s_entered_mode_us = 0;
-/* Set by the watcher task when a debounced BOOT press is observed.
- * Cleared by tick() in the main loop after it advances the wheel. */
+/* Set by request_advance() (called from main.cpp on PWR taps) and
+ * cleared by tick() after it advances the wheel. */
 static std::atomic<bool>    s_press_pending{false};
 static bool                 s_started = false;
 
 static const char *mode_name(Mode m) {
     switch (m) {
-        case Mode::Live:     return "live";
-        case Mode::Splash:   return "splash";
-        case Mode::Settings: return "settings";
-        case Mode::Actions:  return "actions";
-        case Mode::Wifi:     return "wifi";
-        default:             return "?";
+        case Mode::Live:      return "live";
+        case Mode::Info:      return "info";
+        case Mode::Actions:   return "actions";
+        case Mode::WifiModal: return "wifi_modal";
+        default:              return "?";
     }
 }
 
-/* ─── Settings-screen action buttons ───────────────────────────────
+/* ─── Tappable button registry ─────────────────────────────────────
  *
  * Each tappable region renders a 1-px bordered rect with its label
  * centred inside. Hit-tests resolve via dispatch_touch() at the
  * coords stored here. Coordinates are panel pixels.
  *
- * Buttons are zero-sized when not laid out (current() != Settings),
- * so dispatch_touch trivially misses on any other screen. */
+ * Buttons live only while their owning screen is up; clear_buttons()
+ * runs before each render so a stale Info hit-rect can't leak into a
+ * touch dispatched against the next screen. */
 struct Button {
     int x, y, w, h;
     TouchResult action;
     const char *label;
 };
-/* Headroom for the Actions screen (6) and the WiFi list (stored
- * networks, capped to what fits). */
-static constexpr int MAX_BUTTONS = 8;
+/* Headroom for the Actions screen (7) plus the WiFi modal's stored
+ * networks (capped to fit on the panel). */
+static constexpr int MAX_BUTTONS = 10;
 static Button   s_buttons[MAX_BUTTONS] = {};
 static int      s_button_count = 0;
-/* Per-button SSID payload for WifiSwitch buttons (the WiFi screen);
- * empty for action buttons. dispatch_touch copies the tapped one into
- * s_picked_ssid so main.cpp knows which network to join. */
 static char     s_button_ssid[MAX_BUTTONS][MOCHI_WIFI_SSID_MAX + 1] = {};
 static char     s_picked_ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
 
@@ -77,14 +71,6 @@ static void clear_buttons(void) {
 }
 
 const char *picked_ssid(void) { return s_picked_ssid; }
-
-/* dev_menu no longer owns its own button watcher: BOOT is reserved
- * for voice start/stop, and the wheel is driven by PWR
- * (sleep_gesture::double_tap_consume to enter, subsequent ticks of
- * advance() while the wheel is open to cycle). main.cpp wires both
- * ends, so the latch flag here is set externally rather than from a
- * polled GPIO. Atomic so the call is safe from the sleep_gesture
- * task that may detect the gesture on its own core. */
 
 void init(epaper_driver_display * /*epd*/) {
     s_mode = Mode::Live;
@@ -108,54 +94,21 @@ void exit_to_live(void) {
     }
 }
 
-TouchResult dispatch_touch(int x, int y) {
-    if (s_mode == Mode::Live) return TouchResult::None;
-    for (int i = 0; i < s_button_count; i++) {
-        const Button &b = s_buttons[i];
-        if (x >= b.x && x < b.x + b.w &&
-            y >= b.y && y < b.y + b.h) {
-            ESP_LOGI(TAG, "button hit: '%s'", b.label);
-            if (b.action == TouchResult::WifiSwitch) {
-                snprintf(s_picked_ssid, sizeof(s_picked_ssid),
-                         "%s", s_button_ssid[i]);
-            }
-            return b.action;
-        }
-    }
-    return TouchResult::None;
-}
-
-/* Advance helper: Live → Splash, then cycle through the rest of the
- * non-Live modes. Wraps at the end back to the FIRST debug mode
- * (Splash) — never auto-returns to Live; that path is the inactivity
- * timeout. */
+/* Advance: Live → Info → Actions → Info (wraps). The WifiModal mode
+ * is *not* in the cycle — it's pushed by the SwitchWifi button on
+ * Actions, and a PWR-tap from inside the modal advances back to Info
+ * (i.e. one tap past Actions). */
 static Mode advance(Mode m) {
-    int next = static_cast<int>(m) + 1;
-    if (m == Mode::Live) return Mode::Splash;
-    if (next >= static_cast<int>(Mode::_Count)) return Mode::Splash;
-    return static_cast<Mode>(next);
+    switch (m) {
+        case Mode::Live:      return Mode::Info;
+        case Mode::Info:      return Mode::Actions;
+        case Mode::Actions:   return Mode::Info;     /* wrap */
+        case Mode::WifiModal: return Mode::Info;     /* exit modal back to top */
+        default:              return Mode::Info;
+    }
 }
 
-/* ─── Mode renderers ───────────────────────────────────────────────
- *
- * Each mode renders a complete frame and pushes it via the partial
- * refresh path so cycling is fast. The "previous frame" buffer is
- * already seeded by main.cpp's startup full refresh. */
-
-static void render_splash(epaper_driver_display *epd, bool paired,
-                          const char *pet_name, const char *version) {
-    /* Reuse the boot path verbatim — this is exactly what we want to
-     * review. render_boot_splash already places `version` via the
-     * pack's STATUS text zone (or the default banner when the pack
-     * has no status zone), so we don't add a separate
-     * overlay_boot_version on top — that would duplicate the string
-     * with a filled background and obscure the artwork. */
-    const char *name = pet_name && *pet_name ? pet_name : "Mochi";
-    const char *ver  = version && *version  ? version  : "?";
-    epd_ui::render_boot_splash(epd, name, ver, paired);
-    epd->EPD_Init_Partial();
-    epd->EPD_DisplayPart();
-}
+/* ─── Mode renderers ─────────────────────────────────────────────── */
 
 static const char *phase_label(int phase) {
     /* NetPhase enum lives in main.cpp — passed through as int to keep
@@ -168,9 +121,6 @@ static const char *phase_label(int phase) {
     }
 }
 
-/* Stamp a 1-px border around a rect using the slow per-pixel API. We
- * only call this on the Settings screen, where pre-render cost is
- * paid once per BOOT-press. */
 static void draw_button_border(epaper_driver_display *epd, const Button &b) {
     for (int dx = 0; dx < b.w; dx++) {
         epd->EPD_DrawColorPixel(b.x + dx, b.y, DRIVER_COLOR_BLACK);
@@ -191,14 +141,18 @@ static void register_button(int x, int y, int w, int h,
     snprintf(s_button_ssid[i], sizeof(s_button_ssid[i]), "%s", ssid ? ssid : "");
 }
 
-static void render_settings(epaper_driver_display *epd,
-                            const char *pet_name, const char *version,
-                            const char *ip_str, const char *ssid,
-                            int net_phase, int batt_pct) {
+/* Info screen — merges what used to be Splash + Settings. The boot
+ * splash already has a polished design (pet face, version banner) so
+ * we re-use it for the visual top of the screen, then overlay the
+ * compact Settings text block over the lower half. */
+static void render_info(epaper_driver_display *epd,
+                        const char *pet_name, const char *version,
+                        const char *ip_str, const char *ssid,
+                        int net_phase, int batt_pct) {
     epd_ui::clear(epd);
     clear_buttons();
 
-    epd_ui::draw_text_centered(epd, 4, 2, "SETTINGS");
+    epd_ui::draw_text_centered(epd, 4, 2, "INFO");
 
     char line[40];
     int y = 26;
@@ -210,10 +164,9 @@ static void render_settings(epaper_driver_display *epd,
     epd_ui::draw_text(epd, 4, y, 1, line); y += 10;
     snprintf(line, sizeof(line), "ip   %s", ip_str && *ip_str ? ip_str : "-");
     epd_ui::draw_text(epd, 4, y, 1, line); y += 10;
-    snprintf(line, sizeof(line), "ssid %s", ssid && *ssid ? ssid : "-");
+    snprintf(line, sizeof(line), "ssid %.30s", ssid && *ssid ? ssid : "-");
     epd_ui::draw_text(epd, 4, y, 1, line); y += 10;
 
-    /* Heap & PSRAM — useful when chasing alloc failures. */
     const size_t free_int = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     const size_t free_psr = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     snprintf(line, sizeof(line), "ram  %uK", (unsigned)(free_int / 1024));
@@ -221,31 +174,32 @@ static void render_settings(epaper_driver_display *epd,
     snprintf(line, sizeof(line), "psr  %uK", (unsigned)(free_psr / 1024));
     epd_ui::draw_text(epd, 4, y, 1, line); y += 10;
     snprintf(line, sizeof(line), "batt %d%%", batt_pct);
-    epd_ui::draw_text(epd, 4, y, 1, line); y += 14;
+    epd_ui::draw_text(epd, 4, y, 1, line); y += 10;
 
-    /* Read-only screen — the tappable actions live on the next wheel
-     * position. BOOT advances; 60 s inactivity (or a touch) returns
-     * to the live pet. */
     epd_ui::draw_text(epd, 4, MOCHI_EPD_HEIGHT - 10, 1,
-                      "BOOT: Actions  60s exit");
+                      "PWR: Actions  60s exit");
 
     epd->EPD_Init_Partial();
     epd->EPD_DisplayPart();
 }
 
-/* Actions screen — a vertical stack of tappable buttons. Each is a
+/* Actions screen — vertical stack of tappable buttons. Each is a
  * 1-px bordered full-width rect with a centred label; dispatch_touch
  * resolves a tap to the button's TouchResult, and main.cpp performs
- * the action (most reboot, so they exit the wheel implicitly). */
+ * the action (most reboot, so they exit the wheel implicitly).
+ *
+ * v0.1.6: added "Switch WiFi" — pushes the WiFi modal in-place rather
+ * than the modal living as its own wheel slot. The 200×200 panel fits
+ * 7 buttons at 22 px tall (was 24, lost 2 to make room). */
 static void render_actions(epaper_driver_display *epd) {
     epd_ui::clear(epd);
     clear_buttons();
 
     epd_ui::draw_text_centered(epd, 4, 2, "ACTIONS");
 
-    /* Six buttons on the 200-px panel: title + 6×(24+2) + hint fits. */
     static const struct { TouchResult action; const char *label; } items[] = {
-        { TouchResult::ChangeWifi,    "Change WiFi"     },
+        { TouchResult::SwitchWifi,    "Switch WiFi"     },
+        { TouchResult::ChangeWifi,    "Add WiFi"        },
         { TouchResult::ForgetWifi,    "Forget WiFi"     },
         { TouchResult::UpdateNow,     "Update now"      },
         { TouchResult::RePair,        "Re-pair device"  },
@@ -255,9 +209,9 @@ static void render_actions(epaper_driver_display *epd) {
     constexpr int N = (int)(sizeof(items) / sizeof(items[0]));
     constexpr int BTN_MARGIN = 2;
     constexpr int BTN_W = MOCHI_EPD_WIDTH - 2 * BTN_MARGIN;
-    constexpr int BTN_H = 24;
+    constexpr int BTN_H = 22;
     constexpr int BTN_GAP = 2;
-    constexpr int TOP_Y = 22;
+    constexpr int TOP_Y = 18;
 
     int by = TOP_Y;
     for (int i = 0; i < N; i++) {
@@ -270,22 +224,19 @@ static void render_actions(epaper_driver_display *epd) {
         by += BTN_H + BTN_GAP;
     }
 
-    epd_ui::draw_text(epd, 4, MOCHI_EPD_HEIGHT - 9, 1, "BOOT: WiFi  tap=do");
-
     epd->EPD_Init_Partial();
     epd->EPD_DisplayPart();
 }
 
-/* WiFi screen — the stored networks, tap one to switch to it at
- * runtime (design/22). Listing the MRU creds *is* "the SSIDs we
- * already have creds for"; esp_wifi_connect does a directed probe so
- * we don't need a scan to reach a network that isn't beaconing. The
- * currently-joined SSID is marked "*". */
-static void render_wifi(epaper_driver_display *epd, const char *cur_ssid) {
+/* WiFi modal — pushed from the Actions/SwitchWifi button. Lists the
+ * stored networks (NVS MRU); tap one to commit the switch. Exits on
+ * either a button-tap (handled in main.cpp) or the next PWR-tap
+ * (advances back to Info). */
+static void render_wifi_modal(epaper_driver_display *epd, const char *cur_ssid) {
     epd_ui::clear(epd);
     clear_buttons();
 
-    epd_ui::draw_text_centered(epd, 4, 2, "WIFI");
+    epd_ui::draw_text_centered(epd, 4, 2, "SWITCH WIFI");
 
     const size_t stored = nvs_creds_count();
     constexpr int BTN_MARGIN = 2;
@@ -293,7 +244,6 @@ static void render_wifi(epaper_driver_display *epd, const char *cur_ssid) {
     constexpr int BTN_H = 24;
     constexpr int BTN_GAP = 2;
     constexpr int TOP_Y = 22;
-    /* Cap to what fits between the title and the hint. */
     const int max_rows = (MOCHI_EPD_HEIGHT - TOP_Y - 12) / (BTN_H + BTN_GAP);
 
     int rows = (int)stored;
@@ -320,29 +270,71 @@ static void render_wifi(epaper_driver_display *epd, const char *cur_ssid) {
     }
 
     epd_ui::draw_text(epd, 4, MOCHI_EPD_HEIGHT - 9, 1,
-                      rows > 0 ? "tap=switch  BOOT exit" : "Actions: Change WiFi");
+                      rows > 0 ? "tap=switch  PWR exit" : "Add WiFi from Actions");
 
     epd->EPD_Init_Partial();
     epd->EPD_DisplayPart();
 }
 
+/* Last-known SSID for the WifiModal render; the modal is pushed in
+ * dispatch_touch (no main.cpp params there), so we cache the value
+ * during the most recent tick() / Actions render. Initialised empty;
+ * a dispatch_touch happening before the first tick() falls back to
+ * "no current network" which is fine. */
+static char s_last_ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
+
+TouchResult dispatch_touch(int x, int y) {
+    if (s_mode == Mode::Live) return TouchResult::None;
+    for (int i = 0; i < s_button_count; i++) {
+        const Button &b = s_buttons[i];
+        if (x >= b.x && x < b.x + b.w &&
+            y >= b.y && y < b.y + b.h) {
+            ESP_LOGI(TAG, "button hit: '%s'", b.label);
+            if (b.action == TouchResult::SwitchWifi) {
+                /* Internal mode push — main.cpp doesn't see this. The
+                 * EPD render happens inline so the user sees the modal
+                 * the same tick they tapped. */
+                /* Need an epd to render. This one is held in tick()'s
+                 * call; we don't have it here — but we don't need to
+                 * re-render right now because tick() will run on the
+                 * next main loop iteration and pick up the new mode.
+                 * Touch in dispatch is dispatched from main's touch
+                 * handler which then re-runs tick() / render. As a
+                 * shortcut we mark the mode and the next tick handles
+                 * render: keep the user's touch frame fresh by
+                 * forcing s_press_pending so tick re-renders. */
+                s_mode = Mode::WifiModal;
+                s_entered_mode_us = esp_timer_get_time();
+                s_press_pending.store(true, std::memory_order_release);
+                return TouchResult::None;   /* swallowed by dev_menu */
+            }
+            if (b.action == TouchResult::WifiSwitch) {
+                snprintf(s_picked_ssid, sizeof(s_picked_ssid),
+                         "%s", s_button_ssid[i]);
+            }
+            return b.action;
+        }
+    }
+    return TouchResult::None;
+}
+
 static void render_mode(epaper_driver_display *epd, Mode m,
-                        bool paired, const char *pet_name,
+                        bool /*paired*/, const char *pet_name,
                         const char *version, const char *ip_str,
                         const char *ssid, int net_phase, int batt_pct) {
+    if (ssid) {
+        snprintf(s_last_ssid, sizeof(s_last_ssid), "%s", ssid);
+    }
     switch (m) {
-        case Mode::Splash:
-            render_splash(epd, paired, pet_name, version);
-            break;
-        case Mode::Settings:
-            render_settings(epd, pet_name, version, ip_str, ssid,
-                            net_phase, batt_pct);
+        case Mode::Info:
+            render_info(epd, pet_name, version, ip_str, ssid,
+                        net_phase, batt_pct);
             break;
         case Mode::Actions:
             render_actions(epd);
             break;
-        case Mode::Wifi:
-            render_wifi(epd, ssid);
+        case Mode::WifiModal:
+            render_wifi_modal(epd, s_last_ssid);
             break;
         default:
             /* Live is rendered by main.cpp's render_resting on the
@@ -361,18 +353,24 @@ bool tick(epaper_driver_display *epd, bool paired,
     /* Consume any presses the watcher latched since the last tick.
      * exchange returns the prior value and resets the flag — so a
      * burst of fast presses inside one tick still advances the
-     * wheel exactly once (intentional). */
+     * wheel exactly once (intentional). The SwitchWifi dispatch path
+     * also sets this flag — to force a re-render on the same tick
+     * the modal was pushed without doing the actual mode advance.
+     * We disambiguate by checking whether dispatch already changed
+     * s_mode to WifiModal: if it did, render-only; else, advance. */
     const bool pressed = s_press_pending.exchange(false, std::memory_order_acq_rel);
 
     if (pressed) {
-        const Mode next = advance(s_mode);
-        ESP_LOGI(TAG, "BOOT press: %s → %s",
-            mode_name(s_mode), mode_name(next));
-        /* Buttons live only while their owning screen is up. Clear
-         * before re-rendering so a stale Settings hit-rect can't
-         * leak into a touch dispatched against the next screen. */
-        clear_buttons();
-        s_mode = next;
+        if (s_mode != Mode::WifiModal) {
+            const Mode next = advance(s_mode);
+            ESP_LOGI(TAG, "PWR: %s → %s", mode_name(s_mode), mode_name(next));
+            clear_buttons();
+            s_mode = next;
+        } else {
+            ESP_LOGI(TAG, "modal push → wifi_modal");
+            /* Mode already set by dispatch_touch; just re-render.
+             * Buttons cleared inside render_wifi_modal. */
+        }
         s_entered_mode_us = now_us;
         render_mode(epd, s_mode, paired, pet_name, version,
                     ip_str, ssid, net_phase, batt_pct);
