@@ -27,11 +27,16 @@ static constexpr int PANEL_H = MOCHI_EPD_HEIGHT;
 static constexpr int PANEL_STRIDE = (PANEL_W + 7) / 8;
 static constexpr int PANEL_BYTES = PANEL_STRIDE * PANEL_H;
 
-/* Refresh policy. e-paper accumulates ghosting after repeated partial
- * updates, so a periodic FULL refresh (EPD_Init + EPD_Display) clears
- * it. The user perceives the full as a brief panel-flash; doing it
- * on every Nth wheel transition keeps it bearable. */
-static constexpr int FULL_REFRESH_EVERY = 6;
+/* Refresh policy. e-paper accumulates ghosting on repeated partial
+ * updates, so we *do* need a periodic full refresh to clear it —
+ * but only at human-scale cadence. v0.1.7's first cut counted every
+ * partial flush and full-refreshed every 6th; combined with the new
+ * 33 Hz dispatcher that fired ~5 fulls/sec and made the menu look
+ * like a strobe. Now: explicit force_full_refresh on screen swaps,
+ * and an auto-trigger only after a long quiescent run of partials
+ * (32 in a row). Tuned so a static menu doesn't randomly re-flash
+ * mid-read. */
+static constexpr int FULL_REFRESH_EVERY = 32;
 
 /* Tick. LVGL needs lv_tick_inc called periodically (default doc says
  * 5 ms); a FreeRTOS gptimer or esp_timer is the canonical source. */
@@ -74,6 +79,17 @@ static uint8_t              *s_buf_b = nullptr;
 
 static int                   s_partial_count = 0;
 static volatile bool         s_force_full = false;
+
+/* Minimum interval between EPD pushes. The Waveshare 1.54" V2 takes
+ * ~300 ms for a partial refresh and ~600 ms for a full; firing more
+ * often than that does nothing visually but bombards the panel
+ * driver. With the 33 Hz LVGL dispatcher, jittery touch position
+ * input would otherwise cause back-to-back partials that read on
+ * hardware as a continuous flicker. 250 ms ≈ "as fast as the panel
+ * can handle"; LVGL sees its flush_cb still fire (so it doesn't
+ * back up its dirty list), we just NO-OP the EPD push. */
+static constexpr int64_t     EPD_MIN_INTERVAL_US = 250 * 1000;
+static int64_t               s_last_epd_us = 0;
 
 /* Forward declarations — these are used by lvgl_port_init below
  * but defined later in the file (the dispatcher task) or by the
@@ -154,23 +170,40 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
         }
     }
 
-    s_epd->EPD_LoadBuffer(s_composite, PANEL_BYTES);
+    /* Rate-limit the actual hardware push. LVGL will keep calling
+     * flush_cb whenever its dirty regions accumulate; on a 33 Hz
+     * dispatcher with a held finger that's many calls per second,
+     * which the panel can't handle (each refresh is ~300 ms). We
+     * still tell LVGL we flushed (so it advances its draw buffer
+     * pipeline), but only actually drive the EPD when enough wall
+     * time has passed since the previous push. The visual cost is
+     * a small "stale frame" window; the win is no continuous strobe
+     * during a touch. */
+    const int64_t now = esp_timer_get_time();
+    const bool can_push = (now - s_last_epd_us) >= EPD_MIN_INTERVAL_US ||
+                          s_force_full;
 
-    bool do_full = s_force_full ||
-                   (++s_partial_count % FULL_REFRESH_EVERY == 0);
-    if (do_full) {
-        s_force_full = false;
-        s_partial_count = 0;
-        ESP_LOGI(TAG, "full refresh (ghost-bust)");
-        s_epd->EPD_Init();
-        s_epd->EPD_Display();
-    } else {
-        s_epd->EPD_Init_Partial();
-        s_epd->EPD_DisplayPart();
+    if (can_push) {
+        s_last_epd_us = now;
+        s_epd->EPD_LoadBuffer(s_composite, PANEL_BYTES);
+
+        bool do_full = s_force_full ||
+                       (++s_partial_count % FULL_REFRESH_EVERY == 0);
+        if (do_full) {
+            s_force_full = false;
+            s_partial_count = 0;
+            ESP_LOGI(TAG, "full refresh (ghost-bust)");
+            s_epd->EPD_Init();
+            s_epd->EPD_Display();
+        } else {
+            s_epd->EPD_Init_Partial();
+            s_epd->EPD_DisplayPart();
+        }
     }
 
     /* Tell LVGL we're done; it'll release the draw buffer for the
-     * next render. */
+     * next render. (Still tell it 'ready' even when we no-op'd the
+     * push, so its pipeline doesn't stall.) */
     lv_display_flush_ready(disp);
 }
 

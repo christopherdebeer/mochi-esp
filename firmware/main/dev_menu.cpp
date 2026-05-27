@@ -216,12 +216,20 @@ static void refresh_info(void) {
     lv_label_set_text(s_info_label, buf);
 }
 
-/* Add a full-width tappable row to a vertical container. */
+/* Add a full-width tappable row to a vertical container. Compact
+ * 18 px height so the menu fits seven actions + an info header on
+ * the 200 px panel without overflow — earlier versions used 28 px
+ * which forced a scroll, but e-ink scrolling on the FT6336 didn't
+ * generate the position jitter LVGL needs to recognise drag (drags
+ * just fired clicks). The simpler fix is no scroll: tighten heights
+ * + drop scrollability so a finger-on-screen never paints a new
+ * "would-scroll" frame. */
 static lv_obj_t *add_row(lv_obj_t *parent, const char *label,
                          TouchResult action, const char *ssid_payload) {
     lv_obj_t *btn = lv_button_create(parent);
     lv_obj_set_width(btn, lv_pct(100));
-    lv_obj_set_height(btn, 28);
+    lv_obj_set_height(btn, 18);
+    lv_obj_set_style_pad_all(btn, 1, 0);
     lv_obj_t *lab = lv_label_create(btn);
     lv_label_set_text(lab, label);
     lv_obj_center(lab);
@@ -238,13 +246,21 @@ static void build_menu(void) {
     lv_obj_set_flex_flow(s_menu_scr, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_menu_scr,
         LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_all(s_menu_scr, 4, 0);
-    lv_obj_set_style_pad_gap(s_menu_scr, 4, 0);
+    lv_obj_set_style_pad_all(s_menu_scr, 2, 0);
+    lv_obj_set_style_pad_gap(s_menu_scr, 1, 0);
+    /* No scroll. Earlier the menu was taller than the panel and
+     * relied on drag-scroll, but the FT6336 doesn't report enough
+     * intra-press position movement for LVGL to detect drag — every
+     * attempted scroll fired a click on whichever button the finger
+     * happened to land on. Disabling scroll means the menu must fit
+     * on 200 px (it does, with the 18 px button heights above). */
+    lv_obj_set_scrollbar_mode(s_menu_scr, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_clear_flag(s_menu_scr, LV_OBJ_FLAG_SCROLLABLE);
 
     /* Info header — multi-line label rebuilt by refresh_info() each
      * tick so RAM / PSRAM / batt readings stay fresh while the menu
-     * is up. Compact format (3 lines of 2 fields each) so the action
-     * list below stays mostly visible without scrolling. */
+     * is up. Compact 3-line format so the action list below stays
+     * fully visible. */
     s_info_label = lv_label_create(s_menu_scr);
     lv_label_set_long_mode(s_info_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(s_info_label, lv_pct(98));
@@ -274,8 +290,10 @@ static void build_wifi(void) {
     lv_obj_set_flex_flow(s_wifi_scr, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_wifi_scr,
         LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_all(s_wifi_scr, 4, 0);
-    lv_obj_set_style_pad_gap(s_wifi_scr, 4, 0);
+    lv_obj_set_style_pad_all(s_wifi_scr, 2, 0);
+    lv_obj_set_style_pad_gap(s_wifi_scr, 1, 0);
+    lv_obj_set_scrollbar_mode(s_wifi_scr, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_clear_flag(s_wifi_scr, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *title = lv_label_create(s_wifi_scr);
     lv_label_set_text(title, "SWITCH WIFI");
