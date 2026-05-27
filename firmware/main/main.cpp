@@ -1899,16 +1899,27 @@ extern "C" void app_main(void) {
             }
             if (dev_menu::active()) {
                 if (got_touch) {
-                    /* Action buttons (e.g. Settings → "open key portal")
-                     * are tappable rects on the active screen. A button
-                     * hit dispatches to its action; a miss exits the
-                     * wheel back to live as before. The wheel always
-                     * exits before the action fires so the action's UI
-                     * (key_portal, …) owns the screen cleanly. */
+                    /* Action buttons are LVGL widgets now — LVGL's
+                     * indev hit-tests them itself; dispatch_touch just
+                     * returns whatever click event fired (or None on a
+                     * miss). Pre-LVGL the menu was a hand-rolled
+                     * tap-rect list and any miss exited the wheel —
+                     * but with LVGL the user expects taps to stay in
+                     * the menu (so they can scroll lists, retry a
+                     * misaligned tap, etc.). Only exit when an actual
+                     * action fired, or when the user PWR-taps. */
                     const auto act = dev_menu::dispatch_touch(
                         (int)ev.x, (int)ev.y);
-                    dev_menu::exit_to_live();
-                    s_net_render_dirty = true;
+                    const bool action_fired =
+                        act != dev_menu::TouchResult::None;
+                    /* Only exit when an action committed. A None
+                     * result means the user tapped a non-actionable
+                     * area (background, scroll gesture, etc.) and
+                     * the menu should stay up. */
+                    if (action_fired) {
+                        dev_menu::exit_to_live();
+                        s_net_render_dirty = true;
+                    }
                     /* Small helper: show a one-line "restarting" toast
                      * before a reboot action so the tap gets visible
                      * feedback. */
@@ -2018,18 +2029,21 @@ extern "C" void app_main(void) {
                         }
                         case dev_menu::TouchResult::None:
                         default:
-                            ESP_LOGI(TAG, "touch in dev_menu → exit to live");
+                            /* Touch missed all buttons (or hit a non-
+                             * actionable area). Stay in the menu —
+                             * pre-LVGL this was the "exit on miss"
+                             * path, but LVGL widgets need touches to
+                             * remain so users can re-aim, scroll, and
+                             * generally interact normally. */
                             break;
                     }
-                    /* Squelch this gesture: the `continue` below
-                     * already skips the live touch handler for THIS
-                     * tick. drain_next_touch covers the FT6336's
-                     * follow-up event (often a release pulse arriving
-                     * a tick later) so a Settings miss doesn't re-
-                     * register as a pet-body tap on the just-revealed
-                     * live render. */
+                    /* Either way, we've consumed this touch event for
+                     * the menu — clear got_touch so the live touch
+                     * handler (icons / pet-tap delight) doesn't also
+                     * see it on a miss. drain_next_touch swallows the
+                     * FT6336's follow-up release pulse on action exit. */
                     got_touch = false;
-                    drain_next_touch = true;
+                    if (action_fired) drain_next_touch = true;
                 }
                 continue;  /* dev_menu owns the screen */
             }

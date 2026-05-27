@@ -93,9 +93,16 @@ static void tick_cb(void * /*arg*/) {
 static uint8_t s_composite[PANEL_BYTES];
 
 static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
-    /* LVGL 1bpp packing: bit n of byte k corresponds to pixel (k*8+n).
-     * Documented: in LV_COLOR_FORMAT_I1 the bits are MSB-first by
-     * default (matches our e-paper driver). */
+    /* LVGL 9 LV_COLOR_FORMAT_I1 packs an 8-byte palette header at the
+     * start of px_map (2 colors × 4 bytes). Real pixel data starts at
+     * offset 8. Earlier we memcpy'd the whole buffer, which shifted
+     * everything right by 8 bytes = 64 pixels = 32 % of a 200 px panel
+     * — visually, the menu wrapped around the right edge. Skip the
+     * palette and copy from there.
+     *
+     * Bit packing inside the data is MSB-first (matches our e-paper). */
+    static constexpr int I1_PALETTE_BYTES = 8;
+    const uint8_t *pixels = px_map + I1_PALETTE_BYTES;
     const int x1 = area->x1, x2 = area->x2;
     const int y1 = area->y1, y2 = area->y2;
     const int w  = x2 - x1 + 1;
@@ -103,13 +110,13 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 
     if (x1 == 0 && x2 == PANEL_W - 1 && y1 == 0 && y2 == PANEL_H - 1) {
         /* Whole-screen flush — common case with full render mode. */
-        memcpy(s_composite, px_map, PANEL_BYTES);
+        memcpy(s_composite, pixels, PANEL_BYTES);
     } else {
         /* Partial — copy row-by-row into the composite at the right
          * offset. Rare with LV_DISPLAY_RENDER_MODE_FULL, but keeps
          * us correct if we ever flip to PARTIAL mode for speed. */
         for (int y = 0; y < y2 - y1 + 1; y++) {
-            const uint8_t *src = px_map + y * row_bytes;
+            const uint8_t *src = pixels + y * row_bytes;
             uint8_t *dst = s_composite + (y1 + y) * PANEL_STRIDE + (x1 / 8);
             memcpy(dst, src, row_bytes);
         }
