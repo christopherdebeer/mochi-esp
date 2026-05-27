@@ -6,33 +6,32 @@
  * 60-second inactivity timeout snaps back to Live so the device
  * can't get stranded in a debug screen.
  *
- *   Live (default)  ── PWR×2 ─▶ Info ── PWR ─▶ Actions ──┐
- *      ▲                                                  │
- *      │                                       PWR ───────┘
- *      │                                  (wraps back to Info)
+ *   Live (default)  ── PWR×2 ─▶ Menu ── PWR ─▶ Live
+ *      ▲                          │
+ *      │                          ├── tap "Switch WiFi" ─▶ WifiModal
+ *      │                          │                          │
+ *      │                          │                  PWR ────┘
+ *      │                          │              (back to Menu)
  *      │
- *      └── 60 s inactivity / touch outside any button / external "exit"
- *
- * From Actions, tapping a button can push a *modal* sub-screen (e.g.
- * the WiFi-switch list) inline rather than adding more wheel slots.
- * Modals exit on a button-tap (do the action) or on the next PWR tap
- * (which advances back to Info, leaving the modal behind).
+ *      └── 60 s inactivity / dispatch_touch returning a TouchResult
  *
  * "Live" is a HOME STATE, not a wheel position. PWR-double-tap from
- * Live enters at the first wheel screen (Info); each subsequent
- * single PWR tap (while the wheel is up — sleep is suspended in this
- * mode) cycles. BOOT is reserved for voice start/stop and never
- * touches the wheel.
+ * Live enters Menu; PWR while in Menu exits back to Live (no slot
+ * cycling — earlier shapes had Splash → Settings → Actions → Wifi
+ * but on a 200 px panel that's more PWR taps than necessary; one
+ * Menu with the info header + action list reads at a glance).
+ * BOOT is reserved for voice start/stop and never touches the wheel.
  *
- * Pre-v0.1.6 the wheel had four slots (Splash, Settings, Actions,
- * Wifi). Splash + Settings overlapped (both showed read-only device
- * info) and the Wifi slot duplicated what the Actions/Change-WiFi
- * button could push as a modal. v0.1.6 collapsed to two slots: Info
- * (merged splash + settings info) and Actions (with WifiSwitch as a
- * modal off the "Switch WiFi" button).
+ * Modals (WifiModal today; future ones plug in here) push from a
+ * Menu button-tap and dismiss on the next PWR tap or a button-tap.
+ *
+ * History:
+ *   v0.1.5 — 4-slot wheel (Splash / Settings / Actions / Wifi).
+ *   v0.1.6 — collapsed to 2 slots (Info / Actions); WifiModal off Actions.
+ *   v0.1.7 — single Menu screen (info header + actions); LVGL-backed.
  *
  * The module owns:
- *   - the current mode (Live / Info / Actions / WifiModal)
+ *   - the current mode (Live / Menu / WifiModal)
  *   - inactivity timeout
  *   - render dispatchers + per-screen tap-rect hit-testing
  *
@@ -53,13 +52,11 @@
 namespace dev_menu {
 
 enum class Mode : uint8_t {
-    Live = 0,        /* not in the wheel — home state */
-    Info,            /* read-only device info / diagnostics */
-    Actions,         /* tappable action buttons (design/22) */
-    /* WifiModal isn't part of the PWR-tap cycle — it's pushed from
-     * the "Switch WiFi" button on Actions and torn down on either a
-     * button-tap (do) or a PWR-tap (advance back to Info). Listed
-     * after Actions in the enum so advance() can skip it. */
+    Live = 0,        /* not a menu mode — home state */
+    Menu,            /* info header + action buttons */
+    /* WifiModal is pushed from the "Switch WiFi" button on Menu and
+     * torn down on either a button-tap (do) or a PWR-tap (back to
+     * Menu). */
     WifiModal,
     _Count,
 };
@@ -67,12 +64,13 @@ enum class Mode : uint8_t {
 /* Initialises wheel state. Idempotent. Call once at boot. */
 void init(epaper_driver_display *epd);
 
-/* Latch a "advance the wheel" request. main.cpp calls this:
- *   - on a PWR double-tap from Live → enters at Info
- *   - on a PWR single-tap while the wheel is up → cycles
+/* Latch a "PWR press observed" request. main.cpp calls this:
+ *   - on a PWR double-tap from Live → enters Menu
+ *   - on a PWR single-tap while a menu/modal is up → exits
+ *     (Menu→Live, WifiModal→Menu)
  * tick() consumes the latch on its next pass. Multiple requests
  * within a single main-loop tick collapse to one (intentional —
- * fast-tap doesn't double-advance). */
+ * fast-tap doesn't double-fire). */
 void request_advance(void);
 
 /* One-shot poll: consume a pending advance request, apply the

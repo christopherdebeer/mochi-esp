@@ -33,7 +33,7 @@ static int64_t              s_entered_mode_us = 0;
 static std::atomic<bool>    s_press_pending{false};
 static bool                 s_started = false;
 
-/* Most recent Info data — cached so dispatch-time mode pushes
+/* Most recent menu data — cached so dispatch-time mode pushes
  * (e.g. SwitchWifi → render WifiModal) don't need to be re-handed
  * the params. tick() refreshes these on every advance/render. */
 static char                 s_pet_name[40] = {};
@@ -54,10 +54,14 @@ static char                 s_picked_ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
  *
  * Buttons use user_data to carry the TouchResult enum back through
  * the click event; dispatch_touch reads it from `lv_event_get_target`
- * and returns it to main.cpp. */
-static lv_obj_t            *s_info_scr      = nullptr;
-static lv_obj_t            *s_info_label    = nullptr;
-static lv_obj_t            *s_actions_scr   = nullptr;
+ * and returns it to main.cpp.
+ *
+ * v0.1.7 collapsed Info + Actions into a single Menu screen — the
+ * info header sits above the action buttons inside the same scroll
+ * container, so the user sees device state and tappable actions in
+ * one glance instead of two PWR taps. */
+static lv_obj_t            *s_menu_scr      = nullptr;
+static lv_obj_t            *s_info_label    = nullptr;   /* lives inside s_menu_scr */
 static lv_obj_t            *s_wifi_scr      = nullptr;
 
 /* Pending action latched by the click event handler; consumed by
@@ -75,8 +79,7 @@ static TouchResult          s_pending_action = TouchResult::None;
 static const char *mode_name(Mode m) {
     switch (m) {
         case Mode::Live:      return "live";
-        case Mode::Info:      return "info";
-        case Mode::Actions:   return "actions";
+        case Mode::Menu:      return "menu";
         case Mode::WifiModal: return "wifi_modal";
         default:              return "?";
     }
@@ -109,17 +112,20 @@ void exit_to_live(void) {
     }
 }
 
-/* Advance: Live → Info → Actions → Info (wraps). The WifiModal mode
- * is *not* in the cycle — it's pushed by the SwitchWifi button on
- * Actions, and a PWR-tap from inside the modal advances back to Info
- * (one tap past Actions). */
+/* Advance:
+ *   Live      → Menu (entered via PWR double-tap from main.cpp)
+ *   Menu      → Live (PWR exits the menu — no slot cycling now)
+ *   WifiModal → Menu (PWR closes the modal back to the parent menu)
+ *
+ * Pre-v0.1.7 there was an Info ↔ Actions cycle; collapsing them
+ * into one Menu screen made that loop pointless, so PWR now means
+ * "back" once you're past Live. */
 static Mode advance(Mode m) {
     switch (m) {
-        case Mode::Live:      return Mode::Info;
-        case Mode::Info:      return Mode::Actions;
-        case Mode::Actions:   return Mode::Info;     /* wrap */
-        case Mode::WifiModal: return Mode::Info;     /* exit modal back to top */
-        default:              return Mode::Info;
+        case Mode::Live:      return Mode::Menu;
+        case Mode::Menu:      return Mode::Live;
+        case Mode::WifiModal: return Mode::Menu;
+        default:              return Mode::Live;
     }
 }
 
@@ -165,23 +171,16 @@ static void on_click(lv_event_t *ev) {
  * for ~6 widgets) but rebuilding on every entry would burn PSRAM
  * via LVGL's allocator churn, hence the cache. */
 
-static void build_info(void) {
-    if (s_info_scr) return;
-    s_info_scr = lv_obj_create(nullptr);
-    /* Title */
-    lv_obj_t *title = lv_label_create(s_info_scr);
-    lv_label_set_text(title, "INFO");
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 4);
-    /* Body label — single multi-line text we rebuild on each tick. */
-    s_info_label = lv_label_create(s_info_scr);
-    lv_label_set_long_mode(s_info_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(s_info_label, lv_pct(95));
-    lv_obj_align(s_info_label, LV_ALIGN_TOP_LEFT, 4, 24);
-    /* Footer hint */
-    lv_obj_t *hint = lv_label_create(s_info_scr);
-    lv_label_set_text(hint, "PWR: Actions  60s exit");
-    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
-}
+/* Single-screen Menu (v0.1.7): the info block sits at the top, then
+ * the action buttons below in a vertical flex. Total content is taller
+ * than 200 px (info ~70 px + 7 buttons × ~32 px); LVGL gives us
+ * touch-scroll for free on the parent screen because the children
+ * overflow.
+ *
+ * The lazily-built screen is reused across menu entries; only the
+ * info label is refreshed live (RAM/PSRAM/batt change ticked into
+ * the same widget). Action rows don't change, so we don't rebuild
+ * them. */
 
 static const char *phase_label(int phase) {
     switch (phase) {
@@ -196,24 +195,21 @@ static void refresh_info(void) {
     if (!s_info_label) return;
     const size_t free_int = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     const size_t free_psr = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    char buf[256];
+    char buf[200];
+    /* Compact 3-line header: pet/fw, net/ip, ssid+batt+ram. Keeps the
+     * actions visible above the fold; full-width wraps on long ssids. */
     snprintf(buf, sizeof(buf),
-        "fw   %s\n"
-        "pet  %s\n"
-        "net  %s\n"
-        "ip   %s\n"
-        "ssid %.20s\n"
-        "ram  %uK\n"
-        "psr  %uK\n"
-        "batt %d%%",
-        s_version[0]  ? s_version  : "?",
+        "%s  %s\n"
+        "%s  %s\n"
+        "%.16s  %d%%  %uK",
         s_pet_name[0] ? s_pet_name : "?",
+        s_version[0]  ? s_version  : "?",
         phase_label(s_net_phase),
         s_ip_str[0] ? s_ip_str : "-",
         s_ssid[0]   ? s_ssid   : "-",
-        (unsigned)(free_int / 1024),
-        (unsigned)(free_psr / 1024),
-        s_batt_pct);
+        s_batt_pct,
+        (unsigned)(free_psr / 1024));
+    (void)free_int;
     lv_label_set_text(s_info_label, buf);
 }
 
@@ -232,26 +228,33 @@ static lv_obj_t *add_row(lv_obj_t *parent, const char *label,
     return btn;
 }
 
-static void build_actions(void) {
-    if (s_actions_scr) return;
-    s_actions_scr = lv_obj_create(nullptr);
-    lv_obj_set_layout(s_actions_scr, LV_LAYOUT_FLEX);
-    lv_obj_set_flex_flow(s_actions_scr, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(s_actions_scr,
+static void build_menu(void) {
+    if (s_menu_scr) return;
+    s_menu_scr = lv_obj_create(nullptr);
+    lv_obj_set_layout(s_menu_scr, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(s_menu_scr, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_menu_scr,
         LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_all(s_actions_scr, 4, 0);
-    lv_obj_set_style_pad_gap(s_actions_scr, 4, 0);
+    lv_obj_set_style_pad_all(s_menu_scr, 4, 0);
+    lv_obj_set_style_pad_gap(s_menu_scr, 4, 0);
 
-    lv_obj_t *title = lv_label_create(s_actions_scr);
-    lv_label_set_text(title, "ACTIONS");
+    /* Info header — multi-line label rebuilt by refresh_info() each
+     * tick so RAM / PSRAM / batt readings stay fresh while the menu
+     * is up. Compact format (3 lines of 2 fields each) so the action
+     * list below stays mostly visible without scrolling. */
+    s_info_label = lv_label_create(s_menu_scr);
+    lv_label_set_long_mode(s_info_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_info_label, lv_pct(98));
 
-    add_row(s_actions_scr, "Switch WiFi",   TouchResult::SwitchWifi,    nullptr);
-    add_row(s_actions_scr, "Add WiFi",      TouchResult::ChangeWifi,    nullptr);
-    add_row(s_actions_scr, "Forget WiFi",   TouchResult::ForgetWifi,    nullptr);
-    add_row(s_actions_scr, "Update now",    TouchResult::UpdateNow,     nullptr);
-    add_row(s_actions_scr, "Re-pair",       TouchResult::RePair,        nullptr);
-    add_row(s_actions_scr, "OpenAI key",    TouchResult::OpenKeyPortal, nullptr);
-    add_row(s_actions_scr, "Go home",       TouchResult::GoHome,        nullptr);
+    /* Action buttons. Kept full-width so the 200 px panel turns each
+     * into a generous tap target. */
+    add_row(s_menu_scr, "Switch WiFi",   TouchResult::SwitchWifi,    nullptr);
+    add_row(s_menu_scr, "Add WiFi",      TouchResult::ChangeWifi,    nullptr);
+    add_row(s_menu_scr, "Forget WiFi",   TouchResult::ForgetWifi,    nullptr);
+    add_row(s_menu_scr, "Update now",    TouchResult::UpdateNow,     nullptr);
+    add_row(s_menu_scr, "Re-pair",       TouchResult::RePair,        nullptr);
+    add_row(s_menu_scr, "OpenAI key",    TouchResult::OpenKeyPortal, nullptr);
+    add_row(s_menu_scr, "Go home",       TouchResult::GoHome,        nullptr);
 }
 
 /* WiFi modal — built fresh on each entry because the stored-network
@@ -324,14 +327,10 @@ TouchResult dispatch_touch(int /*x*/, int /*y*/) {
 
 static void render_mode(Mode m) {
     switch (m) {
-        case Mode::Info:
-            build_info();
+        case Mode::Menu:
+            build_menu();
             refresh_info();
-            lv_screen_load(s_info_scr);
-            break;
-        case Mode::Actions:
-            build_actions();
-            lv_screen_load(s_actions_scr);
+            lv_screen_load(s_menu_scr);
             break;
         case Mode::WifiModal:
             build_wifi();
@@ -390,10 +389,11 @@ bool tick(epaper_driver_display * /*epd*/, bool /*paired*/,
         s_entered_mode_us = now_us;
         render_mode(s_mode);
         changed = true;
-    } else if (s_mode == Mode::Info) {
-        /* Refresh Info content without a screen swap so RAM/PSRAM/
-         * batt readings stay live while the screen is up. Cheap;
-         * LVGL only re-renders the label's dirty area. */
+    } else if (s_mode == Mode::Menu) {
+        /* Refresh the info header without a screen swap so RAM/PSRAM/
+         * batt readings stay live while the menu is up. Cheap; LVGL
+         * only re-renders the label's dirty area. The action buttons
+         * below are static — not rebuilt. */
         refresh_info();
     }
 
