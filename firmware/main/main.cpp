@@ -1456,7 +1456,7 @@ extern "C" void app_main(void) {
      * (the network fetch path) and then re-paint the bar locally.
      * Full refresh because the screen will sit untouched for hours.
      */
-    auto render_asleep = [&]() {
+    auto render_asleep = [&](const char *status_text) {
         /* Pack first, then cache, then network — same priority as
          * render_with_expression. Bundled 'sleeping' makes the
          * PWR-long-press gesture work offline. */
@@ -1506,9 +1506,11 @@ extern "C" void app_main(void) {
                 PET_CELL_W, PET_CELL_H, PET_DX, PET_DY);
         }
 
-        /* Asleep status bar: centred string, no icons. Reuse the
-         * inline glyph blit pattern. */
-        const char *line = "Asleep - PWR to wake";
+        /* Status bar: centred string, no icons. Reuse the inline
+         * glyph blit pattern. Caller supplies the text ("Asleep -
+         * PWR to wake" for the PWR-tap sleep path, "Needs charge -
+         * plug in" for the low-battery soft-power-down). */
+        const char *line = status_text ? status_text : "Asleep";
         const int text_w = (int)strlen(line) * 8;
         int text_x = ((int)MOCHI_EPD_WIDTH - text_w) / 2;
         if (text_x < 0) text_x = 0;
@@ -1774,6 +1776,37 @@ extern "C" void app_main(void) {
         sleep_gesture::set_wheel_active(dev_menu::active());
         sleep_gesture::set_voice_active(voice::is_active());
 
+        /* Critical-battery soft-power-down. LiPo cells damage
+         * permanently below ~3.0 V; render a clear "Needs charge"
+         * screen and commit deep-sleep before the regulator browns
+         * out under load. Three consecutive sub-threshold readings
+         * required so a transient ADC glitch (e.g. mid-WiFi-TX
+         * voltage sag) can't power the device down on a healthy
+         * battery. Skipped while voice is active so a session
+         * mid-conversation doesn't get yanked — the brown-out
+         * detector still catches that case. */
+        static int s_critical_batt_streak = 0;
+        constexpr uint16_t CRITICAL_BATT_MV = 3200;
+        constexpr int      CRITICAL_BATT_CONSEC = 3;
+        if (!voice::is_active()) {
+            uint16_t mv = 0;
+            if (battery_read(&mv, nullptr) && mv > 0 && mv < CRITICAL_BATT_MV) {
+                s_critical_batt_streak++;
+                ESP_LOGW(TAG, "battery critical: %u mV (streak %d/%d)",
+                    mv, s_critical_batt_streak, CRITICAL_BATT_CONSEC);
+                if (s_critical_batt_streak >= CRITICAL_BATT_CONSEC) {
+                    device_diag_eventf(DIAG_WARN, "battery", nullptr,
+                        "soft power-down: %u mV", mv);
+                    device_diag_flush();
+                    render_asleep("Needs charge - plug in");
+                    sleep_gesture::commit_sleep();
+                    /* Unreachable. */
+                }
+            } else {
+                s_critical_batt_streak = 0;
+            }
+        }
+
         /* Touch-drain guard. If a previous tick set this, eat the
          * first touch we see and reset. Lets dev_menu / dialog flows
          * confidently mark "this gesture has been consumed" without
@@ -1835,7 +1868,7 @@ extern "C" void app_main(void) {
             sleep_gesture::mark_handled();
             device_diag_event(DIAG_INFO, "sleep", "PWR tap → sleep", nullptr);
             device_diag_flush();   /* push before we power down */
-            render_asleep();
+            render_asleep("Asleep - PWR to wake");
             sleep_gesture::commit_sleep();
         }
 
@@ -2816,10 +2849,34 @@ extern "C" void app_main(void) {
             continue;
         }
 
-        /* Hold the expression for ~5 s. We block here rather than
-         * scheduling a timer so the next touch event sees a quiet
-         * pet, not a half-finished transition. */
-        vTaskDelay(pdMS_TO_TICKS(RESTING_AFTER_TAP_MS));
+        /* Hold the expression for ~5 s, but in small slices so we can
+         * still service a PWR-tap-to-sleep gesture mid-hold. The
+         * sleep_gesture watcher only waits HANDOFF_GRACE_MS (1500 ms)
+         * before falling back to a bare "Asleep / PWR to wake" text
+         * render — if we block here for the full 5 s the rich
+         * pet-on-scene asleep image never lands. Polling every
+         * 100 ms is well within the grace window and cheap.
+         *
+         * On a mid-hold sleep request: claim it, render the rich
+         * asleep frame, commit. commit_sleep doesn't return. */
+        {
+            constexpr int CHUNK_MS = 100;
+            int remaining = RESTING_AFTER_TAP_MS;
+            while (remaining > 0) {
+                vTaskDelay(pdMS_TO_TICKS(CHUNK_MS));
+                remaining -= CHUNK_MS;
+                if (sleep_gesture::requested()) {
+                    sleep_gesture::mark_handled();
+                    ESP_LOGI(TAG, "sleep requested mid-tap-hold → render asleep");
+                    device_diag_event(DIAG_INFO, "sleep",
+                        "PWR tap (mid-hold) → sleep", nullptr);
+                    device_diag_flush();
+                    render_asleep("Asleep - PWR to wake");
+                    sleep_gesture::commit_sleep();
+                    /* Unreachable. */
+                }
+            }
+        }
 
         /* Settle back to the substrate's current resting expression
          * — driven by project_mood over the dev pet's decayed stats
