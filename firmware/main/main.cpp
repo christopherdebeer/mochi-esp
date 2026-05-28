@@ -1696,8 +1696,10 @@ extern "C" void app_main(void) {
     int64_t travel_retry_at_us     = 0;
     /* Backing store for the failure bubble's text. Static so the
      * file-scope s_active_thought.text pointer stays valid after we pin
-     * it as a persistent, pageable passive bubble. */
-    static char travel_fail_msg[64] = "";
+     * it as a persistent, pageable passive bubble. Sized for the worst
+     * case (the longest template + a full-length loc[40]) so the
+     * snprintf can't truncate (-Werror=format-truncation). */
+    static char travel_fail_msg[96] = "";
     constexpr int64_t TRAVEL_RETRY_BACKOFF_US = 30LL * 1000 * 1000;  /* 30 s */
     /* Worn-costume state (design/17): re-render the pet when it changes.
      * Empty = base species, which is the boot render. */
