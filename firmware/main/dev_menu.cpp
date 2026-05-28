@@ -160,16 +160,6 @@ static Mode advance(Mode m) {
     }
 }
 
-/* A modal is pushed by its on_click handler (SwitchWifi → WifiModal,
- * OpenModels → ModelsModal): it mutates s_mode itself and latches
- * s_press_pending to force tick() to render the new screen. tick()
- * must recognise that latched press as a modal-push, NOT a wheel
- * advance — otherwise advance() bounces the modal straight back to its
- * parent page before it ever paints. */
-static bool is_modal(Mode m) {
-    return m == Mode::WifiModal || m == Mode::ModelsModal;
-}
-
 /* ─── Click handler ────────────────────────────────────────────────
  *
  * Bound to every actionable widget. user_data carries the TouchResult

@@ -30,19 +30,6 @@ namespace compositor {
  * that don't already have a base layer. */
 void clear_to_paper(uint8_t *dst, size_t dst_w, size_t dst_h);
 
-/* Copy a full panel-size scene buffer (200×200 packed = 5000 bytes)
- * into dst. dst is overwritten — used as the base layer. */
-void copy_full(uint8_t *dst, const uint8_t *scene, size_t bytes);
-
-/* Stamp a layer at (dx, dy) into dst. src is `src_w × src_h` packed
- * MSB-first 1bpp. Pixels with bit == 0 (ink) are drawn black on
- * dst. Pixels with bit == 1 (paper) leave dst alone. dst is
- * dst_w × dst_h packed in the same scheme. Out-of-bounds destination
- * pixels are clipped silently. */
-void blit_mask(uint8_t *dst, size_t dst_w, size_t dst_h,
-               const uint8_t *src, size_t src_w, size_t src_h,
-               int dx, int dy);
-
 /*
  * Downsample a 1-bit packed plane from (src_w × src_h) to
  * (dst_w × dst_h) using any-clear-wins per destination pixel —
