@@ -1,0 +1,53 @@
+menu "Mochi power management"
+
+config MOCHI_DOZE_TIMEOUT_S
+    int "Idle seconds before entering the Doze tier"
+    default 60
+    help
+        Seconds with no touch/button before the device drops from Live to
+        the Doze resting tier (WiFi power-save, stretched refresh, and —
+        if MOCHI_LIGHT_SLEEP is set — automatic light sleep). 0 disables
+        Doze entirely (always Live), which still records a clean Live
+        power baseline through the power telemetry.
+
+config MOCHI_DEEP_SLEEP_TIMEOUT_S
+    int "Idle seconds in Doze before automatic deep sleep (0 = never)"
+    default 0
+    help
+        Secondary timeout: continuous seconds spent dozing before the
+        device commits to deep sleep to protect the battery. 0 leaves
+        deep sleep as an explicit PWR-tap action only.
+
+config MOCHI_DOZE_WIFI_POWERSAVE
+    bool "Use WIFI_PS_MAX_MODEM while dozing"
+    default y
+    help
+        Switch WiFi to maximum modem-sleep on Doze entry and back to
+        min-modem (the IDF default) on wake. Safe and reversible; yields
+        a real saving even without MOCHI_LIGHT_SLEEP.
+
+config MOCHI_LIGHT_SLEEP
+    bool "Enable automatic light sleep while dozing"
+    default n
+    select PM_ENABLE
+    select FREERTOS_USE_TICKLESS_IDLE
+    help
+        While dozing, let the SoC enter automatic light sleep (esp_pm)
+        between events. RAM and the e-paper image are retained; a touch
+        (GPIO21 INT) or button wakes it in microseconds — unlike deep
+        sleep, which reboots. Default OFF pending on-hardware validation
+        (touch-INT wake on this board rev, WiFi/TLS coexistence, and the
+        USB-Serial-JTAG console blocking light sleep on the bench). The
+        power telemetry and tier accounting run regardless of this flag.
+
+config MOCHI_PM_CPU_MAX_MHZ
+    int "Max CPU frequency (MHz) under light sleep"
+    depends on MOCHI_LIGHT_SLEEP
+    default 240
+
+config MOCHI_PM_CPU_MIN_MHZ
+    int "Min CPU frequency (MHz) under light sleep"
+    depends on MOCHI_LIGHT_SLEEP
+    default 80
+
+endmenu

@@ -84,9 +84,26 @@ static inline uint32_t mpk__u32(const uint8_t *d) {
            ((uint32_t)d[2] << 16) | ((uint32_t)d[3] << 24);
 }
 
+/* Upper bounds on wire-supplied pack geometry. Device packs are at most
+ * panel-sized (200×200) cells, a few dozen per pack; anything larger is a
+ * corrupt / truncated / hostile blob. The bounds are generous (256 / 1024)
+ * so every legitimate pack passes, yet keep the size math below from
+ * overflowing uint32_t (cell_w=cell_h=0xFFFF wrapping cell_bytes) and
+ * bound every downstream mpk_ink/mpk_mask/mpk_cell read. */
+#define MPK_MAX_DIM   256u
+#define MPK_MAX_COUNT 1024u
+
 /* Validate + parse the 16-byte header. Returns 0 on success; -1 bad
- * magic, -2 unsupported version, -3 unsupported format. `data` must
- * remain valid for the lifetime of every pointer the helpers return. */
+ * magic, -2 unsupported version, -3 unsupported format, -4 implausible
+ * geometry (see MPK_MAX_DIM/MPK_MAX_COUNT). `data` must remain valid for
+ * the lifetime of every pointer the helpers return.
+ *
+ * NOTE: this does not yet validate that count, the format=1 directory
+ * offsets, or the cell planes fit within the fetched blob length — a
+ * truncated/hostile format=1 pack can still drive an out-of-bounds read
+ * in the directory walk below. Length-checked validation against the
+ * fetched body size is a separate hardening pass (the network callers in
+ * pack_cache.cpp gate on looks_like_mpk1() in the meantime). */
 static inline int mpk_open(const uint8_t *data, mpk_t *p) {
     if (memcmp(data, "MPK1", 4) != 0) return -1;
     if (data[4] != 1)                 return -2;
@@ -99,6 +116,8 @@ static inline int mpk_open(const uint8_t *data, mpk_t *p) {
     p->count     = mpk__u16(data + 10);
     p->label_len = data[12];
     p->has_mask  = (uint8_t)(data[13] & 0x01);
+    if (p->cell_w > MPK_MAX_DIM || p->cell_h > MPK_MAX_DIM ||
+        p->count  > MPK_MAX_COUNT) return -4;       /* geometry guard */
     p->plane_bytes = (uint32_t)((p->cell_w + 7) / 8) * p->cell_h;
     p->cell_bytes  = 8u + (p->has_mask ? 2u : 1u) * p->plane_bytes;
     if (fmt == 0) {

@@ -45,6 +45,7 @@ idf_component_register(
         "dev_menu.cpp"
         "battery.cpp"
         "sleep_gesture.cpp"
+        "power.cpp"
         "sprite_cache.cpp"
         "pack_cache.cpp"
         "device_diag.c"
@@ -109,6 +110,7 @@ idf_component_register(
         mbedtls
         log
         esp_hw_support
+        esp_pm
 )
 
 # Optional splash pack (design/20): when assets/splash.mpk is present

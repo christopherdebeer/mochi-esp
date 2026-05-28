@@ -36,7 +36,6 @@ void draw_text_centered(epaper_driver_display *epd, int y, int scale,
 void render_prov_idle(epaper_driver_display *epd, const char *ssid);
 void render_prov_connecting(epaper_driver_display *epd);
 void render_prov_failed(epaper_driver_display *epd);
-void render_online(epaper_driver_display *epd, const char *ip_str);
 /* Boot splash. Renders a (random) cell from the embedded splash pack
  * (splash.mpk) when present — overlaying title + status text at the pack's
  * text zones, and the paired pet's expression at its pet zone — else falls
@@ -44,48 +43,6 @@ void render_online(epaper_driver_display *epd, const char *ip_str);
  * legible default banner. `paired` gates the pet. design/20. */
 void render_boot_splash(epaper_driver_display *epd, const char *title,
                         const char *status, bool paired);
-
-/* Overlay short white text (small, scale=1) horizontally centred at
- * 30% from the top of the panel. Designed to stamp the firmware
- * version on top of the boot splash without redrawing the splash —
- * call after render_boot_splash but before EPD_Display. White glyph
- * pixels read against dark splash artwork; the surrounding off-bits
- * of each glyph are left as-is. */
-void overlay_boot_version(epaper_driver_display *epd, const char *version);
-
-/* M4 — sprite fetch prompts. */
-void render_prompt_fetch(epaper_driver_display *epd, const char *ip_str);
-void render_fetching(epaper_driver_display *epd);
-void render_fetch_failed(epaper_driver_display *epd);
-/* Overlay a short caption at the bottom of an already-loaded
- * sprite buffer. The caller is responsible for having called
- * EPD_LoadBuffer with the sprite first; this just adds the
- * "fetched in NNN ms" line on top. */
-void overlay_fetch_status(epaper_driver_display *epd, uint32_t elapsed_ms);
-
-/* Draw a small filled square (size×size) centered at (cx, cy).
- * Uses EPD_DrawColorPixel — the slow path. Only used for ad-hoc
- * marks like corner-tap feedback. */
-void draw_dot(epaper_driver_display *epd, int cx, int cy, int size);
-
-/* Encode `text` as a QR Code and draw it with the top-left corner at
- * (ox, oy), each module rendered as `scale × scale` pixels in
- * DRIVER_COLOR_BLACK against the existing (assumed-white)
- * framebuffer. Returns the pixel width of the rendered code (i.e.
- * module-count × scale) on success, or 0 on failure (encoder error
- * or won't fit inside the panel).
- *
- * The quiet zone is the caller's responsibility — leave at least
- * 4 × scale white pixels of margin around the requested rectangle
- * before painting any non-white pixel into it. Internally this
- * heap-allocates two qrcodegen scratch buffers of
- * BUFFER_LEN_FOR_VERSION(MAX) each (~600 bytes total) for the
- * duration of the call.
- *
- * Uses the slow EPD_DrawColorPixel path. A V4 (33-module) QR at
- * scale 3 is ~10k pixel writes — comparable to a long text line. */
-int draw_qr(epaper_driver_display *epd, int ox, int oy, int scale,
-            const char *text);
 
 /* Encode + draw a QR centered horizontally at vertical pixel `top_y`,
  * automatically picking the largest module-scale that lets the code

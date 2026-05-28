@@ -10,42 +10,6 @@ void clear_to_paper(uint8_t *dst, size_t dst_w, size_t dst_h) {
     memset(dst, 0xff, stride * dst_h);
 }
 
-void copy_full(uint8_t *dst, const uint8_t *scene, size_t bytes) {
-    memcpy(dst, scene, bytes);
-}
-
-void blit_mask(uint8_t *dst, size_t dst_w, size_t dst_h,
-               const uint8_t *src, size_t src_w, size_t src_h,
-               int dx, int dy) {
-    size_t dst_stride = (dst_w + 7) >> 3;
-    size_t src_stride = (src_w + 7) >> 3;
-
-    for (size_t sy = 0; sy < src_h; sy++) {
-        int py = dy + (int)sy;
-        if (py < 0 || (size_t)py >= dst_h) continue;
-        for (size_t sx = 0; sx < src_w; sx++) {
-            int px = dx + (int)sx;
-            if (px < 0 || (size_t)px >= dst_w) continue;
-
-            const uint8_t s_byte = src[sy * src_stride + (sx >> 3)];
-            const uint8_t s_bit_mask = (uint8_t)(1u << (7 - (sx & 7)));
-            /*
-             * src bit 0 → ink → clear dst bit (draw black).
-             * src bit 1 → paper/transparent → leave dst alone.
-             * No bytewise fast path here; hot pixel loops on a 200×200
-             * pet (~800 ms in the per-pixel API) used to be the bottleneck,
-             * but our composite is roughly 200×200 = 40k iterations and
-             * the inner body is ~3 instructions — finishes in a few ms.
-             */
-            if ((s_byte & s_bit_mask) == 0) {
-                const size_t d_off = (size_t)py * dst_stride + ((size_t)px >> 3);
-                const uint8_t d_bit_mask = (uint8_t)(1u << (7 - ((size_t)px & 7)));
-                dst[d_off] &= (uint8_t)~d_bit_mask;
-            }
-        }
-    }
-}
-
 void downsample_plane(uint8_t *dst, size_t dst_w, size_t dst_h,
                       const uint8_t *src, size_t src_w, size_t src_h) {
     const size_t dst_stride = (dst_w + 7) >> 3;

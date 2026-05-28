@@ -272,67 +272,6 @@ void render_boot_splash(epaper_driver_display *epd, const char *title,
     (void)statusZone;
 }
 
-void overlay_boot_version(epaper_driver_display *epd, const char *version) {
-    if (!version || !*version) return;
-    /* Retained for callers that want a standalone version stamp; the boot
-     * path now uses render_boot_splash's status text instead. */
-    constexpr int y = 60;
-    int len = static_cast<int>(strlen(version));
-    int total = len * 8;
-    int x = (W - total) / 2;
-    if (x < 0) x = 0;
-    for (const char *p = version; *p; p++) {
-        if (x + 8 > W) break;
-        blit_glyph_overlay(epd, *p, x, y, 1, DRIVER_COLOR_WHITE);
-        x += 8;
-    }
-}
-
-int draw_qr(epaper_driver_display *epd, int ox, int oy, int scale,
-            const char *text) {
-    if (!text || scale < 1) return 0;
-
-    const size_t buf_len = qrcodegen_BUFFER_LEN_FOR_VERSION(QR_MAX_VERSION);
-    uint8_t *qrcode = (uint8_t *)malloc(buf_len);
-    uint8_t *tmp    = (uint8_t *)malloc(buf_len);
-    if (!qrcode || !tmp) { free(qrcode); free(tmp); return 0; }
-
-    /* boostEcl=false so the version stays predictable given the
-     * payload — we sized our layout against the minimum version that
-     * fits the input, not whatever the encoder upsells us to. */
-    bool ok = qrcodegen_encodeText(
-        text, tmp, qrcode,
-        qrcodegen_Ecc_LOW,
-        qrcodegen_VERSION_MIN, QR_MAX_VERSION,
-        qrcodegen_Mask_AUTO, /*boostEcl=*/false);
-
-    int rendered = 0;
-    if (ok) {
-        int size = qrcodegen_getSize(qrcode);
-        int px   = size * scale;
-        if (ox >= 0 && oy >= 0 && ox + px <= W && oy + px <= H) {
-            for (int my = 0; my < size; my++) {
-                for (int mx = 0; mx < size; mx++) {
-                    if (!qrcodegen_getModule(qrcode, mx, my)) continue;
-                    int x0 = ox + mx * scale;
-                    int y0 = oy + my * scale;
-                    for (int dy = 0; dy < scale; dy++) {
-                        for (int dx = 0; dx < scale; dx++) {
-                            epd->EPD_DrawColorPixel(x0 + dx, y0 + dy,
-                                                    DRIVER_COLOR_BLACK);
-                        }
-                    }
-                }
-            }
-            rendered = px;
-        }
-    }
-
-    free(qrcode);
-    free(tmp);
-    return rendered;
-}
-
 int draw_qr_centered(epaper_driver_display *epd, int top_y,
                      int target_px, const char *text) {
     if (!text) return 0;
@@ -422,56 +361,6 @@ void render_prov_failed(epaper_driver_display *epd) {
     draw_text_centered(epd, 116, 1, "your phone.");
 }
 
-void render_online(epaper_driver_display *epd, const char *ip_str) {
-    clear(epd);
-    draw_text_centered(epd, 40, 3, "Online");
-    draw_text_centered(epd, 100, 1, "IP address:");
-    draw_text_centered(epd, 124, 2, ip_str);
-}
-
-void render_prompt_fetch(epaper_driver_display *epd, const char *ip_str) {
-    clear(epd);
-    draw_text_centered(epd, 20, 2, "Mochi online");
-    draw_text_centered(epd, 56, 1, ip_str);
-    draw_text_centered(epd, 96, 2, "Tap centre to");
-    draw_text_centered(epd, 124, 2, "cycle sprites");
-    draw_text_centered(epd, 168, 1, "Corners = dot");
-}
-
-void render_fetching(epaper_driver_display *epd) {
-    clear(epd);
-    draw_text_centered(epd, 70, 3, "Fetching");
-    draw_text_centered(epd, 120, 2, "sprite...");
-}
-
-void render_fetch_failed(epaper_driver_display *epd) {
-    clear(epd);
-    draw_text_centered(epd, 50, 2, "Fetch failed");
-    draw_text_centered(epd, 100, 1, "Check log over USB");
-    draw_text_centered(epd, 140, 1, "Tap BOOT to retry");
-}
-
-void overlay_fetch_status(epaper_driver_display *epd, uint32_t elapsed_ms) {
-    /*
-     * The sprite occupies the top 2/3 of the panel. The 200x200
-     * test sprite has caption text starting at y=140 (16px high)
-     * and y=162. We overwrite a 20-pixel slab below the sprite's
-     * caption with our "NNN ms" status — between y=184 and y=200.
-     * Pixels above are left as-is so the sprite is preserved.
-     */
-    char buf[24];
-    snprintf(buf, sizeof(buf), "%lu ms", (unsigned long)elapsed_ms);
-
-    /* White-out the bottom slab first via per-pixel writes. Cheap:
-     * 200x16 = 3200 setPixel calls, well under 100ms. */
-    for (int y = 184; y < H; y++) {
-        for (int x = 0; x < W; x++) {
-            epd->EPD_DrawColorPixel(x, y, DRIVER_COLOR_WHITE);
-        }
-    }
-    draw_text_centered(epd, 184, 2, buf);
-}
-
 void render_pair_prompt(epaper_driver_display *epd, const char *code) {
     clear(epd);
     draw_text_centered(epd, 4, 1, "Scan to pair me");
@@ -516,17 +405,6 @@ void render_pair_failed(epaper_driver_display *epd) {
     draw_text_centered(epd, 80, 2, "failed.");
     draw_text_centered(epd, 124, 1, "Code may have expired.");
     draw_text_centered(epd, 144, 1, "Tap to retry.");
-}
-
-void draw_dot(epaper_driver_display *epd, int cx, int cy, int size) {
-    int half = size / 2;
-    for (int dy = -half; dy < half; dy++) {
-        for (int dx = -half; dx < half; dx++) {
-            int x = cx + dx, y = cy + dy;
-            if (x < 0 || y < 0 || x >= W || y >= H) continue;
-            epd->EPD_DrawColorPixel(x, y, DRIVER_COLOR_BLACK);
-        }
-    }
 }
 
 void render_key_portal(epaper_driver_display *epd,
