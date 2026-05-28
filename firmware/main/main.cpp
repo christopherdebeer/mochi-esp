@@ -1694,8 +1694,10 @@ extern "C" void app_main(void) {
                                             * re-render (e-paper flash) on each
                                             * 30 s retry. Cleared on success. */
     int64_t travel_retry_at_us     = 0;
-    char          travel_fail_msg[64] = "";
-    pet_thought_t travel_fail_thought = {};
+    /* Backing store for the failure bubble's text. Static so the
+     * file-scope s_active_thought.text pointer stays valid after we pin
+     * it as a persistent, pageable passive bubble. */
+    static char travel_fail_msg[64] = "";
     constexpr int64_t TRAVEL_RETRY_BACKOFF_US = 30LL * 1000 * 1000;  /* 30 s */
     /* Worn-costume state (design/17): re-render the pet when it changes.
      * Empty = base species, which is the boot render. */
@@ -2351,6 +2353,13 @@ extern "C" void app_main(void) {
                         (strcmp(loc, "home") == 0) ? "bundle" : lsheet);
                     travel_retry_at_us = 0;   /* success clears any pending retry */
                     travel_warned_loc[0] = '\0';
+                    /* Drop a still-pinned failure bubble so it doesn't
+                     * reappear over the newly-loaded scene. Pointer match
+                     * avoids clobbering an unrelated active bubble. */
+                    if (s_thought_active && s_active_thought.text == travel_fail_msg) {
+                        s_thought_active = false;
+                        memset(&s_active_thought, 0, sizeof(s_active_thought));
+                    }
                 } else if (fetch_attempted) {
                     /* Couldn't reach the place. Stay on the current scene
                      * but float a thought bubble so the failure isn't a
@@ -2368,11 +2377,19 @@ extern "C" void app_main(void) {
                         else
                             snprintf(travel_fail_msg, sizeof(travel_fail_msg),
                                 "can't get to the %s, something's wrong", loc);
-                        travel_fail_thought = {};
-                        travel_fail_thought.action_kind = THOUGHT_ACTION_NONE;
-                        travel_fail_thought.text        = travel_fail_msg;
-                        travel_fail_thought.style       = THOUGHT_STYLE_THOUGHT;
-                        render_with_expression("neutral", true, &travel_fail_thought);
+                        /* Pin as a persistent passive bubble so the kid can
+                         * page through a longer message — the touch handler's
+                         * Zone::Thought path bumps the page on tap and
+                         * dismisses on the last — rather than seeing it
+                         * truncated. Cleared on a later successful travel. */
+                        memset(&s_active_thought, 0, sizeof(s_active_thought));
+                        s_active_thought.action_kind = THOUGHT_ACTION_NONE;
+                        s_active_thought.text         = travel_fail_msg;
+                        s_active_thought.style        = THOUGHT_STYLE_THOUGHT;
+                        s_active_thought.persistent   = true;
+                        s_active_thought.page         = 0;
+                        s_thought_active = true;
+                        render_with_expression("neutral", true, &s_active_thought);
                         snprintf(travel_warned_loc, sizeof(travel_warned_loc), "%s", loc);
                     }
                     snprintf(travel_retry_loc, sizeof(travel_retry_loc), "%s", loc);
@@ -2501,24 +2518,31 @@ extern "C" void app_main(void) {
                  * unchanged — the kid shouldn't have to wait for the
                  * next sprite transition to see a fresh need. */
                 pet_thought_t candidate = {};
-                const bool gen_ok =
+                /* A caller-pinned persistent bubble (e.g. the travel-fail
+                 * notice) owns the channel until it's tapped through or a
+                 * state change clears it — don't let auto-generation
+                 * regenerate or wipe it here. Mirrors render_resting. */
+                const bool pinned = s_thought_active && s_active_thought.persistent;
+                const bool gen_ok = !pinned &&
                     now_ms >= s_thought_suppress_until_ms &&
                     thought_generate(&decayed, now_ms, &candidate);
-                const bool thought_changed =
+                const bool thought_changed = !pinned && (
                     gen_ok != s_thought_active ||
                     (gen_ok &&
                      (candidate.action_event != s_active_thought.action_event ||
-                      candidate.action_kind  != s_active_thought.action_kind));
+                      candidate.action_kind  != s_active_thought.action_kind)));
 
                 const bool sprite_changed =
                     name && strcmp(name, last_resting_expr) != 0;
 
                 if (sprite_changed || thought_changed) {
-                    s_thought_active = gen_ok;
-                    if (gen_ok) {
-                        s_active_thought = candidate;
-                    } else {
-                        memset(&s_active_thought, 0, sizeof(s_active_thought));
+                    if (!pinned) {
+                        s_thought_active = gen_ok;
+                        if (gen_ok) {
+                            s_active_thought = candidate;
+                        } else {
+                            memset(&s_active_thought, 0, sizeof(s_active_thought));
+                        }
                     }
                     const char *render_name = name ? name : last_resting_expr;
                     ESP_LOGI(TAG, "substrate refresh: %s → %s "
@@ -2676,9 +2700,13 @@ extern "C" void app_main(void) {
             /* If this re-taps the place we just failed to reach, drop the
              * backoff so the travel block retries on the next tick rather
              * than waiting out the timer (re-tapping a failed nav zone
-             * would otherwise look like a dead button). */
-            if (travel_retry_at_us != 0 && strcmp(place_id, travel_retry_loc) == 0)
+             * would otherwise look like a dead button). Clear the
+             * warned-place latch too, so if it fails again the kid gets
+             * the bubble again instead of silence. */
+            if (travel_retry_at_us != 0 && strcmp(place_id, travel_retry_loc) == 0) {
                 travel_retry_at_us = esp_timer_get_time();
+                travel_warned_loc[0] = '\0';
+            }
             continue;
         }
 
