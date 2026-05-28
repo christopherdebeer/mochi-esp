@@ -40,6 +40,18 @@ bool sprite_fetch_blob(const char *url, uint8_t *out, size_t max_bytes,
                        size_t *out_size, uint32_t *elapsed_ms);
 
 /*
+ * Status-reporting variant of sprite_fetch_blob. Identical behaviour,
+ * but also writes the HTTP status code into *out_status (when non-NULL),
+ * including on the failure return, so a caller can tell "not ready yet"
+ * (404) apart from a transport error (status 0 — TLS / timeout / DNS,
+ * no response) or a server fault (5xx). out_status is set before any
+ * early return so it's always defined after the call.
+ */
+bool sprite_fetch_blob_ex(const char *url, uint8_t *out, size_t max_bytes,
+                          size_t *out_size, uint32_t *elapsed_ms,
+                          int *out_status);
+
+/*
  * Variant that fetches /devsprite/cell/<sheet>/<cell> responses.
  *
  * Wire format (eink-pet:design/05-sprite-format.md, "cell" section):

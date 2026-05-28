@@ -120,8 +120,10 @@ bool sprite_fetch(const char *url, uint8_t *out, size_t expected_len,
  * no reliable Content-Length). Reuses the same overflow-guarded
  * fetch_ctx assembly as sprite_fetch.
  */
-bool sprite_fetch_blob(const char *url, uint8_t *out, size_t max_bytes,
-                       size_t *out_size, uint32_t *elapsed_ms) {
+bool sprite_fetch_blob_ex(const char *url, uint8_t *out, size_t max_bytes,
+                          size_t *out_size, uint32_t *elapsed_ms,
+                          int *out_status) {
+    if (out_status) *out_status = 0;
     if (!url || !out || max_bytes == 0) return false;
     if (out_size) *out_size = 0;
 
@@ -148,6 +150,10 @@ bool sprite_fetch_blob(const char *url, uint8_t *out, size_t max_bytes,
     int64_t t1 = esp_timer_get_time();
     if (elapsed_ms) *elapsed_ms = (uint32_t)((t1 - t0) / 1000);
 
+    /* Report status even on the failure paths below: a transport error
+     * leaves status 0, which the caller reads as "no response". */
+    if (out_status) *out_status = status;
+
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "blob perform failed: %s", esp_err_to_name(err));
         return false;
@@ -168,6 +174,11 @@ bool sprite_fetch_blob(const char *url, uint8_t *out, size_t max_bytes,
     ESP_LOGI(TAG, "fetched blob %u bytes in %u ms",
         (unsigned)ctx.written, elapsed_ms ? (unsigned)*elapsed_ms : 0u);
     return true;
+}
+
+bool sprite_fetch_blob(const char *url, uint8_t *out, size_t max_bytes,
+                       size_t *out_size, uint32_t *elapsed_ms) {
+    return sprite_fetch_blob_ex(url, out, max_bytes, out_size, elapsed_ms, NULL);
 }
 
 /*
