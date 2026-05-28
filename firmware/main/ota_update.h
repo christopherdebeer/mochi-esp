@@ -7,12 +7,14 @@
  *   1. After WiFi connects, main calls mark_valid_if_pending() once.
  *      If we just booted into a freshly-OTA-installed slot, this
  *      cancels the rollback timer; otherwise it's a no-op.
- *   2. main calls start_background_task() with the manifest URL.
- *      A low-priority task wakes on boot (after a short settle
- *      delay), every ~24 hours, and checks the manifest for a
- *      version != esp_app_get_description()->version. On a mismatch
- *      it streams the .bin into the inactive slot via
- *      esp_https_ota, flips otadata, and asks main to reboot.
+ *   2. main calls start_background_task() with the stable + beta
+ *      manifest URLs. A low-priority task wakes on boot (after a short
+ *      settle delay) and every ~24 hours, picks the manifest for the
+ *      on-device channel (ota_channel), and checks it for a version
+ *      newer (by semver precedence) than
+ *      esp_app_get_description()->version. If so it streams the .bin
+ *      into the inactive slot via esp_https_ota, flips otadata, and
+ *      asks main to reboot.
  *   3. Reboot is gated by reboot_ready() — main polls this from its
  *      idle loop and calls esp_restart() when no voice session is
  *      active and no recent touch.
@@ -38,11 +40,17 @@ bool mark_valid_if_pending();
 /* Spawn the OTA background task. Safe to call once after WiFi + NVS
  * are up. The task lifetime is the process lifetime; we never join.
  *
- * manifest_url is borrowed (must outlive the process). Use a string
- * literal in main.cpp. The task fetches this JSON document, expects
+ * Both URLs are borrowed (must outlive the process — use string
+ * literals in main.cpp). Each poll cycle the task reads the on-device
+ * channel (ota_channel_get()) and fetches the matching manifest:
+ *   stable_url — published "latest" release manifest (required)
+ *   beta_url   — rolling "beta" prerelease manifest (optional; nullptr
+ *                makes the beta channel fall back to stable)
+ * Each manifest is a JSON document of the form
  *   { "version": "<string>", "url": "<https url to .bin>" }
- * and updates iff version != running version. */
-void start_background_task(const char *manifest_url);
+ * and the task updates iff its version is newer than the running
+ * version by semver precedence (pre-release aware). */
+void start_background_task(const char *stable_url, const char *beta_url);
 
 /* True after the background task has finished writing a new image
  * into the inactive slot and called esp_ota_set_boot_partition. The

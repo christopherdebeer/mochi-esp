@@ -19,6 +19,8 @@
 #include "epd_ui.h"
 #include "nvs_creds.h"
 #include "model_prefs.h"
+#include "ota_channel.h"
+#include "ota_update.h"
 
 static const char *TAG = "dev_menu";
 
@@ -241,6 +243,25 @@ static void on_click(lv_event_t *ev) {
         s_pending_action = TouchResult::None;
         return;
     }
+    if (action == TouchResult::ToggleChannel) {
+        /* Internal: flip the persisted OTA channel + relabel in place,
+         * same shape as the model-cycle rows. Nudge an immediate check
+         * so opting into beta (or back to stable) applies promptly
+         * rather than waiting for the next 24 h poll. Reset the
+         * inactivity timer so the tap doesn't bounce back to Live. */
+        ota_channel_t ch = ota_channel_toggle();
+        lv_obj_t *btn = (lv_obj_t *)lv_event_get_target(ev);
+        lv_obj_t *lab = lv_obj_get_child(btn, 0);
+        if (lab) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "Channel: %s", ota_channel_name(ch));
+            lv_label_set_text(lab, buf);
+        }
+        ota_update::check_now();
+        s_entered_mode_us = esp_timer_get_time();
+        s_pending_action = TouchResult::None;
+        return;
+    }
     s_pending_action = action;
 }
 
@@ -432,6 +453,14 @@ static void build_menu_p3(void) {
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
 
     add_row(s_menu_p3_scr, "Update now",  TouchResult::UpdateNow,  nullptr);
+    /* OTA channel toggle. Lives on RISK because opting into beta pulls
+     * pre-release builds that haven't shipped to stable. Label reflects
+     * the persisted channel; on_click flips it in place (lv_label_set_text
+     * copies, so this stack buffer is fine). */
+    char chan_row[32];
+    snprintf(chan_row, sizeof(chan_row), "Channel: %s",
+        ota_channel_name(ota_channel_get()));
+    add_row(s_menu_p3_scr, chan_row, TouchResult::ToggleChannel, nullptr);
     add_row(s_menu_p3_scr, "Add WiFi",    TouchResult::ChangeWifi, nullptr);
     add_row(s_menu_p3_scr, "Forget WiFi", TouchResult::ForgetWifi, nullptr);
     add_row(s_menu_p3_scr, "Re-pair",     TouchResult::RePair,     nullptr);

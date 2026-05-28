@@ -1,60 +1,128 @@
-# Build the eink-pet firmware in CI and publish it as a GitHub Release.
+# Build the eink-pet firmware in CI and publish it to GitHub Releases.
+# The release version is driven by the checked-in firmware/version.txt
+# (e.g. "0.3.0") — no more hand-tagging.
 #
-# Trigger: push of a tag matching v*. Tag the release with semver:
-#   git tag v0.1.0 && git push origin v0.1.0
+# Two channels, mirroring what the OTA client (ota_channel) fetches:
 #
-# What this produces on the release:
-#   eink-pet.bin       The full application image. esp_https_ota
-#                      streams this straight into the inactive OTA
-#                      partition (ota_0 or ota_1, picked by the
-#                      bootloader).
-#   latest.json        The OTA manifest. The device fetches it via
-#                      https://github.com/<owner>/<repo>/releases/latest/download/latest.json
-#                      and compares its `version` field against the
-#                      running esp_app_get_description()->version.
+#   stable — push to main (or manual run). Reads firmware/version.txt;
+#            if no release for v<version> exists yet, builds and
+#            publishes it as the latest release. So the flow is:
+#            bump version.txt in a PR → merge → released. Pushes that
+#            don't change the version are a no-op (idempotent).
 #
-# The IDF version is pinned to v5.3 to match firmware/README.md. If
-# we move the floor (e.g. to v5.4 for some component requirement),
-# bump the container tag here in lockstep.
+#   beta   — pull request into main. Builds with version
+#            "<version.txt>-beta.<run_number>" baked into esp_app_desc
+#            (PROJECT_VER) and refreshes a single rolling PRE-RELEASE
+#            with the fixed tag "beta". Because the tag is fixed, the
+#            device has a stable URL: /releases/download/beta/latest.json.
+#            Only the newest beta build is live at a time.
+#
+# Version precedence (resolved on-device by ota_update's semver-aware
+# compare): a beta "-beta.<n>" sorts above the previous stable but below
+# the matching release, so a beta device rolls forward through betas and
+# lands on the final stable when it ships. Bump version.txt in the PR
+# that targets the next release so its betas are ahead of current stable.
+#
+# The IDF version is pinned to v5.3 to match firmware/README.md and the
+# firmware-build workflow. Bump all three in lockstep.
 name: firmware-release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+# Serialize publishing per channel so racing builds don't clobber each
+# other's assets mid-upload. All PRs share the rolling "beta" release, so
+# they share one group; main/stable has its own. Let in-flight runs
+# finish (a half-uploaded release is worse than a slightly stale one).
+concurrency:
+  group: firmware-release-${{ github.event_name == 'pull_request' && 'beta' || 'stable' }}
+  cancel-in-progress: false
+
 # Opt into Node.js 24 for JavaScript-based actions (checkout, cache,
-# softprops/action-gh-release). Node 20 is deprecated; this silences
-# the warning now and matches the runtime that becomes the default
-# on 2026-06-02.
+# softprops/action-gh-release). Node 20 is deprecated; matches the
+# runtime that becomes the default on 2026-06-02.
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
+    # Fork PRs can't be granted contents:write, so the beta publish would
+    # fail. Skip the job for them entirely — the firmware-build workflow
+    # still compiles fork PRs as a check.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     container:
       image: espressif/idf:release-v5.3
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # esp_app_desc's version field defaults to `git describe`,
-          # which needs the tag history present in the checkout.
+          # Full history so the stable changelog (previous v* tag ->
+          # HEAD) and esp_app_desc's git fallback have what they need.
           fetch-depth: 0
 
       - name: Mark workspace safe
-        # The container runs as root but the checkout is owned by
-        # the runner user, which trips git's safe.directory check.
+        # The container runs as root but the checkout is owned by the
+        # runner user, which trips git's safe.directory check.
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
+      - name: Resolve channel + version
+        id: meta
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          BASE="$(tr -d '[:space:]' < firmware/version.txt)"
+          if [ -z "${BASE}" ]; then
+            echo "::error::firmware/version.txt is empty"; exit 1
+          fi
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            CHANNEL=beta
+            TAG=beta
+            VERSION="${BASE}-beta.${GITHUB_RUN_NUMBER}"
+            PRERELEASE=true
+            SKIP=false
+          else
+            CHANNEL=stable
+            TAG="v${BASE}"
+            VERSION="${BASE}"
+            PRERELEASE=false
+            # Idempotent: only a version.txt bump cuts a new stable
+            # release. If v<base> already exists, skip the build entirely.
+            HTTP=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" || echo 000)
+            if [ "${HTTP}" = "200" ]; then
+              SKIP=true
+              echo "Release ${TAG} already exists (HTTP ${HTTP}); skipping."
+            else
+              SKIP=false
+              echo "No release for ${TAG} yet (HTTP ${HTTP}); will publish."
+            fi
+          fi
+          {
+            echo "channel=${CHANNEL}"
+            echo "tag=${TAG}"
+            echo "version=${VERSION}"
+            echo "prerelease=${PRERELEASE}"
+            echo "skip=${SKIP}"
+          } >> "$GITHUB_OUTPUT"
+          echo "channel=${CHANNEL} tag=${TAG} version=${VERSION} prerelease=${PRERELEASE} skip=${SKIP}"
+
       # Reuse the same cache the build-check workflow populates.
-      # Keyed on dependencies.lock + idf_component.yml so any
-      # registry change forces a fresh fetch.
       - name: Cache managed_components
+        if: steps.meta.outputs.skip != 'true'
         uses: actions/cache@v4
         with:
           path: firmware/managed_components
@@ -62,7 +130,20 @@ jobs:
           restore-keys: |
             managed-components-v5.3-
 
+      - name: Pin build version
+        if: steps.meta.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Write the resolved version into version.txt so ESP-IDF uses it
+          # for PROJECT_VER -> esp_app_desc.version. For stable this is a
+          # no-op rewrite; for beta it appends the -beta.<n> suffix so the
+          # running firmware reports the exact manifest version.
+          printf '%s\n' "${{ steps.meta.outputs.version }}" > firmware/version.txt
+          echo "esp_app_desc version will be: $(cat firmware/version.txt)"
+
       - name: Build firmware
+        if: steps.meta.outputs.skip != 'true'
         working-directory: firmware
         shell: bash
         run: |
@@ -71,21 +152,22 @@ jobs:
           idf.py build
 
       - name: Stage release artifacts
-        id: stage
+        if: steps.meta.outputs.skip != 'true'
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
-          VERSION="${TAG#v}"
+          TAG="${{ steps.meta.outputs.tag }}"
+          VERSION="${{ steps.meta.outputs.version }}"
           mkdir -p release
           cp firmware/build/eink-pet.bin release/eink-pet.bin
-          # Also publish the bootloader + partition table for users
-          # doing the one-time USB reflash from a prior factory-only
-          # build. They're small and harmless to include.
+          # Bootloader + partition table for the one-time USB reflash from
+          # a prior factory-only build. Small and harmless to include.
           cp firmware/build/bootloader/bootloader.bin release/bootloader.bin
           cp firmware/build/partition_table/partition-table.bin release/partition-table.bin
 
           SHA256=$(sha256sum release/eink-pet.bin | awk '{print $1}')
+          # The .bin lives on this release's own tag. stable: v<x.y.z>;
+          # beta: the fixed "beta" tag, so the URL is stable across builds.
           BIN_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/eink-pet.bin"
           cat > release/latest.json <<EOF
           {
@@ -94,50 +176,83 @@ jobs:
             "sha256": "${SHA256}"
           }
           EOF
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Manifest:"
           cat release/latest.json
 
-      # Build the changelog body from git history. We tag arbitrary
-      # commits by hand, so this commit-level list (rather than only
-      # the PR-based notes GitHub generates) is what reliably captures
-      # what changed. `git describe` finds the previous v* tag reachable
-      # from this tag's parent; on the first-ever tag there is none, so
-      # we fall back to the last 30 commits leading up to it.
       - name: Build release notes
+        if: steps.meta.outputs.skip != 'true'
         working-directory: ${{ github.workspace }}
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
-          PREV_TAG=$(git describe --tags --abbrev=0 --match 'v*' "${TAG}^" 2>/dev/null || true)
-          {
-            echo "## Changes"
-            echo
-            if [ -n "${PREV_TAG}" ]; then
-              git log --no-merges --pretty='- %s (%h)' "${PREV_TAG}..${TAG}"
+          if [ "${{ steps.meta.outputs.channel }}" = "beta" ]; then
+            # Rolling beta: overwrite the body each build so it reflects
+            # the current beta. Point at the source PR for context.
+            {
+              echo "Rolling **beta** pre-release — \`${{ steps.meta.outputs.version }}\`."
               echo
-              echo "**Full diff:** https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${TAG}"
-            else
-              git log --no-merges --pretty='- %s (%h)' -n 30 "${TAG}"
-            fi
-          } > release/notes.md
+              echo "Built from #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
+              echo
+              echo "Beta-channel devices (dev menu → RISK → Channel: beta) pick this up"
+              echo "at the next OTA check. Only the newest beta build is live here."
+            } > release/notes.md
+          else
+            # Stable: commit changelog since the previous v* tag, appended
+            # to any hand-drafted body + GitHub's PR-based notes (see the
+            # publish step's append_body / generate_release_notes).
+            PREV_TAG=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+            {
+              echo "## Changes"
+              echo
+              if [ -n "${PREV_TAG}" ]; then
+                git log --no-merges --pretty='- %s (%h)' "${PREV_TAG}..HEAD"
+                echo
+                echo "**Full diff:** https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${{ steps.meta.outputs.tag }}"
+              else
+                git log --no-merges --pretty='- %s (%h)' -n 30 HEAD
+              fi
+            } > release/notes.md
+          fi
           echo "Release notes:"
           cat release/notes.md
 
-      - name: Publish release
+      - name: Publish stable release
+        if: steps.meta.outputs.skip != 'true' && steps.meta.outputs.channel == 'stable'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.tag }}
+          prerelease: false
+          make_latest: true
           files: |
             release/eink-pet.bin
             release/bootloader.bin
             release/partition-table.bin
             release/latest.json
-          # append_body keeps any notes drafted on the release before the
-          # tag was pushed instead of clobbering them; our git-log
-          # changelog (body_path) is appended to that, and
-          # generate_release_notes tacks GitHub's PR-based "What's
-          # Changed" section on the end.
+          # Keep any notes drafted on the release before this ran
+          # (append_body), then our git-log changelog (body_path), then
+          # GitHub's PR-based "What's Changed" (generate_release_notes).
           body_path: release/notes.md
           append_body: true
           generate_release_notes: true
+
+      - name: Publish beta pre-release
+        if: steps.meta.outputs.skip != 'true' && steps.meta.outputs.channel == 'beta'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: beta
+          name: beta (rolling)
+          prerelease: true
+          # Never let the rolling beta become "latest" — stable devices
+          # resolve /releases/latest to the newest non-prerelease only.
+          make_latest: false
+          # Tag the actual PR head, not the ephemeral merge commit.
+          target_commitish: ${{ github.event.pull_request.head.sha }}
+          files: |
+            release/eink-pet.bin
+            release/bootloader.bin
+            release/partition-table.bin
+            release/latest.json
+          # Overwrite the body each build (no append) — the beta release
+          # is rolling, so it should reflect only the current build.
+          body_path: release/notes.md
