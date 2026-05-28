@@ -92,6 +92,15 @@ void pet_sync_current_location(char *id_out, size_t id_cap,
  * regardless. Empty strings clear the seed. */
 void pet_sync_seed_location(const char *place_id, const char *sheet);
 
+/* Restore the pet snapshot from NVS (written on each successful
+ * /api/state pull or mutate response). Marks the snapshot as
+ * "have_snapshot" so engagement projection / sprite resolution see
+ * server-canonical stats from the moment of wake instead of the
+ * hardcoded init_dev_pet defaults. The next pull / mutate will
+ * overwrite from the server. Returns true when a snapshot was
+ * loaded; false on no NVS data or read failure. */
+bool pet_sync_restore_snapshot_from_nvs(void);
+
 /* Current costume id from the latest /api/state ("" = base species).
  * The device renders the pet from costume-<petId>-<costumeId>-v1 when
  * set, else the embedded/pet-v1 base. See design/17. */

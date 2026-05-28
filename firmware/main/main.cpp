@@ -953,6 +953,31 @@ extern "C" void app_main(void) {
             ESP_LOGW(TAG, "scene_pack unavailable; blank backdrop");
             compositor::clear_to_paper(scene_fb, SCENE_W, SCENE_H);
         }
+
+        /* Wake-from-deepsleep: try to restore the last non-home place
+         * pack from LittleFS cache before the first render_with_expression
+         * fires. Without this, the embedded "home" frame paints first
+         * and the main loop's travel block swaps to (e.g.) forest a
+         * couple seconds later — visually that's home → flash → forest
+         * on every wake. The cache load is fast (~70 ms) and offline-
+         * safe; if no cache, fall back to home which is the same as
+         * embedded behaviour. The post-WiFi travel block in the main
+         * loop still runs and refreshes against the server ETag. */
+        char loc_nvs[MOCHI_LOC_ID_MAX + 1] = {};
+        char sheet_nvs[MOCHI_LOC_SHEET_MAX + 1] = {};
+        if (nvs_creds_get_last_loc(loc_nvs, sizeof(loc_nvs),
+                                   sheet_nvs, sizeof(sheet_nvs)) &&
+            loc_nvs[0] && strcmp(loc_nvs, "home") != 0 && sheet_nvs[0]) {
+            const uint8_t *bytes = pack_cache_active_geom(
+                sheet_nvs, SCENE_W, SCENE_H, nullptr);
+            if (bytes && scene_pack_load_bytes(bytes) &&
+                scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H)) {
+                ESP_LOGI(TAG, "boot scene → %s (from cache)", loc_nvs);
+            } else {
+                ESP_LOGW(TAG, "boot scene: '%s' cache miss — staying home",
+                    loc_nvs);
+            }
+        }
     }
 
     /* Bring up the bundled pet pack so render_with_expression can
@@ -1676,6 +1701,14 @@ extern "C" void app_main(void) {
      * success; until then current_pet_decayed falls back to this. */
     init_dev_pet(now_ms_wall());
 
+    /* Restore the last persisted snapshot from NVS. Each successful
+     * pull/mutate writes pet_t + location/sheet/costume there, so a
+     * deepsleep wake renders correct stats/mood/sprite from the very
+     * first frame instead of falling back to init_dev_pet defaults
+     * for 5-30 s while /api/state is in flight. The next pull will
+     * overwrite. No-op (returns false) on first-ever boot. */
+    pet_sync_restore_snapshot_from_nvs();
+
     /* Spin up the push worker + periodic-resync task. Idempotent; its
      * workers retry quietly until net_worker brings WiFi up. */
     pet_sync_start();
@@ -1731,19 +1764,24 @@ extern "C" void app_main(void) {
         if (nvs_creds_get_last_loc(loc_nvs, sizeof(loc_nvs),
                                    sheet_nvs, sizeof(sheet_nvs)) &&
             loc_nvs[0] && strcmp(loc_nvs, "home") != 0 && sheet_nvs[0]) {
-            /* Seed pet_sync's location cache directly from NVS so the
-             * travel block (below) sees a non-"home" target on the
-             * very first tick and fires the pack fetch — without this
-             * pet_sync_current_location returns empty until the first
-             * /api/state pull, and on a flaky network that pull can
-             * be delayed many seconds or fail outright. We DON'T set
-             * last_location to loc_nvs because the travel block
-             * gates on (loc != last_location) — leaving last_location
-             * = "home" guarantees the swap fires and the place's
-             * pack lands in scene_pack. */
+            /* Seed pet_sync's location cache from NVS and align
+             * last_location so the in-loop travel block does NOT
+             * re-fetch the same pack we already loaded above from
+             * the LittleFS cache during boot init. Without aligning,
+             * (loc=forest) != (last_location=home) → travel block
+             * fires → another pack_cache_active_geom call → another
+             * blit + EPD full refresh = visible flicker.
+             *
+             * If the server has since flipped the pet to a different
+             * place (e.g. via voice-driven travel while powered down),
+             * pet_sync_pull_now will overwrite the cached location on
+             * its first successful pull, last_location will lag, and
+             * the travel block fires for the new place — correct.  */
             ESP_LOGI(TAG, "boot: restoring last place '%s' (%s)",
                 loc_nvs, sheet_nvs);
             pet_sync_seed_location(loc_nvs, sheet_nvs);
+            snprintf(last_location, sizeof(last_location), "%.*s",
+                (int)(sizeof(last_location) - 1), loc_nvs);
         }
     }
     /* Travel-failure recovery (design/17/18): a place-pack fetch that

@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_random.h"
+#include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -36,6 +37,7 @@ static const char *TAG = "pet_sync";
 /* Authoritative snapshot. Mutated by pull/push response handlers,
  * read by everyone else through pet_sync_get_snapshot. */
 static SemaphoreHandle_t s_mtx;
+static void persist_snapshot_locked(void);  /* defined below; called from pull/mutate */
 static pet_t s_pet;
 static bool  s_have_snapshot;
 
@@ -276,11 +278,14 @@ bool pet_sync_pull_now(pet_t *out_pet,
         return false;
     }
 
-    /* Update authoritative snapshot. */
+    /* Update authoritative snapshot + persist to NVS so a subsequent
+     * deepsleep wake renders correct mood/stats immediately instead
+     * of falling back to init_dev_pet defaults. */
     if (!s_mtx) s_mtx = xSemaphoreCreateMutex();
     xSemaphoreTake(s_mtx, portMAX_DELAY);
     s_pet = tmp;
     s_have_snapshot = true;
+    persist_snapshot_locked();
     xSemaphoreGive(s_mtx);
 
     *out_pet = tmp;
@@ -478,6 +483,7 @@ static bool do_mutate_post(event_kind_t kind, int64_t at_ms) {
     snprintf(s_location_sheet, sizeof(s_location_sheet), "%s", sheet);
     snprintf(s_costume_id, sizeof(s_costume_id), "%s", cost);
     s_consolidation_advised = advised;
+    persist_snapshot_locked();
     xSemaphoreGive(s_mtx);
     (void)at_ms;  /* server stamps its own at; we don't need ours */
     ESP_LOGI(TAG,
@@ -539,6 +545,76 @@ bool pet_sync_enqueue(event_kind_t kind, int64_t at_ms) {
     if (!s_started || !s_queue) return false;
     push_msg_t msg = { kind, at_ms };
     return xQueueSend(s_queue, &msg, 0) == pdTRUE;
+}
+
+/* ─── Snapshot persistence ────────────────────────────────────────
+ *
+ * Deep sleep wipes RAM, so the in-memory s_pet snapshot is gone when
+ * the device wakes. Without persistence, we project from init_dev_pet's
+ * hardcoded defaults until /api/state lands — typically 5-30 s on a
+ * healthy network, much longer on a flaky one. Persisting the snapshot
+ * to NVS on every successful pull/mutate means wake renders the right
+ * mood/sprite/stats from the first frame, with the next pull
+ * overwriting from the server when ready.
+ *
+ * Schema is just the pet_t blob (~40 B) — small enough that writing
+ * on every mutate is cheap. NVS layer dedups identical writes. */
+static const char *NS_SNAP = "pet_snap";
+static const char *KEY_SNAP_PET  = "pet";
+static const char *KEY_SNAP_LOC  = "loc";
+static const char *KEY_SNAP_LSHT = "lsht";
+static const char *KEY_SNAP_COST = "cost";
+
+/* Called under s_mtx after a successful pull/mutate. Stores the four
+ * fields that drive boot-time render: pet_t, location id, location
+ * sheet, costume id. Any failure logs warn-only — a stale snapshot is
+ * better than refusing to write because of e.g. flash wear. */
+static void persist_snapshot_locked(void) {
+    nvs_handle_t h;
+    if (nvs_open(NS_SNAP, NVS_READWRITE, &h) != ESP_OK) return;
+    esp_err_t e1 = nvs_set_blob(h, KEY_SNAP_PET, &s_pet, sizeof(s_pet));
+    esp_err_t e2 = nvs_set_str(h, KEY_SNAP_LOC, s_location);
+    esp_err_t e3 = nvs_set_str(h, KEY_SNAP_LSHT, s_location_sheet);
+    esp_err_t e4 = nvs_set_str(h, KEY_SNAP_COST, s_costume_id);
+    if (e1 == ESP_OK && e2 == ESP_OK && e3 == ESP_OK && e4 == ESP_OK) {
+        nvs_commit(h);
+    } else {
+        ESP_LOGW(TAG, "persist snapshot failed (e1=%d e2=%d e3=%d e4=%d)",
+            (int)e1, (int)e2, (int)e3, (int)e4);
+    }
+    nvs_close(h);
+}
+
+bool pet_sync_restore_snapshot_from_nvs(void) {
+    nvs_handle_t h;
+    if (nvs_open(NS_SNAP, NVS_READONLY, &h) != ESP_OK) return false;
+    pet_t tmp = {};
+    size_t want = sizeof(tmp);
+    esp_err_t err = nvs_get_blob(h, KEY_SNAP_PET, &tmp, &want);
+    if (err != ESP_OK || want != sizeof(tmp)) {
+        nvs_close(h);
+        return false;
+    }
+    char loc[40] = {}, sheet[64] = {}, cost[40] = {};
+    size_t n;
+    n = sizeof(loc);   nvs_get_str(h, KEY_SNAP_LOC,  loc,   &n);
+    n = sizeof(sheet); nvs_get_str(h, KEY_SNAP_LSHT, sheet, &n);
+    n = sizeof(cost);  nvs_get_str(h, KEY_SNAP_COST, cost,  &n);
+    nvs_close(h);
+
+    if (!s_mtx) s_mtx = xSemaphoreCreateMutex();
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    s_pet = tmp;
+    s_have_snapshot = true;
+    snprintf(s_location,        sizeof(s_location),        "%s", loc);
+    snprintf(s_location_sheet,  sizeof(s_location_sheet),  "%s", sheet);
+    snprintf(s_costume_id,      sizeof(s_costume_id),      "%s", cost);
+    xSemaphoreGive(s_mtx);
+    ESP_LOGI(TAG,
+        "snapshot restored: stats=h%u/f%u/e%u asleep=%d loc=%s",
+        tmp.stats.happiness, tmp.stats.fullness, tmp.stats.energy,
+        (int)tmp.asleep, loc[0] ? loc : "(none)");
+    return true;
 }
 
 int pet_sync_push_now(void) {
