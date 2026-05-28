@@ -100,13 +100,15 @@ Behaviour:
 - **Touch INT (GPIO21)** registered as a GPIO light-sleep wake source →
   a tap wakes the SoC in µs, the existing ISR fires, the loop dispatches
   the tap normally. Wake → Tier L.
-- **WiFi**: dropped, or set to `WIFI_PS_MAX_MODEM` — see WiFi section.
-- **Substrate refresh**: stretched (candidate 5–10 min) so the SoC
-  mostly stays asleep; a heartbeat timer wake handles it.
+- **WiFi**: kept associated at `WIFI_PS_MAX_MODEM`
+  (`CONFIG_MOCHI_DOZE_WIFI_POWERSAVE`, the as-built choice — see WiFi
+  section). The device stays reachable + synced; it does not go dark.
+- **Substrate refresh**: stretched to 5 min (`power_substrate_refresh_us`).
 
 This is the state the device lives in most of the time. It looks
 identical to Live to the user (pet on screen) but the SoC is asleep
-between events.
+between events. What keeps running on a timer — the 5-min resync,
+telemetry, consolidation — is in §Background work while dozing.
 
 ### Tier S — Deep sleep (unchanged)
 Entered by explicit PWR tap, or after a long secondary timeout
@@ -121,10 +123,13 @@ today.
 | Touch INT | GPIO21 | ✅ GPIO wake | (not today) | RTC-capable; ISR already installed |
 | PWR button | GPIO18 | ✅ GPIO wake | ✅ ext1 any-low | |
 | BOOT button | GPIO0 | ✅ GPIO wake | ✅ ext1 any-low | |
-| Heartbeat timer | — | ✅ timer wake | (open q) | drives substrate refresh while dozing |
+| FreeRTOS/timer | — | ✅ implicit | (open q) | the periodic tasks below (resync, telemetry, touch-poll) wake the SoC on their own timers — no dedicated heartbeat timer is needed under automatic light sleep |
 
 Doze adds touch INT as a wake source — the key difference from deep
-sleep, which deliberately wakes only on the physical buttons.
+sleep, which deliberately wakes only on the physical buttons. (Earlier
+drafts proposed a dedicated heartbeat timer; with `esp_pm` automatic
+light sleep the existing periodic tasks already wake the SoC, so none
+was added — see §Background work while dozing.)
 
 ## Config changes required (`sdkconfig.defaults`)
 
@@ -164,8 +169,15 @@ Two options; pick by measurement + product feel:
    power, but inbound state stays current. Heavier; probably not worth
    it for a kid's pet that's idle.
 
-Lean: option 1, with the heartbeat timer doing an opportunistic
-reconnect + `pet_sync` resync, then back to sleep.
+**As built: option 2** (`CONFIG_MOCHI_DOZE_WIFI_POWERSAVE=y`). The pet
+is a synced object — keeping the link up at `WIFI_PS_MAX_MODEM` lets the
+5-min `pet_sync` resync, server pushes, and consolidation just keep
+working through doze with no reconnect dance, and DTIM-beacon modem
+sleep still recovers most of the WiFi idle power. Option 1 (drop +
+reconnect on wake) is the fallback if the §Measurement plan shows
+`MAX_MODEM` doze power is still too high — it trades sync latency for
+lower draw, and the design/21 worker makes the reconnect safe. The
+choice is one Kconfig flag, so it's cheap to flip and re-measure.
 
 ## Implementation sketch
 
@@ -235,6 +247,51 @@ The ratio of (1) to (2) sets whether Doze is worth a short or long
    "settling" cue) or stay silent? Silent avoids an e-paper flash;
    a cue is more legible. Lean silent.
 3. `T_doze` user-configurable in Settings (design/22), or fixed?
+
+## Background work while dozing
+
+Doze is not "off" — the device keeps doing its periodic work; automatic
+light sleep just micro-sleeps the SoC *between* these and the FreeRTOS
+tick fully wakes it when a timer fires. WiFi stays associated (above),
+so all of this works without a reconnect:
+
+| Work | Cadence | Wakes the SoC? | Notes |
+|------|---------|----------------|-------|
+| Touch poll task | 100 ms | yes | also the wake path if the INT line isn't wired |
+| Main loop tick (`wait_event`) | 1 s | yes | evaluates the gates below |
+| **`pet_sync` resync → `/api/state`** | **5 min** (`RESYNC_INTERVAL_MS`) | yes | the "intermittently wake to sync" path; own task, tier-independent |
+| Substrate re-projection | 5 min in doze (`power_substrate_refresh_us`) | yes | only repaints if the resolved sprite/thought changed |
+| Health + power telemetry | 5 min | yes | the snapshot rows §Telemetry queries read |
+| Diagnostic flush | periodic, idle-gated | yes | POSTs the buffered records |
+| OTA check | when idle ≥ 60 s (`OTA_IDLE_GATE_US`) | yes | pre-existing idle gate, unchanged by the tier work; *not* the sleep strategy |
+
+The 100 ms poll + 1 s tick cap light-sleep residency (the SoC can only
+stay down ~100 ms at a stretch); that's the first thing the telemetry
+will show and the first knob to turn (suspend the poll task in doze /
+lengthen the tick) if residency is poor. Lowering `FREERTOS_HZ` from
+1000 helps here too.
+
+### Consolidation interplay
+
+Two unrelated "sleeps": the **pet** being asleep (substrate mood state)
+and the **device** dozing (power tier). They're orthogonal.
+
+- Sleep consolidation (design/19) is gated on *pet asleep* +
+  substrate-advised, checked every idle tick — **not** on the device
+  power tier. So a dozing device still kicks a reflection pass when one
+  is due (the 5-min resync is what surfaces the advice).
+- The power tier *protects* the pass: `power_update`'s `inhibited` input
+  is `voice || imagine || consolidate_in_flight || dev_menu || key_portal`.
+  While any of those is live the device is **pinned Live** (never dozes,
+  so light sleep can't cut a TLS handshake or the BYO-key reflection
+  call mid-flight). When it finishes, the device falls back to doze on
+  the next idle window.
+- Net flow: doze → 5-min resync wakes the SoC → pull advises a pass and
+  the pet is asleep → `consolidate_start()` → device pinned Live for the
+  pass → back to doze.
+
+The same inhibit rule is why a voice session or an OTA download never
+races light sleep — they hold the device Live for their duration.
 
 ## Measured baseline (existing Live-only draw)
 
