@@ -968,8 +968,13 @@ extern "C" void app_main(void) {
         if (nvs_creds_get_last_loc(loc_nvs, sizeof(loc_nvs),
                                    sheet_nvs, sizeof(sheet_nvs)) &&
             loc_nvs[0] && strcmp(loc_nvs, "home") != 0 && sheet_nvs[0]) {
-            const uint8_t *bytes = pack_cache_active_geom(
-                sheet_nvs, SCENE_W, SCENE_H, nullptr);
+            /* Cache-only load — pack_cache_active_geom would HEAD-probe
+             * the server first, which calls lwip getaddrinfo and panics
+             * pre-WiFi (tcpip task isn't running yet at this point in
+             * app_main). The post-WiFi travel block in the main loop
+             * does the proper ETag-against-server refresh. */
+            const uint8_t *bytes = pack_cache_load_geom_only(
+                sheet_nvs, SCENE_W, SCENE_H);
             if (bytes && scene_pack_load_bytes(bytes) &&
                 scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H)) {
                 ESP_LOGI(TAG, "boot scene → %s (from cache)", loc_nvs);
