@@ -2187,8 +2187,12 @@ extern "C" void app_main(void) {
                             ESP_LOGI(TAG, "dev_menu → go home");
                             /* Network POST; the travel block swaps to the
                              * home bundle next tick on success. No-op +
-                             * logged if offline. */
+                             * logged if offline. Clear last_location so
+                             * the travel block re-renders even if the
+                             * device is already showing the home pack
+                             * (e.g. after a deepsleep restore). */
                             pet_sync_enter_place("home");
+                            last_location[0] = '\0';
                             break;
                         case dev_menu::TouchResult::Memories:
                         case dev_menu::TouchResult::Places:
@@ -2872,6 +2876,15 @@ extern "C" void app_main(void) {
             memcpy(place_id, scene_act.seed_text, n);
             ESP_LOGI(TAG, "scene nav_place → %s", place_id);
             pet_sync_enter_place(place_id);
+            /* Force the travel block to re-render even when the user
+             * tapped to go to the place they're already in. Without
+             * this, a deepsleep-restored last_location pre-set to (e.g.)
+             * "forest" makes a deliberate forest-tap a no-op: enter_place
+             * succeeds, location matches, travel block sees no diff,
+             * nothing redraws. Clearing last_location lets the travel
+             * block re-blit the current scene on the next tick — same
+             * behaviour as a genuine cross-place move. */
+            last_location[0] = '\0';
             /* If this re-taps the place we just failed to reach, drop the
              * backoff so the travel block retries on the next tick rather
              * than waiting out the timer (re-tapping a failed nav zone
@@ -2947,26 +2960,17 @@ extern "C" void app_main(void) {
          * feeling?" answer. EVENT_COMFORTED still lands on the event
          * log below, so a pat actually comforts the pet.
          *
-         * Used in two places below: the zoned-scene fallthrough
-         * (no zone hit + tap on pet), and the unzoned-scene
-         * Zone::Center path. */
-        static const char *const DELIGHT_EXPRS[] = {
-            "curious", "cheerful_wave", "excited",
-            "comforted", "thinking",
-        };
-        constexpr int DELIGHT_N = (int)(sizeof(DELIGHT_EXPRS) /
-                                        sizeof(DELIGHT_EXPRS[0]));
-        static int s_delight_idx = 0;
+         * Spawn a transient mood thought bubble — but DON'T cycle
+         * the pet expression. Earlier we rotated through a delight
+         * pool (curious/cheerful_wave/excited/comforted/thinking) on
+         * pet-tap, but the random-feel didn't read as personality —
+         * just inconsistent. Now the pet keeps its current resting
+         * expression and only the bubble surfaces; the bubble carries
+         * the "what's mochi feeling?" answer through thought_for_pet_tap. */
         static pet_thought_t s_petmood_thought;
-        auto pick_delight = [&]() -> const char * {
-            const char *e = DELIGHT_EXPRS[s_delight_idx % DELIGHT_N];
-            s_delight_idx++;
-            /* Mood bubble piggy-backs on the same transient seed-bubble
-             * channel: the renderer draws it above the pet during the
-             * 5-s tap hold, then the post-hold render_resting() clears
-             * it (its own thought_generate runs against fresh state).
-             * Don't overwrite a talk_seed bubble that already claimed
-             * seed_thought_ptr — talk_seed is the louder signal. */
+        auto spawn_petmood_bubble = [&]() {
+            /* Don't overwrite a talk_seed bubble already on the
+             * seed-bubble channel — talk_seed is the louder signal. */
             if (!seed_thought_ptr) {
                 pet_event_t slice[12];
                 size_t n = event_log_load_recent(slice, 12);
@@ -2976,27 +2980,27 @@ extern "C" void app_main(void) {
                                     &s_petmood_thought);
                 seed_thought_ptr = &s_petmood_thought;
             }
-            return e;
         };
 
         /* When the current scene has authored zones, the corner-
          * quadrant fallback is suppressed: a tap that misses every
-         * zone (after the snap fallback above) resolves to either a
-         * delight expression (pet body — a pat) or "curious" (empty
-         * scene background). */
+         * zone (after the snap fallback above) keeps the resting
+         * expression and (on pet-body taps) spawns a mood bubble. */
         const bool zoned = scene_pack_current_has_zones();
         if (zoned && !scene_hit && !tapped_thought) {
-            expr = tapped_pet ? pick_delight() : "curious";
+            if (tapped_pet) {
+                spawn_petmood_bubble();
+                expr = last_resting_expr;   /* keep current resting face */
+            } else {
+                expr = "curious";
+            }
         }
 
-        /* Unzoned scene + tap on the pet body resolves to a delight
-         * expression too — the legacy zone_to_expr returned "curious"
-         * for Zone::Center, which is fine for non-pet centre taps but
-         * pre-empted the pet-tap delight intent on a tap that landed
-         * on the pet. */
+        /* Unzoned scene + tap on pet body: same deal — bubble only. */
         if (!zoned && !scene_hit && !tapped_thought &&
             z == Zone::Center && tapped_pet) {
-            expr = pick_delight();
+            spawn_petmood_bubble();
+            expr = last_resting_expr;   /* keep current resting face */
         }
 
         /* event-kind zones: derive expr from the pack-supplied
