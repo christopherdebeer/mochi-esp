@@ -80,6 +80,11 @@ void pet_sync_current_location(char *id_out, size_t id_cap,
  * set, else the embedded/pet-v1 base. See design/17. */
 void pet_sync_current_costume(char *id_out, size_t id_cap);
 
+/* True when the latest /api/state advised a sleep-consolidation pass
+ * (server-computed: asleep + activity + low engagement + cooldown).
+ * main.cpp acts on it — server-orchestrated consolidation (design/19). */
+bool pet_sync_consolidation_advised(void);
+
 /* Post a realtime_sessions row on voice session end (design/18 ph3).
  * Session-level: duration + model/voice/end_reason; per-turn tokens are
  * deferred (ph3b). Best-effort; no-op without pairing. */

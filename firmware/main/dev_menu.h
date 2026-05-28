@@ -73,6 +73,9 @@ enum class Mode : uint8_t {
     /* WifiModal is pushed from the "Switch WiFi" button on MenuP2
      * and torn down on either a button-tap (do) or PWR×1 (Live). */
     WifiModal,
+    /* ModelsModal is pushed from the "AI models" button on MenuP2 —
+     * cycle the voice + text model selections (model_prefs). */
+    ModelsModal,
     _Count,
 };
 
@@ -137,6 +140,9 @@ enum class TouchResult : uint8_t {
     GoHome,           /* reset the pet's location to home */
     SwitchWifi,       /* push the WifiModal sub-screen (in-place) */
     WifiSwitch,       /* (modal) commit a switch to the picked SSID — see picked_ssid() */
+    OpenModels,       /* push the ModelsModal sub-screen (in-place) */
+    CycleVoiceModel,  /* (modal) cycle the voice model — handled in dev_menu */
+    CycleTextModel,   /* (modal) cycle the text model — handled in dev_menu */
     /* Placeholders surfaced on the kid-facing MenuP1. Both currently
      * land in main.cpp as a "not implemented yet" toast — the rows
      * exist so the page has shape while the underlying data (memory

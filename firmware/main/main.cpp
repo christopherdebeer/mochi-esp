@@ -77,6 +77,8 @@ extern "C" {
 #include "scene_pack.h"
 #include "pet_pack.h"
 #include "imagine.h"
+#include "consolidate.h"
+#include "model_prefs.h"
 }
 #include "pet_sync.h"
 #include "device_diag.h"
@@ -956,6 +958,14 @@ extern "C" void app_main(void) {
     if (!imagine_init()) {
         ESP_LOGW(TAG, "imagine pipeline unavailable; voice "
                       "imagine_place tool will refuse");
+    }
+
+    /* On-device sleep consolidation (design/19). Idle until /api/state
+     * advises a pass and the loop below fires it while the pet rests;
+     * server-orchestrated, BYO key. */
+    if (!consolidate_init()) {
+        ESP_LOGW(TAG, "consolidate worker unavailable; advised "
+                      "consolidation will be skipped");
     }
 
     /*
@@ -2288,6 +2298,21 @@ extern "C" void app_main(void) {
             pet_sync_pull_now(&ps, pe, 4, &pn);
         }
 
+        /* Sleep consolidation (design/19, server-orchestrated). When
+         * /api/state advised a pass and the pet is asleep, run a
+         * reflection pass with the BYO key — but only at rest and with
+         * no voice/imagine in flight (PSRAM budget + "reflect during
+         * rest, not mid-conversation"). consolidate_start() self-guards
+         * on in-flight + debounce, so calling it each idle tick is a
+         * cheap no-op until the next pass is actually due. */
+        if (!voice::is_active() && !imagine_in_flight() &&
+            !consolidate_in_flight() && pet_sync_consolidation_advised()) {
+            pet_t csnap;
+            if (pet_sync_get_snapshot(&csnap) && csnap.asleep) {
+                consolidate_start();
+            }
+        }
+
         /* Travel (design/17): follow pets.location. pet_sync refreshes it
          * on every pull/mutate, so a tap or the periodic resync picks up
          * a voice move_to_location / idle drift / travel-to-an-imagined-
@@ -2459,7 +2484,9 @@ extern "C" void app_main(void) {
                 voice_sess_start_us = 0;
                 int turns = 0, in_tok = 0, out_tok = 0, total_tok = 0;
                 voice_peer_get_session_stats(&turns, &in_tok, &out_tok, &total_tok);
-                pet_sync_post_voice_session(dur_s, "gpt-realtime", "marin",
+                char vmodel[48];
+                model_prefs_voice(vmodel, sizeof(vmodel));
+                pet_sync_post_voice_session(dur_s, vmodel, "marin",
                     "ended", turns, in_tok, out_tok, total_tok);
             }
         }

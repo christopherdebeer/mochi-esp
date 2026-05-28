@@ -60,6 +60,8 @@ idf_component_register(
         "scene_pack.c"
         "pet_pack.c"
         "imagine.c"
+        "consolidate.c"
+        "model_prefs.c"
         "voice.cpp"
         "voice/voice_https.c"
         "voice/openai_signaling.c"

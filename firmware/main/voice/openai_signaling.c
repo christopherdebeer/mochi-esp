@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include "voice_https.h"
 #include "openai_signaling.h"
+#include "model_prefs.h"
 #include "esp_log.h"
 #include <cJSON.h>
 
@@ -149,7 +150,12 @@ static void get_ephemeral_token(openai_signaling_t *sig, char *token, char *voic
     cJSON *session = cJSON_CreateObject();
     cJSON_AddItemToObject(root, "session", session);
     cJSON_AddStringToObject(session, "type", "realtime");
-    cJSON_AddStringToObject(session, "model", OPENAI_REALTIME_MODEL);
+    /* Voice model from the on-device picker (model_prefs); defaults to
+     * OPENAI_REALTIME_MODEL when unset. Kept in sync with the
+     * realtime_sessions telemetry model reported by main.cpp. */
+    char voice_model[48];
+    model_prefs_voice(voice_model, sizeof(voice_model));
+    cJSON_AddStringToObject(session, "model", voice_model);
     if (instructions && *instructions) {
         cJSON_AddStringToObject(session, "instructions", instructions);
     }

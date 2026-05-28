@@ -48,6 +48,11 @@ static char s_location_sheet[64];
 /* Current costume id ("" = base species). The device renders the pet
  * from costume-<petId>-<costumeId>-v1 when set (design/17). */
 static char s_costume_id[40];
+/* Latest /api/state's consolidationAdvised: true when the server hints a
+ * sleep-consolidation pass is due (asleep + enough activity + low
+ * engagement + cooldown elapsed; see backend/consolidate.ts). main.cpp
+ * acts on it — server-orchestrated consolidation (design/19). s_mtx. */
+static bool s_consolidation_advised;
 
 /* Push queue + worker. */
 typedef struct {
@@ -88,7 +93,8 @@ static bool parse_state_response(const char *body, int len,
                                  size_t *out_count,
                                  char *out_loc, size_t loc_cap,
                                  char *out_loc_sheet, size_t sheet_cap,
-                                 char *out_costume, size_t costume_cap) {
+                                 char *out_costume, size_t costume_cap,
+                                 bool *out_advised) {
     cJSON *root = cJSON_ParseWithLength(body, (size_t)len);
     if (!root) {
         ESP_LOGW(TAG, "json parse failed");
@@ -189,6 +195,13 @@ static bool parse_state_response(const char *body, int len,
         }
     }
 
+    /* consolidationAdvised: an object when the server advises a pass,
+     * null otherwise (see backend/consolidate.ts buildStateResponse). */
+    if (out_advised) {
+        cJSON *adv = cJSON_GetObjectItemCaseSensitive(root, "consolidationAdvised");
+        *out_advised = cJSON_IsObject(adv);
+    }
+
     cJSON_Delete(root);
     return true;
 }
@@ -233,10 +246,11 @@ static bool do_state_pull(pet_t *out_pet,
     }
 
     char loc[40] = {0}, sheet[64] = {0}, cost[40] = {0};
+    bool advised = false;
     bool ok = parse_state_response(cap_state.body, cap_state.len,
                                    out_pet, out_events, cap, out_count,
                                    loc, sizeof(loc), sheet, sizeof(sheet),
-                                   cost, sizeof(cost));
+                                   cost, sizeof(cost), &advised);
     free(cap_state.body);
     if (ok) {
         if (!s_mtx) s_mtx = xSemaphoreCreateMutex();
@@ -244,6 +258,7 @@ static bool do_state_pull(pet_t *out_pet,
         snprintf(s_location, sizeof(s_location), "%s", loc);
         snprintf(s_location_sheet, sizeof(s_location_sheet), "%s", sheet);
         snprintf(s_costume_id, sizeof(s_costume_id), "%s", cost);
+        s_consolidation_advised = advised;
         xSemaphoreGive(s_mtx);
     }
     return ok;
@@ -316,6 +331,14 @@ void pet_sync_current_costume(char *id_out, size_t id_cap) {
     xSemaphoreTake(s_mtx, portMAX_DELAY);
     snprintf(id_out, id_cap, "%s", s_costume_id);
     xSemaphoreGive(s_mtx);
+}
+
+bool pet_sync_consolidation_advised(void) {
+    if (!s_mtx) return false;
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    bool v = s_consolidation_advised;
+    xSemaphoreGive(s_mtx);
+    return v;
 }
 
 void pet_sync_post_voice_session(int duration_s, const char *model,
@@ -431,10 +454,11 @@ static bool do_mutate_post(event_kind_t kind, int64_t at_ms) {
     pet_event_t evs[12];
     size_t n = 0;
     char loc[40] = {0}, sheet[64] = {0}, cost[40] = {0};
+    bool advised = false;
     bool ok = parse_state_response(cap_mut.body, cap_mut.len, &tmp,
                                    evs, sizeof(evs)/sizeof(evs[0]), &n,
                                    loc, sizeof(loc), sheet, sizeof(sheet),
-                                   cost, sizeof(cost));
+                                   cost, sizeof(cost), &advised);
     free(cap_mut.body);
     if (!ok) return false;
 
@@ -445,6 +469,7 @@ static bool do_mutate_post(event_kind_t kind, int64_t at_ms) {
     snprintf(s_location, sizeof(s_location), "%s", loc);
     snprintf(s_location_sheet, sizeof(s_location_sheet), "%s", sheet);
     snprintf(s_costume_id, sizeof(s_costume_id), "%s", cost);
+    s_consolidation_advised = advised;
     xSemaphoreGive(s_mtx);
     (void)at_ms;  /* server stamps its own at; we don't need ours */
     ESP_LOGI(TAG,
