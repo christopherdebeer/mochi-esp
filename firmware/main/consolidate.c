@@ -313,7 +313,7 @@ static void run_consolidate(void) {
     }
 
     {
-        char ctx[96];
+        char ctx[160];
         snprintf(ctx, sizeof(ctx),
             "{\"model\":\"%s\",\"in\":%d,\"out\":%d,\"ms\":%lld}",
             model_buf, in_tok, out_tok, (long long)gen_ms);
