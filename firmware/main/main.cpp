@@ -1656,6 +1656,25 @@ extern "C" void app_main(void) {
         if (x >= 50 && x < 150 && y >= 64 && y < 164) return Zone::Center;
         return Zone::None;
     };
+    /* Precise pet hit-test against the cell's mask plane (design/05,
+     * "two-plane cells"). The mask marks opaque body pixels (bit 0)
+     * vs transparent background (bit 1); pet_mask holds the
+     * last-rendered cell's mask and the pet always blits at
+     * (PET_DX, PET_DY). A tap counts as a pet-body hit only when it
+     * lands on an *opaque* silhouette pixel — far tighter than the
+     * 96×96 bounding box, so taps in the transparent corners of the
+     * cell (which routinely overlap authored scene zones) no longer
+     * read as pet taps, and a tap on the actual drawn body is no
+     * longer pre-empted by a zone hiding behind those corners. */
+    auto pet_silhouette_hit = [&](uint16_t x, uint16_t y) -> bool {
+        const int lx = (int)x - PET_DX;
+        const int ly = (int)y - PET_DY;
+        if (lx < 0 || lx >= (int)PET_CELL_W ||
+            ly < 0 || ly >= (int)PET_CELL_H) return false;
+        const size_t stride = PET_CELL_W >> 3;          /* 12 bytes/row */
+        const uint8_t bit = (uint8_t)(1u << (7 - (lx & 7)));
+        return (pet_mask[(size_t)ly * stride + (lx >> 3)] & bit) == 0;
+    };
     auto zone_to_expr = [](Zone z) -> const char * {
         switch (z) {
             case Zone::CornerTL: return "comforted";       /* heart icon */
@@ -2808,23 +2827,25 @@ extern "C" void app_main(void) {
          * Forgiving snap: ZONE_SLOP_PX widens each rect by 16 px so a
          * tap near (but not inside) an authored rect still resolves.
          *
-         * Lenient overlap policy: scene zones win even when the tap
-         * lands inside the pet sprite's bounding box. The pet
-         * frequently sits over food/heart/play/door icons in scenes_a;
-         * a kid putting their finger on the food bowl shouldn't be
-         * pre-empted by "ah you tapped the pet". The pet is only
-         * resolved as the target if NO scene zone (with slop) and NO
-         * care icon hit. tapped_pet is still tracked for the pet-tap
-         * delight path below — but it's the LAST priority, not the
-         * first. */
+         * Overlap policy (silhouette-aware): the pet's authored cell is
+         * a 96×96 box but the drawn body fills only part of it, and that
+         * box routinely overlaps food/heart/play/door zones in scenes_a.
+         * We tell "tap on the pet" from "tap on a zone behind the pet's
+         * transparent corners" with the mask plane: a tap on an *opaque*
+         * pet pixel is the pet (a pat — surfaces the mood bubble, never a
+         * zone action), so the scene-zone hit-test is skipped entirely
+         * for it. Taps in the transparent margin still fall through to
+         * the zone test, so a finger genuinely on the food bowl that
+         * happens to be inside the pet's bounding box still feeds.
+         * tapped_pet was previously the coarse bounding box and the LAST
+         * priority; the precise silhouette now takes priority over an
+         * overlapping zone. */
         constexpr int ZONE_SLOP_PX = 16;
-        const bool tapped_pet =
-            (int)ev.x >= PET_DX && (int)ev.x <  PET_DX + (int)PET_CELL_W &&
-            (int)ev.y >= PET_DY && (int)ev.y <  PET_DY + (int)PET_CELL_H;
+        const bool tapped_pet = pet_silhouette_hit(ev.x, ev.y);
 
         scene_pack_action_t scene_act = {};
         bool scene_hit = false;
-        if (!tapped_thought && (int)ev.y >= STATUS_BAR_H) {
+        if (!tapped_thought && !tapped_pet && (int)ev.y >= STATUS_BAR_H) {
             scene_hit = scene_pack_action_at(
                 (int16_t)ev.x, (int16_t)ev.y, ZONE_SLOP_PX, &scene_act);
         }
@@ -3135,10 +3156,23 @@ extern "C" void app_main(void) {
          * 100 ms is well within the grace window and cheap.
          *
          * On a mid-hold sleep request: claim it, render the rich
-         * asleep frame, commit. commit_sleep doesn't return. */
+         * asleep frame, commit. commit_sleep doesn't return.
+         *
+         * Responsiveness: a fresh finger-down during the hold cuts it
+         * short so the next tap is serviced promptly instead of being
+         * swallowed for up to 5 s — the old behaviour, which made the
+         * panel feel dead between care taps. We require a finger-UP
+         * first (saw_release) so a finger still resting from the tap
+         * that started this hold doesn't re-trigger; the genuine new
+         * press also leaves a marker on the touch queue (ISR negedge),
+         * so the loop's wait_event picks it up on the next iteration.
+         * Breaking out skips the resting-settle render below — control
+         * `continue`s straight back to wait_event for the new tap. */
         {
             constexpr int CHUNK_MS = 100;
             int remaining = RESTING_AFTER_TAP_MS;
+            bool saw_release = false;
+            bool new_tap = false;
             while (remaining > 0) {
                 vTaskDelay(pdMS_TO_TICKS(CHUNK_MS));
                 remaining -= CHUNK_MS;
@@ -3152,7 +3186,16 @@ extern "C" void app_main(void) {
                     sleep_gesture::commit_sleep();
                     /* Unreachable. */
                 }
+                touch::Event probe;
+                if (!touch::current_point(&probe)) {
+                    saw_release = true;
+                } else if (saw_release) {
+                    ESP_LOGI(TAG, "new tap mid-hold → cut hold short");
+                    new_tap = true;
+                    break;
+                }
             }
+            if (new_tap) continue;
         }
 
         /* Settle back to the substrate's current resting expression
