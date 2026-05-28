@@ -1682,6 +1682,25 @@ extern "C" void app_main(void) {
      * rendering. Boot rendered the home bundle, so we start at "home".
      * The loop below follows pets.location and re-renders on change. */
     char last_location[40] = "home";
+    /* Travel-failure recovery (design/17/18): a place-pack fetch that
+     * fails floats a thought bubble and arms a backoff retry instead of
+     * silently wedging on the current scene. travel_retry_loc remembers
+     * which place we couldn't reach; travel_retry_at_us is the monotonic
+     * deadline after which the travel block forces a re-attempt (also
+     * triggered immediately by re-tapping the same nav_place zone). */
+    char    travel_retry_loc[40]   = "";
+    char    travel_warned_loc[40]  = "";   /* place we've already shown the
+                                            * failure bubble for; suppresses a
+                                            * re-render (e-paper flash) on each
+                                            * 30 s retry. Cleared on success. */
+    int64_t travel_retry_at_us     = 0;
+    /* Backing store for the failure bubble's text. Static so the
+     * file-scope s_active_thought.text pointer stays valid after we pin
+     * it as a persistent, pageable passive bubble. Sized for the worst
+     * case (the longest template + a full-length loc[40]) so the
+     * snprintf can't truncate (-Werror=format-truncation). */
+    static char travel_fail_msg[96] = "";
+    constexpr int64_t TRAVEL_RETRY_BACKOFF_US = 30LL * 1000 * 1000;  /* 30 s */
     /* Worn-costume state (design/17): re-render the pet when it changes.
      * Empty = base species, which is the boot render. */
     char last_costume[40] = "";
@@ -2278,10 +2297,24 @@ extern "C" void app_main(void) {
          * full refresh + a blocking fetch on the render thread); picked up
          * the tick after the session ends. */
         if (!voice::is_active()) {
+            /* Backoff retry of a previously-failed travel fetch: when the
+             * deadline elapses, force re-evaluation by clearing
+             * last_location so the fetch below runs again if the location
+             * still differs. Keeps a transient failure (cold server cache,
+             * a blip) from being a permanent dead-end without thrashing a
+             * 15 s-blocking fetch every tick. */
+            if (travel_retry_at_us != 0 &&
+                esp_timer_get_time() >= travel_retry_at_us) {
+                travel_retry_at_us = 0;
+                last_location[0] = '\0';
+            }
             char loc[40], lsheet[64];
             pet_sync_current_location(loc, sizeof(loc), lsheet, sizeof(lsheet));
             if (loc[0] && strcmp(loc, last_location) != 0) {
                 bool swapped = false;
+                bool fetch_attempted = false;
+                int  pstatus = 0;
+                uint32_t pms = 0;
                 if (strcmp(loc, "home") == 0) {
                     swapped = scene_pack_load_home();
                 } else if (lsheet[0] && travel_pack) {
@@ -2290,13 +2323,19 @@ extern "C" void app_main(void) {
                         "%s/devsprite/pack/%s?cw=%u&ch=%u",
                         MOCHI_BASE_URL, lsheet,
                         (unsigned)SCENE_W, (unsigned)SCENE_H);
-                    size_t plen = 0; uint32_t pms = 0;
-                    if (sprite_fetch_blob(purl, travel_pack,
-                            TRAVEL_PACK_BYTES, &plen, &pms)) {
+                    size_t plen = 0;
+                    fetch_attempted = true;
+                    if (sprite_fetch_blob_ex(purl, travel_pack,
+                            TRAVEL_PACK_BYTES, &plen, &pms, &pstatus)) {
                         swapped = scene_pack_load_bytes(travel_pack);
-                    } else {
-                        ESP_LOGW(TAG, "travel: pack fetch failed for %s", lsheet);
-                        device_diag_eventf(DIAG_WARN, "travel", NULL,
+                    }
+                    if (!swapped) {
+                        ESP_LOGW(TAG, "travel: pack fetch failed for %s "
+                            "(HTTP %d, %u ms)", lsheet, pstatus, (unsigned)pms);
+                        char fctx[64];
+                        snprintf(fctx, sizeof(fctx),
+                            "{\"status\":%d,\"ms\":%u}", pstatus, (unsigned)pms);
+                        device_diag_eventf(DIAG_WARN, "travel", fctx,
                             "pack fetch fail %s", lsheet);
                     }
                 }
@@ -2314,9 +2353,53 @@ extern "C" void app_main(void) {
                     device_diag_eventf(DIAG_INFO, "travel", NULL,
                         "to %s (%s)", loc,
                         (strcmp(loc, "home") == 0) ? "bundle" : lsheet);
+                    travel_retry_at_us = 0;   /* success clears any pending retry */
+                    travel_warned_loc[0] = '\0';
+                    /* Drop a still-pinned failure bubble so it doesn't
+                     * reappear over the newly-loaded scene. Pointer match
+                     * avoids clobbering an unrelated active bubble. */
+                    if (s_thought_active && s_active_thought.text == travel_fail_msg) {
+                        s_thought_active = false;
+                        memset(&s_active_thought, 0, sizeof(s_active_thought));
+                    }
+                } else if (fetch_attempted) {
+                    /* Couldn't reach the place. Stay on the current scene
+                     * but float a thought bubble so the failure isn't a
+                     * silent no-op, and arm a backoff retry. A 404 means
+                     * the place pack isn't built/ready yet ("...yet"); any
+                     * other status (0 = timeout/transport, 5xx, or a 200
+                     * that failed to parse) is "something's wrong". Only
+                     * (re-)paint the bubble the first time we fail to reach
+                     * a given place — the periodic retry shouldn't flash the
+                     * panel every 30 s while we're stuck there. */
+                    if (strcmp(loc, travel_warned_loc) != 0) {
+                        if (pstatus == 404)
+                            snprintf(travel_fail_msg, sizeof(travel_fail_msg),
+                                "can't go to the %s yet", loc);
+                        else
+                            snprintf(travel_fail_msg, sizeof(travel_fail_msg),
+                                "can't get to the %s, something's wrong", loc);
+                        /* Pin as a persistent passive bubble so the kid can
+                         * page through a longer message — the touch handler's
+                         * Zone::Thought path bumps the page on tap and
+                         * dismisses on the last — rather than seeing it
+                         * truncated. Cleared on a later successful travel. */
+                        memset(&s_active_thought, 0, sizeof(s_active_thought));
+                        s_active_thought.action_kind = THOUGHT_ACTION_NONE;
+                        s_active_thought.text         = travel_fail_msg;
+                        s_active_thought.style        = THOUGHT_STYLE_THOUGHT;
+                        s_active_thought.persistent   = true;
+                        s_active_thought.page         = 0;
+                        s_thought_active = true;
+                        render_with_expression("neutral", true, &s_active_thought);
+                        snprintf(travel_warned_loc, sizeof(travel_warned_loc), "%s", loc);
+                    }
+                    snprintf(travel_retry_loc, sizeof(travel_retry_loc), "%s", loc);
+                    travel_retry_at_us = esp_timer_get_time() + TRAVEL_RETRY_BACKOFF_US;
                 }
                 /* Record either way so a failed fetch doesn't thrash the
-                 * loop every tick; a later re-travel retries. */
+                 * loop every tick. On failure the backoff above forces a
+                 * later retry; re-tapping the nav zone forces one now. */
                 snprintf(last_location, sizeof(last_location), "%s", loc);
             }
         }
@@ -2437,24 +2520,31 @@ extern "C" void app_main(void) {
                  * unchanged — the kid shouldn't have to wait for the
                  * next sprite transition to see a fresh need. */
                 pet_thought_t candidate = {};
-                const bool gen_ok =
+                /* A caller-pinned persistent bubble (e.g. the travel-fail
+                 * notice) owns the channel until it's tapped through or a
+                 * state change clears it — don't let auto-generation
+                 * regenerate or wipe it here. Mirrors render_resting. */
+                const bool pinned = s_thought_active && s_active_thought.persistent;
+                const bool gen_ok = !pinned &&
                     now_ms >= s_thought_suppress_until_ms &&
                     thought_generate(&decayed, now_ms, &candidate);
-                const bool thought_changed =
+                const bool thought_changed = !pinned && (
                     gen_ok != s_thought_active ||
                     (gen_ok &&
                      (candidate.action_event != s_active_thought.action_event ||
-                      candidate.action_kind  != s_active_thought.action_kind));
+                      candidate.action_kind  != s_active_thought.action_kind)));
 
                 const bool sprite_changed =
                     name && strcmp(name, last_resting_expr) != 0;
 
                 if (sprite_changed || thought_changed) {
-                    s_thought_active = gen_ok;
-                    if (gen_ok) {
-                        s_active_thought = candidate;
-                    } else {
-                        memset(&s_active_thought, 0, sizeof(s_active_thought));
+                    if (!pinned) {
+                        s_thought_active = gen_ok;
+                        if (gen_ok) {
+                            s_active_thought = candidate;
+                        } else {
+                            memset(&s_active_thought, 0, sizeof(s_active_thought));
+                        }
                     }
                     const char *render_name = name ? name : last_resting_expr;
                     ESP_LOGI(TAG, "substrate refresh: %s → %s "
@@ -2609,6 +2699,16 @@ extern "C" void app_main(void) {
             memcpy(place_id, scene_act.seed_text, n);
             ESP_LOGI(TAG, "scene nav_place → %s", place_id);
             pet_sync_enter_place(place_id);
+            /* If this re-taps the place we just failed to reach, drop the
+             * backoff so the travel block retries on the next tick rather
+             * than waiting out the timer (re-tapping a failed nav zone
+             * would otherwise look like a dead button). Clear the
+             * warned-place latch too, so if it fails again the kid gets
+             * the bubble again instead of silence. */
+            if (travel_retry_at_us != 0 && strcmp(place_id, travel_retry_loc) == 0) {
+                travel_retry_at_us = esp_timer_get_time();
+                travel_warned_loc[0] = '\0';
+            }
             continue;
         }
 
