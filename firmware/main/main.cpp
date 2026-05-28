@@ -2155,6 +2155,18 @@ extern "C" void app_main(void) {
                             epd->EPD_Init_Partial();
                             epd->EPD_DisplayPart();
                             vTaskDelay(pdMS_TO_TICKS(1200));
+                            /* Drain any touch events the user
+                             * generated while the toast was on screen
+                             * (a finger lingering past tap-release
+                             * registers as a fresh press during the
+                             * 1.2 s sleep). Without this, the LVGL
+                             * dispatcher catches the late press →
+                             * release transition and stamps a
+                             * pending_action on whatever button sits
+                             * under the finger — committing the wrong
+                             * action when the menu next reads its
+                             * latch. */
+                            drain_next_touch = true;
                             lvgl_port_force_full_refresh();
                             break;
                         case dev_menu::TouchResult::WifiSwitch: {

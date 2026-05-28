@@ -501,6 +501,14 @@ static void render_mode(Mode m) {
      * creation can race with the renderer mid-frame and crash inside
      * lv_obj_pos.c. */
     lvgl_port_lock();
+    /* Clear any stale pending_action stamped on the previous screen.
+     * Without this, a click queued while a slow handler was running
+     * (e.g. the Memories/Places toast's 1.2 s vTaskDelay during
+     * which the LVGL dispatcher kept firing) can leak into the next
+     * screen's dispatch_touch and execute the wrong action. Observed
+     * on hardware: a tap on MenuP3's "Update" or P2's "AI models"
+     * was committing GoHome (stamped earlier on MenuP1). */
+    s_pending_action = TouchResult::None;
     switch (m) {
         case Mode::MenuP1:
             build_menu_p1();
