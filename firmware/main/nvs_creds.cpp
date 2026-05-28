@@ -316,3 +316,56 @@ bool nvs_creds_get_tz(char *out, size_t out_len) {
     }
     return err == ESP_OK;
 }
+
+/* --- last rendered place --- */
+static const char *KEY_LOC_ID    = "loc_id";
+static const char *KEY_LOC_SHEET = "loc_sheet";
+
+bool nvs_creds_set_last_loc(const char *loc, const char *sheet) {
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return false;
+    esp_err_t e1, e2;
+    if (loc && loc[0]) {
+        e1 = nvs_set_str(h, KEY_LOC_ID, loc);
+        e2 = nvs_set_str(h, KEY_LOC_SHEET, sheet ? sheet : "");
+    } else {
+        /* Treat empty loc as "no last location" — clear both keys
+         * so a stale sheet from a previous travel doesn't outlive the
+         * loc id. NOT_FOUND on either is fine. */
+        e1 = nvs_erase_key(h, KEY_LOC_ID);
+        e2 = nvs_erase_key(h, KEY_LOC_SHEET);
+        if (e1 == ESP_ERR_NVS_NOT_FOUND) e1 = ESP_OK;
+        if (e2 == ESP_ERR_NVS_NOT_FOUND) e2 = ESP_OK;
+    }
+    if (e1 == ESP_OK && e2 == ESP_OK) {
+        if (nvs_commit(h) != ESP_OK) {
+            nvs_close(h);
+            return false;
+        }
+    }
+    nvs_close(h);
+    return e1 == ESP_OK && e2 == ESP_OK;
+}
+
+bool nvs_creds_get_last_loc(char *loc_out, size_t loc_cap,
+                            char *sheet_out, size_t sheet_cap) {
+    if (loc_out && loc_cap)   loc_out[0] = '\0';
+    if (sheet_out && sheet_cap) sheet_out[0] = '\0';
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) return false;
+    bool ok = true;
+    if (loc_out && loc_cap) {
+        size_t want = loc_cap;
+        esp_err_t err = nvs_get_str(h, KEY_LOC_ID, loc_out, &want);
+        if (err == ESP_ERR_NVS_NOT_FOUND) loc_out[0] = '\0';
+        else if (err != ESP_OK) ok = false;
+    }
+    if (sheet_out && sheet_cap) {
+        size_t want = sheet_cap;
+        esp_err_t err = nvs_get_str(h, KEY_LOC_SHEET, sheet_out, &want);
+        if (err == ESP_ERR_NVS_NOT_FOUND) sheet_out[0] = '\0';
+        else if (err != ESP_OK) ok = false;
+    }
+    nvs_close(h);
+    return ok;
+}

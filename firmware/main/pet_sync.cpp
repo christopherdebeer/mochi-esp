@@ -325,6 +325,14 @@ void pet_sync_current_location(char *id_out, size_t id_cap,
     xSemaphoreGive(s_mtx);
 }
 
+void pet_sync_seed_location(const char *place_id, const char *sheet) {
+    if (!s_mtx) s_mtx = xSemaphoreCreateMutex();
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    snprintf(s_location, sizeof(s_location), "%s", place_id ? place_id : "");
+    snprintf(s_location_sheet, sizeof(s_location_sheet), "%s", sheet ? sheet : "");
+    xSemaphoreGive(s_mtx);
+}
+
 void pet_sync_current_costume(char *id_out, size_t id_cap) {
     if (id_out && id_cap) id_out[0] = '\0';
     if (!s_mtx || !id_out || !id_cap) return;
@@ -531,4 +539,20 @@ bool pet_sync_enqueue(event_kind_t kind, int64_t at_ms) {
     if (!s_started || !s_queue) return false;
     push_msg_t msg = { kind, at_ms };
     return xQueueSend(s_queue, &msg, 0) == pdTRUE;
+}
+
+int pet_sync_push_now(void) {
+    if (!s_started || !s_queue) return 0;
+    /* Drain on the calling task so a deep-sleep follow-up doesn't kill
+     * the background worker mid-handshake. Bounded — at most QUEUE_LEN
+     * iterations — and each POST hits its own short timeout. The
+     * worker will also see the queue empty and idle, harmless if it
+     * happens to wake here. */
+    int pushed = 0;
+    push_msg_t msg;
+    while (xQueueReceive(s_queue, &msg, 0) == pdTRUE) {
+        if (do_mutate_post(msg.kind, msg.at_ms)) pushed++;
+    }
+    ESP_LOGI(TAG, "push_now drained %d", pushed);
+    return pushed;
 }

@@ -56,6 +56,16 @@ void pet_sync_start(void);
  * pending-push buffer so the worker knows what to send. */
 bool pet_sync_enqueue(event_kind_t kind, int64_t at_ms);
 
+/* Synchronously drain the queue on the calling task. Used right
+ * before deep sleep / soft power-down so a queued mutate (e.g. the
+ * EVENT_SLEPT we enqueued microseconds earlier) gets a best-effort
+ * push to substrate before the device powers down — otherwise the
+ * background worker is killed mid-handshake by deep sleep. Bounded
+ * iteration so we don't block forever if the queue is unexpectedly
+ * full; each POST has its own TLS-handshake budget. Returns the
+ * number of mutates successfully pushed. */
+int pet_sync_push_now(void);
+
 /* Latest snapshot (mutex-protected). Returns true if a snapshot has
  * been pulled at least once. *out_pet is filled with the current
  * substrate state. */
@@ -74,6 +84,13 @@ void pet_sync_touch(int64_t at_ms);
  * at device geometry. See design/17. */
 void pet_sync_current_location(char *id_out, size_t id_cap,
                                char *sheet_out, size_t sheet_cap);
+
+/* Seed the cached location from outside (e.g. NVS-restored last
+ * place at boot). Lets the device render the right scene immediately
+ * on wake from deep sleep instead of waiting for the first
+ * /api/state pull. The next pull will overwrite from the server
+ * regardless. Empty strings clear the seed. */
+void pet_sync_seed_location(const char *place_id, const char *sheet);
 
 /* Current costume id from the latest /api/state ("" = base species).
  * The device renders the pet from costume-<petId>-<costumeId>-v1 when

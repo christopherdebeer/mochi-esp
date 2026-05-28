@@ -1670,6 +1670,20 @@ extern "C" void app_main(void) {
      * workers retry quietly until net_worker brings WiFi up. */
     pet_sync_start();
 
+    /* Wake-from-deepsleep → enqueue EVENT_WOKE so the substrate sees
+     * the pet transition out of asleep. Pair with the EVENT_SLEPT we
+     * enqueue from the PWR-tap sleep handler — between them the
+     * server gets a clean asleep=true → asleep=false transition. The
+     * push worker drains the queue once net_worker brings WiFi up;
+     * if the server is unreachable the event survives in NVS-backed
+     * event_log and replays on the next boot. */
+    if (esp_reset_reason() == ESP_RST_DEEPSLEEP) {
+        const int64_t woke_at = now_ms_wall();
+        ESP_LOGI(TAG, "wake from deepsleep → enqueue EVENT_WOKE");
+        event_log_append(EVENT_WOKE, woke_at);
+        pet_sync_enqueue(EVENT_WOKE, woke_at);
+    }
+
     /* Kick the non-blocking connectivity worker (design/21). Everything
      * that needs the network — connect, SNTP, OTA, ETag refresh,
      * cold-cache icons, state pull — runs here, off the boot critical
@@ -1689,9 +1703,35 @@ extern "C" void app_main(void) {
     constexpr int64_t DEBOUNCE_US = 200 * 1000;
 
     /* Travel state (design/17): the place the device is currently
-     * rendering. Boot rendered the home bundle, so we start at "home".
-     * The loop below follows pets.location and re-renders on change. */
+     * rendering. Default is "home" (boot renders the embedded
+     * scene-bundle-a). On wake-from-deepsleep we restore the
+     * persisted last place from NVS — without that, the device
+     * renders home for as long as /api/state takes to come back,
+     * which on a flaky network can be tens of seconds or never.
+     * The travel block below sees boot != server-canonical and
+     * fetches the correct pack on the next tick. */
     char last_location[40] = "home";
+    {
+        char loc_nvs[MOCHI_LOC_ID_MAX + 1] = {};
+        char sheet_nvs[MOCHI_LOC_SHEET_MAX + 1] = {};
+        if (nvs_creds_get_last_loc(loc_nvs, sizeof(loc_nvs),
+                                   sheet_nvs, sizeof(sheet_nvs)) &&
+            loc_nvs[0] && strcmp(loc_nvs, "home") != 0 && sheet_nvs[0]) {
+            /* Seed pet_sync's location cache directly from NVS so the
+             * travel block (below) sees a non-"home" target on the
+             * very first tick and fires the pack fetch — without this
+             * pet_sync_current_location returns empty until the first
+             * /api/state pull, and on a flaky network that pull can
+             * be delayed many seconds or fail outright. We DON'T set
+             * last_location to loc_nvs because the travel block
+             * gates on (loc != last_location) — leaving last_location
+             * = "home" guarantees the swap fires and the place's
+             * pack lands in scene_pack. */
+            ESP_LOGI(TAG, "boot: restoring last place '%s' (%s)",
+                loc_nvs, sheet_nvs);
+            pet_sync_seed_location(loc_nvs, sheet_nvs);
+        }
+    }
     /* Travel-failure recovery (design/17/18): a place-pack fetch that
      * fails floats a thought bubble and arms a backoff retry instead of
      * silently wedging on the current scene. travel_retry_loc remembers
@@ -1895,6 +1935,21 @@ extern "C" void app_main(void) {
 
         if (sleep_gesture::requested()) {
             sleep_gesture::mark_handled();
+            /* Mutate substrate state — the server has its own decay,
+             * but a deliberate sleep gesture deserves an explicit
+             * record (so server-side projection sees engagement
+             * weight + the sleep-consolidation pass kicks in
+             * promptly). event_log_append is local-first and survives
+             * the network being down; pet_sync_enqueue queues the
+             * mutate POST. push_event_now() does a best-effort
+             * synchronous flush before we power down so the substrate
+             * sees the sleep promptly when network is healthy; on a
+             * timeout the queued event survives in the push worker's
+             * pending buffer and ships on next boot. */
+            const int64_t slept_at = now_ms_wall();
+            event_log_append(EVENT_SLEPT, slept_at);
+            pet_sync_enqueue(EVENT_SLEPT, slept_at);
+            pet_sync_push_now();   /* best-effort flush before power-down */
             device_diag_event(DIAG_INFO, "sleep", "PWR tap → sleep", nullptr);
             device_diag_flush();   /* push before we power down */
             render_asleep("Asleep - PWR to wake");
@@ -2378,6 +2433,15 @@ extern "C" void app_main(void) {
                     device_diag_eventf(DIAG_INFO, "travel", NULL,
                         "to %s (%s)", loc,
                         (strcmp(loc, "home") == 0) ? "bundle" : lsheet);
+                    /* Persist for wake-from-deepsleep restore. Without
+                     * this, every wake renders the embedded "home"
+                     * bundle until /api/state lands — and on a flaky
+                     * network that pull can take 30 s+ or fail
+                     * outright (see ESP_ERR_HTTP_EAGAIN traces). The
+                     * sheet is saved alongside so the wake-time fetch
+                     * goes straight to /devsprite/pack/<sheet>. */
+                    nvs_creds_set_last_loc(loc,
+                        (strcmp(loc, "home") == 0) ? "" : lsheet);
                     travel_retry_at_us = 0;   /* success clears any pending retry */
                     travel_warned_loc[0] = '\0';
                     /* Drop a still-pinned failure bubble so it doesn't

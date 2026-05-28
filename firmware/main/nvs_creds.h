@@ -82,6 +82,20 @@ bool nvs_creds_get_prov_on_boot(void);
 bool nvs_creds_set_tz(const char *tz);
 bool nvs_creds_get_tz(char *out, size_t out_len);
 
+/* Last rendered place (design/17 + design/24). Persisted across deep
+ * sleep so the wake render lands on the place the user fell asleep
+ * in instead of falling back to the embedded "home" bundle while we
+ * wait for /api/state to come back. The sheet id is stored alongside
+ * so the wake-time travel fetch goes straight to
+ * /devsprite/pack/<sheet> without resolving from the substrate first.
+ * Both strings are written together (or both cleared); reading back
+ * an empty pair is the "no last location known" case. */
+#define MOCHI_LOC_ID_MAX     40
+#define MOCHI_LOC_SHEET_MAX  64
+bool nvs_creds_set_last_loc(const char *loc, const char *sheet);
+bool nvs_creds_get_last_loc(char *loc_out, size_t loc_cap,
+                            char *sheet_out, size_t sheet_cap);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
