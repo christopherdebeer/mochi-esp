@@ -92,6 +92,7 @@ static const char *mode_name(Mode m) {
         case Mode::MenuP2:    return "menu_p2";
         case Mode::MenuP3:    return "menu_p3";
         case Mode::WifiModal: return "wifi_modal";
+        case Mode::ModelsModal: return "models_modal";
         default:              return "?";
     }
 }
@@ -147,6 +148,16 @@ static Mode advance(Mode m) {
         case Mode::ModelsModal: return Mode::MenuP2;
         default:              return Mode::Live;
     }
+}
+
+/* A modal is pushed by its on_click handler (SwitchWifi → WifiModal,
+ * OpenModels → ModelsModal): it mutates s_mode itself and latches
+ * s_press_pending to force tick() to render the new screen. tick()
+ * must recognise that latched press as a modal-push, NOT a wheel
+ * advance — otherwise advance() bounces the modal straight back to its
+ * parent page before it ever paints. */
+static bool is_modal(Mode m) {
+    return m == Mode::WifiModal || m == Mode::ModelsModal;
 }
 
 /* ─── Click handler ────────────────────────────────────────────────
@@ -326,8 +337,8 @@ static void build_menu_p1(void) {
     s_menu_p1_scr = lv_obj_create(nullptr);
     config_menu_screen(s_menu_p1_scr);
 
-    /* Mood + stats — refreshed live by refresh_pet_status(). Caller
-     * passes the formatted string; we just render it. */
+    /* Mood + stats — populated once on entry by refresh_pet_status().
+     * Caller passes the formatted string; we just render it. */
     s_pet_status_label = lv_label_create(s_menu_p1_scr);
     lv_label_set_long_mode(s_pet_status_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(s_pet_status_label, lv_pct(98));
@@ -353,7 +364,7 @@ static void build_menu_p2(void) {
     lv_obj_t *title = lv_label_create(s_menu_p2_scr);
     lv_label_set_text(title, "SETTINGS  (PWR×1 exits)");
 
-    /* Network/version/IP header — refreshed live by refresh_info(). */
+    /* Network/version/IP header — populated once on entry by refresh_info(). */
     s_info_label = lv_label_create(s_menu_p2_scr);
     lv_label_set_long_mode(s_info_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(s_info_label, lv_pct(98));
@@ -555,35 +566,26 @@ bool tick(epaper_driver_display * /*epd*/, bool /*paired*/,
     const bool pressed = s_press_pending.exchange(false, std::memory_order_acq_rel);
 
     if (pressed) {
-        /* on_click already mutated s_mode for the SwitchWifi case
-         * (Mode::WifiModal). For the wheel-advance case, advance
-         * here. */
-        if (s_mode != Mode::WifiModal ||
+        /* on_click pushes a modal (WifiModal/ModelsModal) by mutating
+         * s_mode itself and latching this press to force a render. A
+         * just-pushed modal (≤50 ms since entry) renders as-is; only a
+         * genuine PWR press advances the wheel. */
+        if (!is_modal(s_mode) ||
             (now_us - s_entered_mode_us) > 50 * 1000) {
             const Mode next = advance(s_mode);
             ESP_LOGI(TAG, "PWR: %s → %s", mode_name(s_mode), mode_name(next));
             s_mode = next;
         } else {
-            ESP_LOGI(TAG, "modal push → wifi_modal");
+            ESP_LOGI(TAG, "modal push → %s", mode_name(s_mode));
         }
         s_entered_mode_us = now_us;
         render_mode(s_mode);
         changed = true;
-    } else if (s_mode == Mode::MenuP1) {
-        /* Refresh the pet-status header on every tick so mood/stats
-         * stay live while the kid is reading. The action buttons are
-         * static — not rebuilt. Locked against the dispatcher to keep
-         * widget access serialised. */
-        lvgl_port_lock();
-        refresh_pet_status();
-        lvgl_port_unlock();
-    } else if (s_mode == Mode::MenuP2) {
-        /* Same idea for the network/RAM/batt header on the settings
-         * page — readings should tick live while up. */
-        lvgl_port_lock();
-        refresh_info();
-        lvgl_port_unlock();
     }
+    /* Menu headers are a snapshot taken at entry (render_mode) — we
+     * deliberately do NOT re-refresh pet stats / network info on every
+     * tick, so the figures the user reads stay stable while a page is
+     * up rather than flickering with each partial refresh. */
 
     if (s_mode != Mode::Live &&
         (now_us - s_entered_mode_us) >= INACTIVITY_US && !changed) {
