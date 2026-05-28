@@ -59,6 +59,7 @@
 #include "font8x8.h"
 #include "battery.h"
 #include "sleep_gesture.h"
+#include "power.h"
 #include "voice.h"
 #include "voice/voice_peer.h"   /* voice_peer_get_session_stats (design/18 ph3b) */
 extern "C" {
@@ -1764,6 +1765,12 @@ extern "C" void app_main(void) {
     xTaskCreate(net_worker, "net_worker", 16384, &net_ctx, 5, nullptr);
 
     touch::init();
+    /* Idle-tier + power telemetry (design/26). Seeds its activity clock
+     * to now, configures esp_pm/light sleep when CONFIG_MOCHI_LIGHT_SLEEP
+     * is set, and starts recording per-tier time + battery so the power
+     * profile is analysable from SQL (device_logs). Runs regardless of
+     * the light-sleep flag — captures the Live baseline either way. */
+    power_init();
     int64_t last_event_us = 0;
     constexpr int64_t DEBOUNCE_US = 200 * 1000;
 
@@ -1868,12 +1875,12 @@ extern "C" void app_main(void) {
     };
     voice::Phase last_voice_phase = voice::Phase::Idle;
 
-    /* M11.4 periodic refresh state. Re-resolve the resting sprite
-     * once a minute when the device is otherwise quiet; only push a
-     * new render to the panel if the resolved name actually changed
-     * since the last frame, so we don't burn e-paper cycles on
-     * unchanged content. */
-    constexpr int64_t SUBSTRATE_REFRESH_US = 60LL * 1000 * 1000;
+    /* M11.4 periodic refresh state. Re-resolve the resting sprite when
+     * the device is otherwise quiet; only push a new render to the panel
+     * if the resolved name actually changed since the last frame, so we
+     * don't burn e-paper cycles on unchanged content. The cadence comes
+     * from power_substrate_refresh_us() — ~1 min in Live, stretched in
+     * Doze (design/26). */
     int64_t last_substrate_us = esp_timer_get_time();
     char last_resting_expr[32] = "neutral";
 
@@ -1914,6 +1921,28 @@ extern "C" void app_main(void) {
          * of the loop so the gate tracks state edges promptly. */
         sleep_gesture::set_wheel_active(dev_menu::active());
         sleep_gesture::set_voice_active(voice::is_active());
+
+        /* Idle-tier state machine (design/26). A subsystem owning the
+         * device (voice/imagine/consolidate/wheel/portal) pins Live and
+         * counts as activity; otherwise the device dozes after the
+         * configured idle timeout. With CONFIG_MOCHI_LIGHT_SLEEP the
+         * wait_event block above is where the SoC actually light-sleeps.
+         * The optional deep-sleep-from-doze path reuses the existing
+         * asleep render + commit_sleep. */
+        {
+            const int64_t pnow = esp_timer_get_time();
+            const bool inhibited = voice::is_active() || imagine_in_flight() ||
+                consolidate_in_flight() || dev_menu::active() ||
+                key_portal::active();
+            power_update(pnow, inhibited, s_net_phase == NetPhase::Online);
+            if (power_should_deep_sleep()) {
+                ESP_LOGI(TAG, "doze idle budget exceeded → deep sleep");
+                device_diag_event(DIAG_INFO, "power", "deep", nullptr);
+                device_diag_flush();
+                render_asleep("Asleep - PWR to wake");
+                sleep_gesture::commit_sleep();  /* does not return */
+            }
+        }
 
         /* Critical-battery soft-power-down. LiPo cells damage
          * permanently below ~3.0 V; render a clear "Needs charge"
@@ -2631,6 +2660,12 @@ extern "C" void app_main(void) {
                     device_diag_eventf(DIAG_WARN, "battery", ctx,
                         "low %u%%", (unsigned)pct);
                 }
+                /* Power snapshot (design/26): per-tier time + battery so
+                 * discharge-per-tier is recoverable from SQL. Paired with
+                 * the health record at the same cadence/timestamp. */
+                char pctx[224];
+                power_telemetry_ctx(pctx, sizeof(pctx));
+                device_diag_event(DIAG_INFO, "power", "snapshot", pctx);
             }
         }
 
@@ -2693,7 +2728,7 @@ extern "C" void app_main(void) {
              * current). */
             int64_t now_us = esp_timer_get_time();
             if (!voice::is_active() && !key_portal::active() &&
-                (now_us - last_substrate_us) >= SUBSTRATE_REFRESH_US) {
+                (now_us - last_substrate_us) >= power_substrate_refresh_us()) {
                 last_substrate_us = now_us;
                 int64_t now_ms = now_ms_wall();
                 pet_event_t slice[12];
@@ -2757,6 +2792,7 @@ extern "C" void app_main(void) {
         int64_t now_us = esp_timer_get_time();
         if (now_us - last_event_us < DEBOUNCE_US) continue;
         last_event_us = now_us;
+        power_note_activity(now_us);   /* a real tap → leave Doze now */
 
         /* Voice start/stop is BOOT-driven now (design/24, see the
          * boot_press_consume block at the top of the loop). The

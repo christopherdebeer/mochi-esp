@@ -1,9 +1,12 @@
 # 26 — Idle tiers & light sleep
 
-Status: draft / proposal, 2026-05-28. No firmware yet; this doc exists
-to settle the state model and the config tradeoffs before any code, and
-to frame the on-hardware power measurements that should drive the
-timeout values.
+Status: firmware in progress, 2026-05-28. The telemetry + idle-tier
+state machine have landed (`firmware/main/power.{h,cpp}`); automatic
+light sleep is implemented but gated behind `CONFIG_MOCHI_LIGHT_SLEEP`
+(default off) pending on-hardware validation. A measured Live baseline
+is recorded below (§Measured baseline) from the existing `device_logs`
+health telemetry. The telemetry schema + analysis SQL are in
+§Telemetry and §Analysis queries.
 
 Author note: prompted by the question "is a low-power mode between deep
 sleep and live possible?" — yes, and the e-paper + capacitive-touch
@@ -229,6 +232,101 @@ The ratio of (1) to (2) sets whether Doze is worth a short or long
    "settling" cue) or stay silent? Silent avoids an e-paper flash;
    a cue is more legible. Lean silent.
 3. `T_doze` user-configurable in Settings (design/22), or fixed?
+
+## Measured baseline (existing Live-only draw)
+
+Recovered 2026-05-28 from the existing `device_logs` `health` telemetry
+(623 snapshots; `batt_mv` / `batt_pct` / `up_s` per record), regressing
+battery against uptime within each boot session (deep sleep reboots, so
+`up_s` resets per `boot_id`):
+
+| boot | samples | span (h) | mv range | mV/h | %/h |
+|------|---------|----------|----------|------|-----|
+| b491d534 | 213 | 17.7 | 3046–3940 | −36.8 | **−4.24** |
+| ba26691c | 120 | 3.7 | 3962–4148 | −32.8 | −3.69 |
+| baa75ab2 | 80 | 6.6 | 3748–3908 | −23.6 | −2.61 |
+| b41e9d1d | 73 | 6.0 | 3908–4038 | −15.7 | −1.75 |
+| bf782899 | 11 | 0.8 | — | +175 | +19.2 (charging/USB) |
+
+**Headline:** in today's Live-only mode the device draws ≈ **4 %/hour**
+when running normally → **~24 h of runtime per full charge** (from the
+clean 17.7 h discharge run, 3940→3046 mV). Lighter sessions (−1.8 to
+−2.6 %/h) reflect partial charging / less activity; one session was on
+USB (+19 %/h). The discharge is reported capacity-independent (%/h and
+mV/h) because the board has only a voltage divider (GPIO17), no current
+sense — runtime falls straight out of %/h without needing the cell's mAh.
+
+This is the number Doze has to beat. Re-run the query in §Analysis after
+a doze-enabled build has logged a few hours to quantify the win.
+
+## Telemetry
+
+All power telemetry flows through the existing `device_diag` →
+`/api/device/diag` → `device_logs` pipeline (design/18), tag `power`,
+with structured JSON in `ctx` (SQL-queryable via `json_extract`). Runs
+regardless of `CONFIG_MOCHI_LIGHT_SLEEP`, so the Live baseline and the
+doze-time accounting are always recorded.
+
+| msg | when | ctx fields |
+|-----|------|-----------|
+| `init` | boot, once | `sleep_en, wifi_ps, doze_s, deep_s, cpu_max, cpu_min` — the active policy, so each run is segmentable |
+| `doze` | Live→Doze edge | `prev_ms` (time spent Live), `batt_mv`, `up_s` |
+| `wake` | Doze→Live edge | `prev_ms` (time spent dozing), `batt_mv`, `up_s` |
+| `snapshot` | every ~5 min (with the health heartbeat) | `tier, live_ms, doze_ms` (cumulative), `doze_n`, `sleep_en, wifi_ps, doze_s, batt_mv, up_s` |
+
+Tunability is via Kconfig today (`MOCHI_DOZE_TIMEOUT_S`,
+`MOCHI_DEEP_SLEEP_TIMEOUT_S`, `MOCHI_DOZE_WIFI_POWERSAVE`,
+`MOCHI_LIGHT_SLEEP`, `MOCHI_PM_CPU_{MAX,MIN}_MHZ`); the `init` record
+echoes the chosen values so a SQL reader can correlate behaviour with
+config across builds. Server-pushed tuning is a future option (carry the
+timeouts in `/api/state`), not built.
+
+## Analysis queries
+
+Run against the `c15r/mochi` project DB (`device_logs`).
+
+**Baseline discharge per boot** (works on existing health data):
+
+```sql
+WITH h AS (
+  SELECT boot_id,
+    CAST(json_extract(ctx,'$.up_s')   AS REAL)/3600.0 x,
+    CAST(json_extract(ctx,'$.batt_mv') AS REAL) mv,
+    CAST(json_extract(ctx,'$.batt_pct') AS REAL) pct
+  FROM device_logs WHERE tag='health'
+    AND CAST(json_extract(ctx,'$.batt_mv') AS REAL) BETWEEN 3000 AND 4300)
+SELECT substr(boot_id,1,8) boot, count(*) n, round(max(x)-min(x),2) span_h,
+  round((count(*)*sum(x*mv)-sum(x)*sum(mv))/(count(*)*sum(x*x)-sum(x)*sum(x)),1)  mv_per_h,
+  round((count(*)*sum(x*pct)-sum(x)*sum(pct))/(count(*)*sum(x*x)-sum(x)*sum(x)),2) pct_per_h
+FROM h GROUP BY boot_id HAVING n>=6 AND span_h>=0.5 ORDER BY span_h DESC;
+```
+
+**Doze residency + tier split per boot** (once `power` data exists — uses
+the latest snapshot per boot for the cumulative counters):
+
+```sql
+WITH s AS (
+  SELECT boot_id, at,
+    CAST(json_extract(ctx,'$.live_ms') AS REAL) live_ms,
+    CAST(json_extract(ctx,'$.doze_ms') AS REAL) doze_ms,
+    CAST(json_extract(ctx,'$.doze_n')  AS INT)  doze_n,
+    ROW_NUMBER() OVER (PARTITION BY boot_id ORDER BY at DESC) rn
+  FROM device_logs WHERE tag='power' AND json_extract(ctx,'$.msg') IS NULL
+    AND json_extract(ctx,'$.live_ms') IS NOT NULL)
+SELECT substr(boot_id,1,8) boot, doze_n,
+  round(live_ms/3600000.0,2) live_h, round(doze_ms/3600000.0,2) doze_h,
+  round(100.0*doze_ms/NULLIF(live_ms+doze_ms,0),1) doze_pct
+FROM s WHERE rn=1 ORDER BY (live_ms+doze_ms) DESC;
+```
+
+(Filter `power` snapshots vs transition events by `msg` if the sink
+records it; otherwise snapshots are the rows carrying `live_ms`.)
+
+**Discharge attributed to tiers** — join the §baseline discharge per boot
+with the doze-residency query above: a regression of `pct_per_h` against
+`doze_pct` across boots recovers the Live vs Doze draw (intercept = Live
+%/h, intercept+slope = full-Doze %/h). Needs a handful of boots at
+different residencies; that's the payoff of logging both.
 
 ## Cross-references
 
