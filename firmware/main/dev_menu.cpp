@@ -85,6 +85,16 @@ static lv_obj_t            *s_models_scr       = nullptr;
  * back. */
 static TouchResult          s_pending_action = TouchResult::None;
 
+/* Modal-push flag — set by on_click when it mutates s_mode to a
+ * modal (WifiModal / ModelsModal) and latches s_press_pending to
+ * force tick() to render. Distinct from s_press_pending so tick()
+ * can disambiguate "user pressed PWR to advance" from "click handler
+ * pushed a modal" without resorting to a wall-clock window (which
+ * raced — main.cpp's 1 Hz tick easily exceeded any tight threshold,
+ * causing the modal to render-and-immediately-advance-out as if PWR
+ * had been pressed). Cleared by tick() once consumed. */
+static std::atomic<bool>    s_modal_push_pending{false};
+
 static const char *mode_name(Mode m) {
     switch (m) {
         case Mode::Live:      return "live";
@@ -183,10 +193,12 @@ static void on_click(lv_event_t *ev) {
     }
     if (action == TouchResult::SwitchWifi) {
         /* Internal: push the WifiModal screen. main.cpp doesn't see
-         * this. We swap the LVGL active screen here and bump
-         * s_entered_mode_us so the inactivity timer resets. */
+         * this. We swap s_mode here and use the modal-push flag so
+         * tick() renders the new screen on the next pass without
+         * treating the latch as a PWR-advance. */
         s_mode = Mode::WifiModal;
         s_entered_mode_us = esp_timer_get_time();
+        s_modal_push_pending.store(true, std::memory_order_release);
         s_press_pending.store(true, std::memory_order_release);
         s_pending_action = TouchResult::None;
         return;
@@ -196,6 +208,7 @@ static void on_click(lv_event_t *ev) {
          * SwitchWifi. main.cpp doesn't see this. */
         s_mode = Mode::ModelsModal;
         s_entered_mode_us = esp_timer_get_time();
+        s_modal_push_pending.store(true, std::memory_order_release);
         s_press_pending.store(true, std::memory_order_release);
         s_pending_action = TouchResult::None;
         return;
@@ -568,18 +581,24 @@ bool tick(epaper_driver_display * /*epd*/, bool /*paired*/,
     /* Consume any presses the watcher latched since the last tick.
      * exchange returns the prior value and resets the flag — so a
      * burst of fast presses inside one tick still advances the
-     * wheel exactly once. The SwitchWifi click handler also sets
-     * this flag (already having mutated s_mode) to force an
-     * immediate render of the modal on the same tick. */
+     * wheel exactly once. */
     const bool pressed = s_press_pending.exchange(false, std::memory_order_acq_rel);
+    const bool modal_push =
+        s_modal_push_pending.exchange(false, std::memory_order_acq_rel);
 
     if (pressed) {
-        /* on_click pushes a modal (WifiModal/ModelsModal) by mutating
-         * s_mode itself and latching this press to force a render. A
-         * just-pushed modal (≤50 ms since entry) renders as-is; only a
-         * genuine PWR press advances the wheel. */
-        if (!is_modal(s_mode) ||
-            (now_us - s_entered_mode_us) > 50 * 1000) {
+        /* Disambiguate: a click handler that pushed a modal sets
+         * s_modal_push_pending (alongside the press latch); tick()
+         * then renders the new s_mode as-is. A genuine PWR press
+         * arrives without the modal flag and advances the wheel.
+         *
+         * Earlier we tried gating advance() on a wall-clock window
+         * since on_click set s_entered_mode_us, but main.cpp's 1 Hz
+         * touch-poll cadence frequently pushed elapsed time past any
+         * reasonable threshold — the modal would render then
+         * immediately advance back to its parent the next tick,
+         * never showing. The explicit flag has no time dependency. */
+        if (!modal_push) {
             const Mode next = advance(s_mode);
             ESP_LOGI(TAG, "PWR: %s → %s", mode_name(s_mode), mode_name(next));
             s_mode = next;
