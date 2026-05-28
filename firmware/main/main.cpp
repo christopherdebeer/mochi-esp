@@ -78,6 +78,7 @@ extern "C" {
 #include "pet_pack.h"
 #include "imagine.h"
 #include "consolidate.h"
+#include "model_prefs.h"
 }
 #include "pet_sync.h"
 #include "device_diag.h"
@@ -2483,7 +2484,9 @@ extern "C" void app_main(void) {
                 voice_sess_start_us = 0;
                 int turns = 0, in_tok = 0, out_tok = 0, total_tok = 0;
                 voice_peer_get_session_stats(&turns, &in_tok, &out_tok, &total_tok);
-                pet_sync_post_voice_session(dur_s, "gpt-realtime", "marin",
+                char vmodel[48];
+                model_prefs_voice(vmodel, sizeof(vmodel));
+                pet_sync_post_voice_session(dur_s, vmodel, "marin",
                     "ended", turns, in_tok, out_tok, total_tok);
             }
         }

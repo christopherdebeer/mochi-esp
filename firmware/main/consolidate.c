@@ -26,6 +26,7 @@
 #include "openai_key.h"
 #include "pair_creds.h"
 #include "device_diag.h"
+#include "model_prefs.h"
 
 static const char *TAG = "consolidate";
 
@@ -161,9 +162,14 @@ static void run_consolidate(void) {
     snprintf(hdr_pet, sizeof(hdr_pet), "X-Pet-Id: %s", creds.pet_id);
     char hdr_ct[] = "Content-Type: application/json";
 
-    /* 1 — orchestration: the server builds the prompt + picks params. */
-    char url[160];
-    snprintf(url, sizeof(url), "%s%s", MOCHI_BASE, ORCH_PATH);
+    /* 1 — orchestration: the server builds the prompt + picks params.
+     * Pass the on-device text-model choice (model_prefs); the server
+     * validates it against its allowlist and falls back to the default
+     * for an unknown id. */
+    char text_model[48];
+    model_prefs_text(text_model, sizeof(text_model));
+    char url[200];
+    snprintf(url, sizeof(url), "%s%s?model=%s", MOCHI_BASE, ORCH_PATH, text_model);
     char *get_headers[] = { hdr_pet, NULL };
     char *obody = NULL;
     int ostatus = http_do("GET", url, get_headers, NULL, ORCH_TIMEOUT_MS,

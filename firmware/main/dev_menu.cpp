@@ -18,6 +18,7 @@
 #include "board_pins.h"
 #include "epd_ui.h"
 #include "nvs_creds.h"
+#include "model_prefs.h"
 
 static const char *TAG = "dev_menu";
 
@@ -70,6 +71,7 @@ static lv_obj_t            *s_menu_p3_scr      = nullptr;
 static lv_obj_t            *s_pet_status_label = nullptr; /* lives inside s_menu_p1_scr */
 static lv_obj_t            *s_info_label       = nullptr; /* lives inside s_menu_p2_scr */
 static lv_obj_t            *s_wifi_scr         = nullptr;
+static lv_obj_t            *s_models_scr       = nullptr;
 
 /* Pending action latched by the click event handler; consumed by
  * dispatch_touch on the next call. LVGL's click events fire on
@@ -142,6 +144,7 @@ static Mode advance(Mode m) {
         case Mode::MenuP2:    return Mode::MenuP3;
         case Mode::MenuP3:    return Mode::MenuP1;
         case Mode::WifiModal: return Mode::MenuP2;
+        case Mode::ModelsModal: return Mode::MenuP2;
         default:              return Mode::Live;
     }
 }
@@ -174,6 +177,43 @@ static void on_click(lv_event_t *ev) {
         s_mode = Mode::WifiModal;
         s_entered_mode_us = esp_timer_get_time();
         s_press_pending.store(true, std::memory_order_release);
+        s_pending_action = TouchResult::None;
+        return;
+    }
+    if (action == TouchResult::OpenModels) {
+        /* Internal: push the ModelsModal screen, same shape as
+         * SwitchWifi. main.cpp doesn't see this. */
+        s_mode = Mode::ModelsModal;
+        s_entered_mode_us = esp_timer_get_time();
+        s_press_pending.store(true, std::memory_order_release);
+        s_pending_action = TouchResult::None;
+        return;
+    }
+    if (action == TouchResult::CycleVoiceModel ||
+        action == TouchResult::CycleTextModel) {
+        /* Internal: advance the model pref + relabel the row in place.
+         * We're inside LVGL's dispatcher (main task), so touching the
+         * label here is safe. Reset the inactivity timer so a few taps
+         * to land on the right model don't bounce back to Live. */
+        char m[48];
+        if (action == TouchResult::CycleVoiceModel) {
+            model_prefs_cycle_voice();
+            model_prefs_voice(m, sizeof(m));
+        } else {
+            model_prefs_cycle_text();
+            model_prefs_text(m, sizeof(m));
+        }
+        lv_obj_t *btn = (lv_obj_t *)lv_event_get_target(ev);
+        lv_obj_t *lab = lv_obj_get_child(btn, 0);
+        if (lab) {
+            char buf[64];
+            if (action == TouchResult::CycleVoiceModel)
+                snprintf(buf, sizeof(buf), "Voice: %s", m);
+            else
+                snprintf(buf, sizeof(buf), "Text: %s", m);
+            lv_label_set_text(lab, buf);
+        }
+        s_entered_mode_us = esp_timer_get_time();
         s_pending_action = TouchResult::None;
         return;
     }
@@ -320,6 +360,38 @@ static void build_menu_p2(void) {
 
     add_row(s_menu_p2_scr, "Switch WiFi", TouchResult::SwitchWifi,    nullptr);
     add_row(s_menu_p2_scr, "OpenAI key",  TouchResult::OpenKeyPortal, nullptr);
+    add_row(s_menu_p2_scr, "AI models",   TouchResult::OpenModels,    nullptr);
+}
+
+/* AI models modal — cycle the voice + text model selections. Rebuilt
+ * on each entry so the rows show the current model_prefs values; tapping
+ * a row cycles it (handled in on_click, which relabels in place). */
+static void build_models(void) {
+    if (s_models_scr) {
+        lv_obj_del(s_models_scr);
+        s_models_scr = nullptr;
+    }
+    s_models_scr = lv_obj_create(nullptr);
+    config_menu_screen(s_models_scr);
+
+    lv_obj_t *title = lv_label_create(s_models_scr);
+    lv_label_set_text(title, "AI MODELS  (tap to cycle)");
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+
+    char vm[48], tm[48];
+    model_prefs_voice(vm, sizeof(vm));
+    model_prefs_text(tm, sizeof(tm));
+    char vrow[64], trow[64];
+    snprintf(vrow, sizeof(vrow), "Voice: %s", vm);
+    snprintf(trow, sizeof(trow), "Text: %s", tm);
+    add_row(s_models_scr, vrow, TouchResult::CycleVoiceModel, nullptr);
+    add_row(s_models_scr, trow, TouchResult::CycleTextModel, nullptr);
+
+    lv_obj_t *hint = lv_label_create(s_models_scr);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(hint, lv_pct(98));
+    lv_label_set_text(hint, "voice = realtime · text = consolidation");
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
 }
 
 /* Page 3: destructive territory. Two PWR×2 into the menu from Live;
@@ -436,6 +508,10 @@ static void render_mode(Mode m) {
         case Mode::WifiModal:
             build_wifi();
             lv_screen_load(s_wifi_scr);
+            break;
+        case Mode::ModelsModal:
+            build_models();
+            lv_screen_load(s_models_scr);
             break;
         case Mode::Live:
         default:
