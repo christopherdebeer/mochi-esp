@@ -126,12 +126,6 @@ static constexpr size_t SCENE_BYTES = (SCENE_W / 8) * SCENE_H;  /* 5000 */
 #define SCENE_NAV_FULL_EVERY 4
 #define MOCHI_PET_CELL_URL_BASE "https://mochi.val.run/devsprite/cell/pet-v1/"
 
-/* Travel (design/17): a place's device pack fetched into PSRAM and held
- * live (scene_pack points into it). One reused buffer — travel is
- * sequential and fetch→swap→blit is atomic on the render thread. */
-#define TRAVEL_PACK_BYTES (320u * 1024u)
-#define MOCHI_BASE_URL    "https://mochi.val.run"
-
 /* OTA — manifest is uploaded as a release asset by the GitHub
  * Actions workflow on every tag push. The `/releases/latest/download/`
  * URL is GitHub's redirector to the latest release's asset, so we
@@ -876,8 +870,8 @@ extern "C" void app_main(void) {
      *                          render: copy(scene) → blit(pet at
      *                          PET_DX, PET_DY) → push.
      *
-     * The compositor's blit_mask treats source bit `1` as "leave the
-     * scene visible" (transparent), so cell PNGs with cream
+     * The compositor's blit_two_plane treats a mask bit of `1` as
+     * "leave the scene visible" (transparent), so cell PNGs with cream
      * backgrounds composite cleanly without any keying step on the
      * device side.
      */

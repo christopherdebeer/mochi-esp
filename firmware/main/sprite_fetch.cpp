@@ -191,26 +191,9 @@ bool sprite_fetch_blob(const char *url, uint8_t *out, size_t max_bytes,
  * stack.
  */
 
-struct cell_ctx {
-    uint8_t *stage;
-    size_t   cap;
-    size_t   written;
-    bool     overflow;
-};
-
-static esp_err_t on_cell_event(esp_http_client_event_t *evt) {
-    auto *ctx = static_cast<cell_ctx *>(evt->user_data);
-    if (evt->event_id == HTTP_EVENT_ON_DATA && !ctx->overflow) {
-        size_t want = (size_t)evt->data_len;
-        if (ctx->written + want > ctx->cap) {
-            ctx->overflow = true;
-            return ESP_OK;
-        }
-        memcpy(ctx->stage + ctx->written, evt->data, want);
-        ctx->written += want;
-    }
-    return ESP_OK;
-}
+/* The cell fetch assembles its body the same way as sprite_fetch — an
+ * overflow-guarded append into a pre-sized buffer — so it reuses
+ * fetch_ctx + on_event rather than duplicating the handler. */
 
 bool sprite_fetch_cell(const char *url,
                        uint8_t *out_ink, uint8_t *out_mask,
@@ -239,11 +222,11 @@ bool sprite_fetch_cell(const char *url,
             return false;
         }
     }
-    cell_ctx ctx = { stage, STAGE_CAP, 0, false };
+    fetch_ctx ctx = { stage, STAGE_CAP, 0, false };
 
     esp_http_client_config_t cfg = {};
     cfg.url = url;
-    cfg.event_handler = on_cell_event;
+    cfg.event_handler = on_event;
     cfg.user_data = &ctx;
     cfg.timeout_ms = 10000;
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
@@ -265,7 +248,7 @@ bool sprite_fetch_cell(const char *url,
         ESP_LOGE(TAG, "cell HTTP %d", status);
         return false;
     }
-    if (ctx.overflow) {
+    if (ctx.overflowed) {
         ESP_LOGE(TAG, "cell exceeded stage buffer (%u)", (unsigned)STAGE_CAP);
         return false;
     }

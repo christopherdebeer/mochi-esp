@@ -60,6 +60,7 @@ struct fetch_ctx {
 extern "C" void persona_body(http_resp_t *resp, void *ctx) {
     auto *fc = static_cast<fetch_ctx *>(ctx);
     if (!fc || !fc->out || fc->cap == 0) return;
+    if (!resp || !resp->data || resp->size <= 0) return;
     size_t n = (size_t)resp->size;
     if (n >= fc->cap) n = fc->cap - 1;
     memcpy(fc->out, resp->data, n);
