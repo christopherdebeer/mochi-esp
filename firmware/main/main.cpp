@@ -46,6 +46,7 @@
 #include "wifi_prov.h"
 #include "wifi_sta.h"
 #include "sprite_fetch.h"
+#include "pack_cache.h"
 #include "touch.h"
 #include "rtc.h"
 #include "shtc3.h"
@@ -246,6 +247,13 @@ static thought_hit_rect_t s_thought_hit    = {};
 static bool               s_thought_active = false;
 static constexpr int64_t  THOUGHT_SUPPRESS_MS = 30LL * 1000;
 static int64_t            s_thought_suppress_until_ms = 0;
+
+/* Wake-from-deepsleep deferred-mutate latch. Set at boot when we
+ * detect ESP_RST_DEEPSLEEP, drained by the main loop's "WiFi just
+ * came online" branch. Bypasses the early-boot crash where
+ * pet_sync_enqueue → push worker → lwip getaddrinfo asserts because
+ * the lwip tcpip task hasn't been initialised yet. */
+static int64_t            s_pending_woke_at = 0;
 
 /* Resolve a thought's action into the immediate transient
  * expression we render during the post-tap 5 s hold. Mirrors the
@@ -879,9 +887,11 @@ extern "C" void app_main(void) {
      * remains full-panel size. */
     uint8_t *scene_fb  = (uint8_t *)heap_caps_malloc(SCENE_BYTES, MALLOC_CAP_SPIRAM);
     uint8_t *composite = (uint8_t *)heap_caps_malloc(FB_LEN, MALLOC_CAP_SPIRAM);
-    /* Travel destination pack (design/17). Non-fatal if it fails — the
-     * device just can't follow pets.location to non-home places. */
-    uint8_t *travel_pack = (uint8_t *)heap_caps_malloc(TRAVEL_PACK_BYTES, MALLOC_CAP_SPIRAM);
+    /* (Pre-v0.1.7 the device kept a 320 KB travel_pack PSRAM buffer
+     * here that the travel block fetched into directly. v0.1.7 routes
+     * travel through pack_cache_active_geom() which owns its own
+     * PSRAM — saving the always-allocated buffer at the cost of one
+     * cache-side malloc per place change.) */
     /* Pet cell uses the two-plane format: ink (line work) + mask
      * (silhouette). Both same size; allocated separately so we can
      * pass them to blit_two_plane without packing. */
@@ -1670,18 +1680,22 @@ extern "C" void app_main(void) {
      * workers retry quietly until net_worker brings WiFi up. */
     pet_sync_start();
 
-    /* Wake-from-deepsleep → enqueue EVENT_WOKE so the substrate sees
-     * the pet transition out of asleep. Pair with the EVENT_SLEPT we
-     * enqueue from the PWR-tap sleep handler — between them the
-     * server gets a clean asleep=true → asleep=false transition. The
-     * push worker drains the queue once net_worker brings WiFi up;
-     * if the server is unreachable the event survives in NVS-backed
-     * event_log and replays on the next boot. */
+    /* Wake-from-deepsleep → record EVENT_WOKE locally now (event_log
+     * is on-flash and survives a panic), but DEFER the pet_sync_enqueue
+     * until WiFi is up. The push worker dequeues immediately on enqueue
+     * and calls https_post → lwip_getaddrinfo, which asserts inside
+     * tcpip_send_msg_wait_sem if the lwip tcpip task hasn't booted yet.
+     *
+     * Cold boot doesn't hit this because the event_log is empty at
+     * boot; we only enqueue mutates from touch handlers, which run
+     * after WiFi is ready. The deepsleep wake path is the only place
+     * we'd enqueue at boot — gate the enqueue on s_net_phase == Online
+     * via the s_pending_woke_at flag handled in the main loop below. */
     if (esp_reset_reason() == ESP_RST_DEEPSLEEP) {
         const int64_t woke_at = now_ms_wall();
-        ESP_LOGI(TAG, "wake from deepsleep → enqueue EVENT_WOKE");
+        ESP_LOGI(TAG, "wake from deepsleep → log EVENT_WOKE (push deferred)");
         event_log_append(EVENT_WOKE, woke_at);
-        pet_sync_enqueue(EVENT_WOKE, woke_at);
+        s_pending_woke_at = woke_at;
     }
 
     /* Kick the non-blocking connectivity worker (design/21). Everything
@@ -2261,6 +2275,19 @@ extern "C" void app_main(void) {
             continue;
         }
 
+        /* Drain the deferred wake-from-deepsleep mutate now that the
+         * lwip stack is up. Boot-time enqueue would have crashed the
+         * push worker on tcpip_send_msg_wait_sem; gating on Online
+         * means we only kick the POST when the stack is ready to
+         * resolve mochi.val.run. The local event_log entry was
+         * already appended at boot, so even if we lose power before
+         * this drains, the substrate sees it on the next boot. */
+        if (s_pending_woke_at != 0 && s_net_phase == NetPhase::Online) {
+            ESP_LOGI(TAG, "wake-deferred: enqueue EVENT_WOKE");
+            pet_sync_enqueue(EVENT_WOKE, s_pending_woke_at);
+            s_pending_woke_at = 0;
+        }
+
         /* Key-portal autostart, deferred until WiFi is up (it shows the
          * device IP for the user to visit). One-shot. */
         if (!key_autostart_done && s_net_phase == NetPhase::Online &&
@@ -2405,30 +2432,28 @@ extern "C" void app_main(void) {
             if (loc[0] && strcmp(loc, last_location) != 0) {
                 bool swapped = false;
                 bool fetch_attempted = false;
-                int  pstatus = 0;
-                uint32_t pms = 0;
                 if (strcmp(loc, "home") == 0) {
                     swapped = scene_pack_load_home();
-                } else if (lsheet[0] && travel_pack) {
-                    char purl[160];
-                    snprintf(purl, sizeof(purl),
-                        "%s/devsprite/pack/%s?cw=%u&ch=%u",
-                        MOCHI_BASE_URL, lsheet,
-                        (unsigned)SCENE_W, (unsigned)SCENE_H);
-                    size_t plen = 0;
+                } else if (lsheet[0]) {
+                    /* Travel place packs go through pack_cache so they
+                     * survive reboot/sleep. v0.1.7 fetched directly
+                     * into a RAM-only travel_pack buffer; on a flaky
+                     * network or after a deepsleep wake the device
+                     * couldn't restore the last place at all. With
+                     * pack_cache_active_geom, the body is written to
+                     * LittleFS keyed by (sheet, cell_w, cell_h) and
+                     * served by ETag on subsequent boots. */
                     fetch_attempted = true;
-                    if (sprite_fetch_blob_ex(purl, travel_pack,
-                            TRAVEL_PACK_BYTES, &plen, &pms, &pstatus)) {
-                        swapped = scene_pack_load_bytes(travel_pack);
+                    const uint8_t *bytes = pack_cache_active_geom(
+                        lsheet, SCENE_W, SCENE_H, nullptr);
+                    if (bytes) {
+                        swapped = scene_pack_load_bytes(bytes);
                     }
                     if (!swapped) {
-                        ESP_LOGW(TAG, "travel: pack fetch failed for %s "
-                            "(HTTP %d, %u ms)", lsheet, pstatus, (unsigned)pms);
-                        char fctx[64];
-                        snprintf(fctx, sizeof(fctx),
-                            "{\"status\":%d,\"ms\":%u}", pstatus, (unsigned)pms);
-                        device_diag_eventf(DIAG_WARN, "travel", fctx,
-                            "pack fetch fail %s", lsheet);
+                        ESP_LOGW(TAG, "travel: pack unavailable for %s",
+                            lsheet);
+                        device_diag_eventf(DIAG_WARN, "travel", NULL,
+                            "pack unavailable %s", lsheet);
                     }
                 }
                 if (swapped) {
@@ -2474,12 +2499,14 @@ extern "C" void app_main(void) {
                      * a given place — the periodic retry shouldn't flash the
                      * panel every 30 s while we're stuck there. */
                     if (strcmp(loc, travel_warned_loc) != 0) {
-                        if (pstatus == 404)
-                            snprintf(travel_fail_msg, sizeof(travel_fail_msg),
-                                "can't go to the %s yet", loc);
-                        else
-                            snprintf(travel_fail_msg, sizeof(travel_fail_msg),
-                                "can't get to the %s, something's wrong", loc);
+                        /* pack_cache_active_geom hides HTTP status from
+                         * us so we can't differentiate 404-not-ready
+                         * from "something's wrong" anymore. The cache
+                         * layer logs its own device_diag entries with
+                         * structured detail; the bubble keeps a single
+                         * generic message. */
+                        snprintf(travel_fail_msg, sizeof(travel_fail_msg),
+                            "can't get to the %s, try again later", loc);
                         /* Pin as a persistent passive bubble so the kid can
                          * page through a longer message — the touch handler's
                          * Zone::Thought path bumps the page on tap and

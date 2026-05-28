@@ -44,6 +44,23 @@ extern "C" {
  */
 const uint8_t *pack_cache_active(const char *sheet, const uint8_t *embedded);
 
+/*
+ * Same as pack_cache_active but for travel-sized place packs that the
+ * server resolves with a per-cell geometry query
+ * (/devsprite/pack/<sheet>?cw=<cw>&ch=<ch>). The cache key includes
+ * the geometry so a 96×96 pet pack and a 200×200 place pack at the
+ * same sheet id can coexist (they don't share, but the device-side
+ * key prevents accidental collision).
+ *
+ * `embedded` is optional: pass NULL if the pack has no build-time
+ * baseline (most place packs). On total failure (no cache, no
+ * embedded, no network) returns NULL — caller should keep the
+ * previous scene rather than re-render.
+ */
+const uint8_t *pack_cache_active_geom(const char *sheet,
+                                      uint16_t cw, uint16_t ch,
+                                      const uint8_t *embedded);
+
 #ifdef __cplusplus
 }
 #endif
