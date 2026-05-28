@@ -1,12 +1,15 @@
 # 26 — Idle tiers & light sleep
 
-Status: firmware in progress, 2026-05-28. The telemetry + idle-tier
-state machine have landed (`firmware/main/power.{h,cpp}`); automatic
-light sleep is implemented but gated behind `CONFIG_MOCHI_LIGHT_SLEEP`
-(default off) pending on-hardware validation. A measured Live baseline
-is recorded below (§Measured baseline) from the existing `device_logs`
-health telemetry. The telemetry schema + analysis SQL are in
-§Telemetry and §Analysis queries.
+Status: firmware landed, 2026-05-28. The telemetry + idle-tier state
+machine + automatic light sleep are all implemented. **Light sleep is
+now enabled by default** (`CONFIG_MOCHI_LIGHT_SLEEP=y` in
+`sdkconfig.defaults`) for the first OTA release that carries it — first
+on-hardware validation happens via that release rather than a bench
+pass, so the telemetry below is how we confirm it (and OTA rollback
+covers a boot failure; a UX regression — e.g. touch not waking from
+doze — would need a follow-up release). A measured Live baseline is
+recorded below (§Measured baseline) from the existing `device_logs`
+health telemetry; §Analysis has the queries to compare against it.
 
 Author note: prompted by the question "is a low-power mode between deep
 sleep and live possible?" — yes, and the e-paper + capacitive-touch

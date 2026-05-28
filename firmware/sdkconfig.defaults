@@ -30,7 +30,21 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 # 1kHz tick is a small power hit vs the default 100Hz but gives much
 # finer-grained vTaskDelay for animation frame pacing later. Revisit
 # if power profiling complains.
+#
+# NOTE (design/26): with MOCHI_LIGHT_SLEEP on, a 1kHz tick caps
+# tickless-idle residency (up to 1000 idle wakeups/s). Tickless idle
+# still suppresses ticks while idle, but lowering to 100Hz would
+# improve doze residency — revisit once the power telemetry shows the
+# achieved sleep ratio.
 CONFIG_FREERTOS_HZ=1000
+
+# Power management (design/26). Automatic light sleep while the device
+# is dozing (idle): the SoC sleeps between events with RAM + the e-paper
+# image retained, waking on the touch INT (GPIO21) or a button in
+# microseconds — no reboot, unlike deep sleep. MOCHI_LIGHT_SLEEP selects
+# PM_ENABLE + tickless idle. Doze/deep-sleep timeouts + WiFi power-save
+# live in main/Kconfig.projbuild.
+CONFIG_MOCHI_LIGHT_SLEEP=y
 
 # Compiler optimisation: -Og while we're in bring-up so backtraces are
 # meaningful. Flip to -O2 once peripherals are stable.
