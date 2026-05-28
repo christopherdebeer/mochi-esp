@@ -319,6 +319,69 @@ sense — runtime falls straight out of %/h without needing the cell's mAh.
 This is the number Doze has to beat. Re-run the query in §Analysis after
 a doze-enabled build has logged a few hours to quantify the win.
 
+## Projected savings (hypothesis — validate against telemetry)
+
+Modelled from ESP32-S3 component currents (we have no current sense, only
+the voltage divider), anchored to the measured 24 h / ~4 %/h baseline.
+Battery capacity is unknown but **cancels in the multiplier**, so the
+lifespan *ratios* are firmer than the absolute mA. These are the numbers
+the `power` + `health` telemetry should confirm or refute.
+
+**Where the baseline goes** — the dominant cost is the always-on 240 MHz
+CPU (no DFS/PM today); light sleep attacks exactly that, WiFi is secondary:
+
+| Term | ~mA (representative) |
+|------|----------------------|
+| CPU active @240 MHz, continuous | ~35–45 |
+| WiFi associated, default MIN_MODEM (DTIM RX, avg) | ~3–8 |
+| e-paper (retains, idle) + sensors + ADC | ~1–2 |
+| **Baseline total** | **~40 mA → 24 h (measured anchor)** |
+
+**Regimes:**
+
+| Regime | Est. avg current | × baseline | Lifespan (while idle) |
+|--------|------------------|-----------|------------------------|
+| Baseline (Live, as-is) | ~40 mA | 1.0× | 24 h (measured) |
+| **Doze: WiFi PS_MAX_MODEM + light sleep** (as built) | ~5–8 mA | ~0.15× | **~5–7 days** (~5–7×) |
+| Doze: WiFi off + light sleep (fallback option) | ~2–4 mA | ~0.07× | ~10–15 days (~10–15×) |
+| + suspend the 100 ms touch poll (follow-up) | ~1–3 mA | ~0.04× | ~2–4 weeks (~15–30×) |
+
+**Reading of the rows:**
+- **As-built (PS + light sleep): ~5–7×.** Almost entirely from light
+  sleep collapsing the always-on CPU; WiFi PS_MAX_MODEM is a minor extra.
+- **WiFi off vs PS: ~2× on top.** Dropping WiFi removes ~2–3 mA of
+  idle + averaged 5-min resync — roughly halves doze current again — at
+  the cost of no live inbound sync (reconnect + TLS burst on wake). For a
+  mostly-idle pet, WiFi-off is the bigger battery win; PS buys "stays
+  current / server can push travel" for ~2× the doze draw.
+- **The cap that matters most:** the 100 ms touch-poll task holds the SoC
+  out of deep light sleep (≤~100 ms per stretch) and octal-PSRAM
+  retention sets a ~0.5–1.5 mA floor — that's why as-built is days, not
+  weeks. Suspending the poll in doze (lean on GPIO21 INT) + dropping
+  `FREERTOS_HZ` 1000→100 is the highest-leverage follow-up; it's what
+  unlocks the bottom row.
+
+**Caveats:** lifespan above is for *time spent idle*; real runtime is a
+usage-weighted blend (Live during play). Absolute days scale with the
+unknown cell; the multipliers don't.
+
+### How to evaluate against telemetry
+
+Each row is falsifiable from the rows logged once a doze-enabled build
+runs (cross-reference §Analysis queries):
+
+| Hypothesis | Confirm from |
+|------------|--------------|
+| Baseline ≈ 4 %/h | §baseline discharge regression on `health` (already true) |
+| As-built doze ≈ 5–7× | discharge regression on a doze-heavy boot vs baseline; expect ~0.6–0.8 %/h while idle |
+| Achieved residency (the make-or-break) | `doze_ms/(live_ms+doze_ms)` from the §doze-residency query — model assumes high residency; the 100 ms poll is the risk |
+| Live vs Doze draw, separated | regression of `pct_per_h` against `doze_pct` across boots → intercept = Live %/h, intercept+slope = full-Doze %/h |
+| WiFi PS vs off delta (~2×) | compare boots built with `MOCHI_DOZE_WIFI_POWERSAVE` on/off (the `init` record's `wifi_ps` segments them) |
+
+If the residency number comes back low (say <80 %), that explains any
+shortfall vs the ~5–7× target and points straight at the poll-suspend
+follow-up before any deeper change.
+
 ## Telemetry
 
 All power telemetry flows through the existing `device_diag` →
