@@ -98,6 +98,33 @@ jobs:
           echo "Manifest:"
           cat release/latest.json
 
+      # Build the changelog body from git history. We tag arbitrary
+      # commits by hand, so this commit-level list (rather than only
+      # the PR-based notes GitHub generates) is what reliably captures
+      # what changed. `git describe` finds the previous v* tag reachable
+      # from this tag's parent; on the first-ever tag there is none, so
+      # we fall back to the last 30 commits leading up to it.
+      - name: Build release notes
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          PREV_TAG=$(git describe --tags --abbrev=0 --match 'v*' "${TAG}^" 2>/dev/null || true)
+          {
+            echo "## Changes"
+            echo
+            if [ -n "${PREV_TAG}" ]; then
+              git log --no-merges --pretty='- %s (%h)' "${PREV_TAG}..${TAG}"
+              echo
+              echo "**Full diff:** https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${TAG}"
+            else
+              git log --no-merges --pretty='- %s (%h)' -n 30 "${TAG}"
+            fi
+          } > release/notes.md
+          echo "Release notes:"
+          cat release/notes.md
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
@@ -106,16 +133,11 @@ jobs:
             release/bootloader.bin
             release/partition-table.bin
             release/latest.json
-          body: |
-            Automated firmware build for ${{ github.ref_name }}.
-
-            Devices on M14+ firmware will OTA to this build at the next
-            daily check. To install on a device still running pre-M14
-            (factory-only partition table), do a one-time USB reflash:
-
-            ```sh
-            esptool.py --chip esp32s3 -p /dev/cu.usbmodem* write_flash \
-              0x0      bootloader.bin \
-              0x8000   partition-table.bin \
-              0x10000  eink-pet.bin
-            ```
+          # append_body keeps any notes drafted on the release before the
+          # tag was pushed instead of clobbering them; our git-log
+          # changelog (body_path) is appended to that, and
+          # generate_release_notes tacks GitHub's PR-based "What's
+          # Changed" section on the end.
+          body_path: release/notes.md
+          append_body: true
+          generate_release_notes: true
