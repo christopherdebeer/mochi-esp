@@ -77,6 +77,7 @@ extern "C" {
 #include "scene_pack.h"
 #include "pet_pack.h"
 #include "imagine.h"
+#include "consolidate.h"
 }
 #include "pet_sync.h"
 #include "device_diag.h"
@@ -956,6 +957,14 @@ extern "C" void app_main(void) {
     if (!imagine_init()) {
         ESP_LOGW(TAG, "imagine pipeline unavailable; voice "
                       "imagine_place tool will refuse");
+    }
+
+    /* On-device sleep consolidation (design/19). Idle until /api/state
+     * advises a pass and the loop below fires it while the pet rests;
+     * server-orchestrated, BYO key. */
+    if (!consolidate_init()) {
+        ESP_LOGW(TAG, "consolidate worker unavailable; advised "
+                      "consolidation will be skipped");
     }
 
     /*
@@ -2286,6 +2295,21 @@ extern "C" void app_main(void) {
              * 5-min resync. */
             pet_t ps; pet_event_t pe[4]; size_t pn = 0;
             pet_sync_pull_now(&ps, pe, 4, &pn);
+        }
+
+        /* Sleep consolidation (design/19, server-orchestrated). When
+         * /api/state advised a pass and the pet is asleep, run a
+         * reflection pass with the BYO key — but only at rest and with
+         * no voice/imagine in flight (PSRAM budget + "reflect during
+         * rest, not mid-conversation"). consolidate_start() self-guards
+         * on in-flight + debounce, so calling it each idle tick is a
+         * cheap no-op until the next pass is actually due. */
+        if (!voice::is_active() && !imagine_in_flight() &&
+            !consolidate_in_flight() && pet_sync_consolidation_advised()) {
+            pet_t csnap;
+            if (pet_sync_get_snapshot(&csnap) && csnap.asleep) {
+                consolidate_start();
+            }
         }
 
         /* Travel (design/17): follow pets.location. pet_sync refreshes it
