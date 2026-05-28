@@ -60,15 +60,17 @@ static const uint8_t *load_cached(const char *cache_sheet) {
     return buf;
 }
 
-const uint8_t *pack_cache_active(const char *sheet, const uint8_t *embedded) {
-    if (!sheet) return embedded;
-
-    char cache_sheet[48];
-    snprintf(cache_sheet, sizeof(cache_sheet), "%s.pack", sheet);
-
-    char url[96];
-    snprintf(url, sizeof(url),
-        "https://mochi.val.run/devsprite/pack/%s", sheet);
+/* Core resolver shared by pack_cache_active (no geometry suffix) and
+ * pack_cache_active_geom (cw/ch query string + geometry-tagged cache
+ * key). cache_sheet is the sprite_cache key (must encode any
+ * disambiguators), url is the server URL to GET; both are caller-
+ * supplied so this function stays geometry-agnostic. embedded is the
+ * baseline blob to fall back to when offline + no cache; pass NULL
+ * when the pack has no build-time baseline (most travel packs). */
+static const uint8_t *resolve_active(const char *sheet,
+                                     const char *cache_sheet,
+                                     const char *url,
+                                     const uint8_t *embedded) {
 
     /* Probe the server ETag. Offline → fall back to the last cached
      * pack, then to the embedded baseline. */
@@ -141,4 +143,43 @@ const uint8_t *pack_cache_active(const char *sheet, const uint8_t *embedded) {
     device_diag_eventf(DIAG_INFO, "pack_cache",
         "{\"src\":\"server\"}", "%s fetched", sheet);
     return buf;
+}
+
+const uint8_t *pack_cache_active(const char *sheet, const uint8_t *embedded) {
+    if (!sheet) return embedded;
+    char cache_sheet[48];
+    snprintf(cache_sheet, sizeof(cache_sheet), "%s.pack", sheet);
+    char url[96];
+    snprintf(url, sizeof(url),
+        "https://mochi.val.run/devsprite/pack/%s", sheet);
+    return resolve_active(sheet, cache_sheet, url, embedded);
+}
+
+const uint8_t *pack_cache_active_geom(const char *sheet,
+                                      uint16_t cw, uint16_t ch,
+                                      const uint8_t *embedded) {
+    if (!sheet) return embedded;
+    /* Cache key encodes geometry so packs at different cell sizes
+     * don't collide. Server URL appends ?cw=&ch= so the resolver
+     * returns the right pixel count. */
+    char cache_sheet[64];
+    snprintf(cache_sheet, sizeof(cache_sheet), "%s.%ux%u.pack",
+        sheet, (unsigned)cw, (unsigned)ch);
+    char url[160];
+    snprintf(url, sizeof(url),
+        "https://mochi.val.run/devsprite/pack/%s?cw=%u&ch=%u",
+        sheet, (unsigned)cw, (unsigned)ch);
+    return resolve_active(sheet, cache_sheet, url, embedded);
+}
+
+const uint8_t *pack_cache_load_geom_only(const char *sheet,
+                                         uint16_t cw, uint16_t ch) {
+    if (!sheet) return nullptr;
+    /* Mirror the cache-key shape from pack_cache_active_geom so
+     * the boot-path load and the post-WiFi refresh share the same
+     * LittleFS blob. */
+    char cache_sheet[64];
+    snprintf(cache_sheet, sizeof(cache_sheet), "%s.%ux%u.pack",
+        sheet, (unsigned)cw, (unsigned)ch);
+    return load_cached(cache_sheet);
 }

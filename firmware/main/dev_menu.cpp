@@ -85,6 +85,16 @@ static lv_obj_t            *s_models_scr       = nullptr;
  * back. */
 static TouchResult          s_pending_action = TouchResult::None;
 
+/* Modal-push flag — set by on_click when it mutates s_mode to a
+ * modal (WifiModal / ModelsModal) and latches s_press_pending to
+ * force tick() to render. Distinct from s_press_pending so tick()
+ * can disambiguate "user pressed PWR to advance" from "click handler
+ * pushed a modal" without resorting to a wall-clock window (which
+ * raced — main.cpp's 1 Hz tick easily exceeded any tight threshold,
+ * causing the modal to render-and-immediately-advance-out as if PWR
+ * had been pressed). Cleared by tick() once consumed. */
+static std::atomic<bool>    s_modal_push_pending{false};
+
 static const char *mode_name(Mode m) {
     switch (m) {
         case Mode::Live:      return "live";
@@ -92,6 +102,7 @@ static const char *mode_name(Mode m) {
         case Mode::MenuP2:    return "menu_p2";
         case Mode::MenuP3:    return "menu_p3";
         case Mode::WifiModal: return "wifi_modal";
+        case Mode::ModelsModal: return "models_modal";
         default:              return "?";
     }
 }
@@ -149,6 +160,16 @@ static Mode advance(Mode m) {
     }
 }
 
+/* A modal is pushed by its on_click handler (SwitchWifi → WifiModal,
+ * OpenModels → ModelsModal): it mutates s_mode itself and latches
+ * s_press_pending to force tick() to render the new screen. tick()
+ * must recognise that latched press as a modal-push, NOT a wheel
+ * advance — otherwise advance() bounces the modal straight back to its
+ * parent page before it ever paints. */
+static bool is_modal(Mode m) {
+    return m == Mode::WifiModal || m == Mode::ModelsModal;
+}
+
 /* ─── Click handler ────────────────────────────────────────────────
  *
  * Bound to every actionable widget. user_data carries the TouchResult
@@ -172,10 +193,12 @@ static void on_click(lv_event_t *ev) {
     }
     if (action == TouchResult::SwitchWifi) {
         /* Internal: push the WifiModal screen. main.cpp doesn't see
-         * this. We swap the LVGL active screen here and bump
-         * s_entered_mode_us so the inactivity timer resets. */
+         * this. We swap s_mode here and use the modal-push flag so
+         * tick() renders the new screen on the next pass without
+         * treating the latch as a PWR-advance. */
         s_mode = Mode::WifiModal;
         s_entered_mode_us = esp_timer_get_time();
+        s_modal_push_pending.store(true, std::memory_order_release);
         s_press_pending.store(true, std::memory_order_release);
         s_pending_action = TouchResult::None;
         return;
@@ -185,6 +208,7 @@ static void on_click(lv_event_t *ev) {
          * SwitchWifi. main.cpp doesn't see this. */
         s_mode = Mode::ModelsModal;
         s_entered_mode_us = esp_timer_get_time();
+        s_modal_push_pending.store(true, std::memory_order_release);
         s_press_pending.store(true, std::memory_order_release);
         s_pending_action = TouchResult::None;
         return;
@@ -326,8 +350,8 @@ static void build_menu_p1(void) {
     s_menu_p1_scr = lv_obj_create(nullptr);
     config_menu_screen(s_menu_p1_scr);
 
-    /* Mood + stats — refreshed live by refresh_pet_status(). Caller
-     * passes the formatted string; we just render it. */
+    /* Mood + stats — populated once on entry by refresh_pet_status().
+     * Caller passes the formatted string; we just render it. */
     s_pet_status_label = lv_label_create(s_menu_p1_scr);
     lv_label_set_long_mode(s_pet_status_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(s_pet_status_label, lv_pct(98));
@@ -353,7 +377,7 @@ static void build_menu_p2(void) {
     lv_obj_t *title = lv_label_create(s_menu_p2_scr);
     lv_label_set_text(title, "SETTINGS  (PWR×1 exits)");
 
-    /* Network/version/IP header — refreshed live by refresh_info(). */
+    /* Network/version/IP header — populated once on entry by refresh_info(). */
     s_info_label = lv_label_create(s_menu_p2_scr);
     lv_label_set_long_mode(s_info_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(s_info_label, lv_pct(98));
@@ -490,6 +514,14 @@ static void render_mode(Mode m) {
      * creation can race with the renderer mid-frame and crash inside
      * lv_obj_pos.c. */
     lvgl_port_lock();
+    /* Clear any stale pending_action stamped on the previous screen.
+     * Without this, a click queued while a slow handler was running
+     * (e.g. the Memories/Places toast's 1.2 s vTaskDelay during
+     * which the LVGL dispatcher kept firing) can leak into the next
+     * screen's dispatch_touch and execute the wrong action. Observed
+     * on hardware: a tap on MenuP3's "Update" or P2's "AI models"
+     * was committing GoHome (stamped earlier on MenuP1). */
+    s_pending_action = TouchResult::None;
     switch (m) {
         case Mode::MenuP1:
             build_menu_p1();
@@ -549,41 +581,38 @@ bool tick(epaper_driver_display * /*epd*/, bool /*paired*/,
     /* Consume any presses the watcher latched since the last tick.
      * exchange returns the prior value and resets the flag — so a
      * burst of fast presses inside one tick still advances the
-     * wheel exactly once. The SwitchWifi click handler also sets
-     * this flag (already having mutated s_mode) to force an
-     * immediate render of the modal on the same tick. */
+     * wheel exactly once. */
     const bool pressed = s_press_pending.exchange(false, std::memory_order_acq_rel);
+    const bool modal_push =
+        s_modal_push_pending.exchange(false, std::memory_order_acq_rel);
 
     if (pressed) {
-        /* on_click already mutated s_mode for the SwitchWifi case
-         * (Mode::WifiModal). For the wheel-advance case, advance
-         * here. */
-        if (s_mode != Mode::WifiModal ||
-            (now_us - s_entered_mode_us) > 50 * 1000) {
+        /* Disambiguate: a click handler that pushed a modal sets
+         * s_modal_push_pending (alongside the press latch); tick()
+         * then renders the new s_mode as-is. A genuine PWR press
+         * arrives without the modal flag and advances the wheel.
+         *
+         * Earlier we tried gating advance() on a wall-clock window
+         * since on_click set s_entered_mode_us, but main.cpp's 1 Hz
+         * touch-poll cadence frequently pushed elapsed time past any
+         * reasonable threshold — the modal would render then
+         * immediately advance back to its parent the next tick,
+         * never showing. The explicit flag has no time dependency. */
+        if (!modal_push) {
             const Mode next = advance(s_mode);
             ESP_LOGI(TAG, "PWR: %s → %s", mode_name(s_mode), mode_name(next));
             s_mode = next;
         } else {
-            ESP_LOGI(TAG, "modal push → wifi_modal");
+            ESP_LOGI(TAG, "modal push → %s", mode_name(s_mode));
         }
         s_entered_mode_us = now_us;
         render_mode(s_mode);
         changed = true;
-    } else if (s_mode == Mode::MenuP1) {
-        /* Refresh the pet-status header on every tick so mood/stats
-         * stay live while the kid is reading. The action buttons are
-         * static — not rebuilt. Locked against the dispatcher to keep
-         * widget access serialised. */
-        lvgl_port_lock();
-        refresh_pet_status();
-        lvgl_port_unlock();
-    } else if (s_mode == Mode::MenuP2) {
-        /* Same idea for the network/RAM/batt header on the settings
-         * page — readings should tick live while up. */
-        lvgl_port_lock();
-        refresh_info();
-        lvgl_port_unlock();
     }
+    /* Menu headers are a snapshot taken at entry (render_mode) — we
+     * deliberately do NOT re-refresh pet stats / network info on every
+     * tick, so the figures the user reads stay stable while a page is
+     * up rather than flickering with each partial refresh. */
 
     if (s_mode != Mode::Live &&
         (now_us - s_entered_mode_us) >= INACTIVITY_US && !changed) {

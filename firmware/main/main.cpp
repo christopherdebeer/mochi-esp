@@ -46,6 +46,7 @@
 #include "wifi_prov.h"
 #include "wifi_sta.h"
 #include "sprite_fetch.h"
+#include "pack_cache.h"
 #include "touch.h"
 #include "rtc.h"
 #include "shtc3.h"
@@ -246,6 +247,13 @@ static thought_hit_rect_t s_thought_hit    = {};
 static bool               s_thought_active = false;
 static constexpr int64_t  THOUGHT_SUPPRESS_MS = 30LL * 1000;
 static int64_t            s_thought_suppress_until_ms = 0;
+
+/* Wake-from-deepsleep deferred-mutate latch. Set at boot when we
+ * detect ESP_RST_DEEPSLEEP, drained by the main loop's "WiFi just
+ * came online" branch. Bypasses the early-boot crash where
+ * pet_sync_enqueue → push worker → lwip getaddrinfo asserts because
+ * the lwip tcpip task hasn't been initialised yet. */
+static int64_t            s_pending_woke_at = 0;
 
 /* Resolve a thought's action into the immediate transient
  * expression we render during the post-tap 5 s hold. Mirrors the
@@ -879,9 +887,11 @@ extern "C" void app_main(void) {
      * remains full-panel size. */
     uint8_t *scene_fb  = (uint8_t *)heap_caps_malloc(SCENE_BYTES, MALLOC_CAP_SPIRAM);
     uint8_t *composite = (uint8_t *)heap_caps_malloc(FB_LEN, MALLOC_CAP_SPIRAM);
-    /* Travel destination pack (design/17). Non-fatal if it fails — the
-     * device just can't follow pets.location to non-home places. */
-    uint8_t *travel_pack = (uint8_t *)heap_caps_malloc(TRAVEL_PACK_BYTES, MALLOC_CAP_SPIRAM);
+    /* (Pre-v0.1.7 the device kept a 320 KB travel_pack PSRAM buffer
+     * here that the travel block fetched into directly. v0.1.7 routes
+     * travel through pack_cache_active_geom() which owns its own
+     * PSRAM — saving the always-allocated buffer at the cost of one
+     * cache-side malloc per place change.) */
     /* Pet cell uses the two-plane format: ink (line work) + mask
      * (silhouette). Both same size; allocated separately so we can
      * pass them to blit_two_plane without packing. */
@@ -942,6 +952,36 @@ extern "C" void app_main(void) {
         } else {
             ESP_LOGW(TAG, "scene_pack unavailable; blank backdrop");
             compositor::clear_to_paper(scene_fb, SCENE_W, SCENE_H);
+        }
+
+        /* Wake-from-deepsleep: try to restore the last non-home place
+         * pack from LittleFS cache before the first render_with_expression
+         * fires. Without this, the embedded "home" frame paints first
+         * and the main loop's travel block swaps to (e.g.) forest a
+         * couple seconds later — visually that's home → flash → forest
+         * on every wake. The cache load is fast (~70 ms) and offline-
+         * safe; if no cache, fall back to home which is the same as
+         * embedded behaviour. The post-WiFi travel block in the main
+         * loop still runs and refreshes against the server ETag. */
+        char loc_nvs[MOCHI_LOC_ID_MAX + 1] = {};
+        char sheet_nvs[MOCHI_LOC_SHEET_MAX + 1] = {};
+        if (nvs_creds_get_last_loc(loc_nvs, sizeof(loc_nvs),
+                                   sheet_nvs, sizeof(sheet_nvs)) &&
+            loc_nvs[0] && strcmp(loc_nvs, "home") != 0 && sheet_nvs[0]) {
+            /* Cache-only load — pack_cache_active_geom would HEAD-probe
+             * the server first, which calls lwip getaddrinfo and panics
+             * pre-WiFi (tcpip task isn't running yet at this point in
+             * app_main). The post-WiFi travel block in the main loop
+             * does the proper ETag-against-server refresh. */
+            const uint8_t *bytes = pack_cache_load_geom_only(
+                sheet_nvs, SCENE_W, SCENE_H);
+            if (bytes && scene_pack_load_bytes(bytes) &&
+                scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H)) {
+                ESP_LOGI(TAG, "boot scene → %s (from cache)", loc_nvs);
+            } else {
+                ESP_LOGW(TAG, "boot scene: '%s' cache miss — staying home",
+                    loc_nvs);
+            }
         }
     }
 
@@ -1666,9 +1706,35 @@ extern "C" void app_main(void) {
      * success; until then current_pet_decayed falls back to this. */
     init_dev_pet(now_ms_wall());
 
+    /* Restore the last persisted snapshot from NVS. Each successful
+     * pull/mutate writes pet_t + location/sheet/costume there, so a
+     * deepsleep wake renders correct stats/mood/sprite from the very
+     * first frame instead of falling back to init_dev_pet defaults
+     * for 5-30 s while /api/state is in flight. The next pull will
+     * overwrite. No-op (returns false) on first-ever boot. */
+    pet_sync_restore_snapshot_from_nvs();
+
     /* Spin up the push worker + periodic-resync task. Idempotent; its
      * workers retry quietly until net_worker brings WiFi up. */
     pet_sync_start();
+
+    /* Wake-from-deepsleep → record EVENT_WOKE locally now (event_log
+     * is on-flash and survives a panic), but DEFER the pet_sync_enqueue
+     * until WiFi is up. The push worker dequeues immediately on enqueue
+     * and calls https_post → lwip_getaddrinfo, which asserts inside
+     * tcpip_send_msg_wait_sem if the lwip tcpip task hasn't booted yet.
+     *
+     * Cold boot doesn't hit this because the event_log is empty at
+     * boot; we only enqueue mutates from touch handlers, which run
+     * after WiFi is ready. The deepsleep wake path is the only place
+     * we'd enqueue at boot — gate the enqueue on s_net_phase == Online
+     * via the s_pending_woke_at flag handled in the main loop below. */
+    if (esp_reset_reason() == ESP_RST_DEEPSLEEP) {
+        const int64_t woke_at = now_ms_wall();
+        ESP_LOGI(TAG, "wake from deepsleep → log EVENT_WOKE (push deferred)");
+        event_log_append(EVENT_WOKE, woke_at);
+        s_pending_woke_at = woke_at;
+    }
 
     /* Kick the non-blocking connectivity worker (design/21). Everything
      * that needs the network — connect, SNTP, OTA, ETag refresh,
@@ -1689,9 +1755,40 @@ extern "C" void app_main(void) {
     constexpr int64_t DEBOUNCE_US = 200 * 1000;
 
     /* Travel state (design/17): the place the device is currently
-     * rendering. Boot rendered the home bundle, so we start at "home".
-     * The loop below follows pets.location and re-renders on change. */
+     * rendering. Default is "home" (boot renders the embedded
+     * scene-bundle-a). On wake-from-deepsleep we restore the
+     * persisted last place from NVS — without that, the device
+     * renders home for as long as /api/state takes to come back,
+     * which on a flaky network can be tens of seconds or never.
+     * The travel block below sees boot != server-canonical and
+     * fetches the correct pack on the next tick. */
     char last_location[40] = "home";
+    {
+        char loc_nvs[MOCHI_LOC_ID_MAX + 1] = {};
+        char sheet_nvs[MOCHI_LOC_SHEET_MAX + 1] = {};
+        if (nvs_creds_get_last_loc(loc_nvs, sizeof(loc_nvs),
+                                   sheet_nvs, sizeof(sheet_nvs)) &&
+            loc_nvs[0] && strcmp(loc_nvs, "home") != 0 && sheet_nvs[0]) {
+            /* Seed pet_sync's location cache from NVS and align
+             * last_location so the in-loop travel block does NOT
+             * re-fetch the same pack we already loaded above from
+             * the LittleFS cache during boot init. Without aligning,
+             * (loc=forest) != (last_location=home) → travel block
+             * fires → another pack_cache_active_geom call → another
+             * blit + EPD full refresh = visible flicker.
+             *
+             * If the server has since flipped the pet to a different
+             * place (e.g. via voice-driven travel while powered down),
+             * pet_sync_pull_now will overwrite the cached location on
+             * its first successful pull, last_location will lag, and
+             * the travel block fires for the new place — correct.  */
+            ESP_LOGI(TAG, "boot: restoring last place '%s' (%s)",
+                loc_nvs, sheet_nvs);
+            pet_sync_seed_location(loc_nvs, sheet_nvs);
+            snprintf(last_location, sizeof(last_location), "%.*s",
+                (int)(sizeof(last_location) - 1), loc_nvs);
+        }
+    }
     /* Travel-failure recovery (design/17/18): a place-pack fetch that
      * fails floats a thought bubble and arms a backoff retry instead of
      * silently wedging on the current scene. travel_retry_loc remembers
@@ -1895,6 +1992,21 @@ extern "C" void app_main(void) {
 
         if (sleep_gesture::requested()) {
             sleep_gesture::mark_handled();
+            /* Mutate substrate state — the server has its own decay,
+             * but a deliberate sleep gesture deserves an explicit
+             * record (so server-side projection sees engagement
+             * weight + the sleep-consolidation pass kicks in
+             * promptly). event_log_append is local-first and survives
+             * the network being down; pet_sync_enqueue queues the
+             * mutate POST. push_event_now() does a best-effort
+             * synchronous flush before we power down so the substrate
+             * sees the sleep promptly when network is healthy; on a
+             * timeout the queued event survives in the push worker's
+             * pending buffer and ships on next boot. */
+            const int64_t slept_at = now_ms_wall();
+            event_log_append(EVENT_SLEPT, slept_at);
+            pet_sync_enqueue(EVENT_SLEPT, slept_at);
+            pet_sync_push_now();   /* best-effort flush before power-down */
             device_diag_event(DIAG_INFO, "sleep", "PWR tap → sleep", nullptr);
             device_diag_flush();   /* push before we power down */
             render_asleep("Asleep - PWR to wake");
@@ -2075,8 +2187,12 @@ extern "C" void app_main(void) {
                             ESP_LOGI(TAG, "dev_menu → go home");
                             /* Network POST; the travel block swaps to the
                              * home bundle next tick on success. No-op +
-                             * logged if offline. */
+                             * logged if offline. Clear last_location so
+                             * the travel block re-renders even if the
+                             * device is already showing the home pack
+                             * (e.g. after a deepsleep restore). */
                             pet_sync_enter_place("home");
+                            last_location[0] = '\0';
                             break;
                         case dev_menu::TouchResult::Memories:
                         case dev_menu::TouchResult::Places:
@@ -2100,6 +2216,18 @@ extern "C" void app_main(void) {
                             epd->EPD_Init_Partial();
                             epd->EPD_DisplayPart();
                             vTaskDelay(pdMS_TO_TICKS(1200));
+                            /* Drain any touch events the user
+                             * generated while the toast was on screen
+                             * (a finger lingering past tap-release
+                             * registers as a fresh press during the
+                             * 1.2 s sleep). Without this, the LVGL
+                             * dispatcher catches the late press →
+                             * release transition and stamps a
+                             * pending_action on whatever button sits
+                             * under the finger — committing the wrong
+                             * action when the menu next reads its
+                             * latch. */
+                            drain_next_touch = true;
                             lvgl_port_force_full_refresh();
                             break;
                         case dev_menu::TouchResult::WifiSwitch: {
@@ -2192,6 +2320,19 @@ extern "C" void app_main(void) {
                 render_with_expression("neutral", false, nullptr);
             }
             continue;
+        }
+
+        /* Drain the deferred wake-from-deepsleep mutate now that the
+         * lwip stack is up. Boot-time enqueue would have crashed the
+         * push worker on tcpip_send_msg_wait_sem; gating on Online
+         * means we only kick the POST when the stack is ready to
+         * resolve mochi.val.run. The local event_log entry was
+         * already appended at boot, so even if we lose power before
+         * this drains, the substrate sees it on the next boot. */
+        if (s_pending_woke_at != 0 && s_net_phase == NetPhase::Online) {
+            ESP_LOGI(TAG, "wake-deferred: enqueue EVENT_WOKE");
+            pet_sync_enqueue(EVENT_WOKE, s_pending_woke_at);
+            s_pending_woke_at = 0;
         }
 
         /* Key-portal autostart, deferred until WiFi is up (it shows the
@@ -2338,30 +2479,28 @@ extern "C" void app_main(void) {
             if (loc[0] && strcmp(loc, last_location) != 0) {
                 bool swapped = false;
                 bool fetch_attempted = false;
-                int  pstatus = 0;
-                uint32_t pms = 0;
                 if (strcmp(loc, "home") == 0) {
                     swapped = scene_pack_load_home();
-                } else if (lsheet[0] && travel_pack) {
-                    char purl[160];
-                    snprintf(purl, sizeof(purl),
-                        "%s/devsprite/pack/%s?cw=%u&ch=%u",
-                        MOCHI_BASE_URL, lsheet,
-                        (unsigned)SCENE_W, (unsigned)SCENE_H);
-                    size_t plen = 0;
+                } else if (lsheet[0]) {
+                    /* Travel place packs go through pack_cache so they
+                     * survive reboot/sleep. v0.1.7 fetched directly
+                     * into a RAM-only travel_pack buffer; on a flaky
+                     * network or after a deepsleep wake the device
+                     * couldn't restore the last place at all. With
+                     * pack_cache_active_geom, the body is written to
+                     * LittleFS keyed by (sheet, cell_w, cell_h) and
+                     * served by ETag on subsequent boots. */
                     fetch_attempted = true;
-                    if (sprite_fetch_blob_ex(purl, travel_pack,
-                            TRAVEL_PACK_BYTES, &plen, &pms, &pstatus)) {
-                        swapped = scene_pack_load_bytes(travel_pack);
+                    const uint8_t *bytes = pack_cache_active_geom(
+                        lsheet, SCENE_W, SCENE_H, nullptr);
+                    if (bytes) {
+                        swapped = scene_pack_load_bytes(bytes);
                     }
                     if (!swapped) {
-                        ESP_LOGW(TAG, "travel: pack fetch failed for %s "
-                            "(HTTP %d, %u ms)", lsheet, pstatus, (unsigned)pms);
-                        char fctx[64];
-                        snprintf(fctx, sizeof(fctx),
-                            "{\"status\":%d,\"ms\":%u}", pstatus, (unsigned)pms);
-                        device_diag_eventf(DIAG_WARN, "travel", fctx,
-                            "pack fetch fail %s", lsheet);
+                        ESP_LOGW(TAG, "travel: pack unavailable for %s",
+                            lsheet);
+                        device_diag_eventf(DIAG_WARN, "travel", NULL,
+                            "pack unavailable %s", lsheet);
                     }
                 }
                 if (swapped) {
@@ -2378,6 +2517,15 @@ extern "C" void app_main(void) {
                     device_diag_eventf(DIAG_INFO, "travel", NULL,
                         "to %s (%s)", loc,
                         (strcmp(loc, "home") == 0) ? "bundle" : lsheet);
+                    /* Persist for wake-from-deepsleep restore. Without
+                     * this, every wake renders the embedded "home"
+                     * bundle until /api/state lands — and on a flaky
+                     * network that pull can take 30 s+ or fail
+                     * outright (see ESP_ERR_HTTP_EAGAIN traces). The
+                     * sheet is saved alongside so the wake-time fetch
+                     * goes straight to /devsprite/pack/<sheet>. */
+                    nvs_creds_set_last_loc(loc,
+                        (strcmp(loc, "home") == 0) ? "" : lsheet);
                     travel_retry_at_us = 0;   /* success clears any pending retry */
                     travel_warned_loc[0] = '\0';
                     /* Drop a still-pinned failure bubble so it doesn't
@@ -2398,12 +2546,14 @@ extern "C" void app_main(void) {
                      * a given place — the periodic retry shouldn't flash the
                      * panel every 30 s while we're stuck there. */
                     if (strcmp(loc, travel_warned_loc) != 0) {
-                        if (pstatus == 404)
-                            snprintf(travel_fail_msg, sizeof(travel_fail_msg),
-                                "can't go to the %s yet", loc);
-                        else
-                            snprintf(travel_fail_msg, sizeof(travel_fail_msg),
-                                "can't get to the %s, something's wrong", loc);
+                        /* pack_cache_active_geom hides HTTP status from
+                         * us so we can't differentiate 404-not-ready
+                         * from "something's wrong" anymore. The cache
+                         * layer logs its own device_diag entries with
+                         * structured detail; the bubble keeps a single
+                         * generic message. */
+                        snprintf(travel_fail_msg, sizeof(travel_fail_msg),
+                            "can't get to the %s, try again later", loc);
                         /* Pin as a persistent passive bubble so the kid can
                          * page through a longer message — the touch handler's
                          * Zone::Thought path bumps the page on tap and
@@ -2726,6 +2876,15 @@ extern "C" void app_main(void) {
             memcpy(place_id, scene_act.seed_text, n);
             ESP_LOGI(TAG, "scene nav_place → %s", place_id);
             pet_sync_enter_place(place_id);
+            /* Force the travel block to re-render even when the user
+             * tapped to go to the place they're already in. Without
+             * this, a deepsleep-restored last_location pre-set to (e.g.)
+             * "forest" makes a deliberate forest-tap a no-op: enter_place
+             * succeeds, location matches, travel block sees no diff,
+             * nothing redraws. Clearing last_location lets the travel
+             * block re-blit the current scene on the next tick — same
+             * behaviour as a genuine cross-place move. */
+            last_location[0] = '\0';
             /* If this re-taps the place we just failed to reach, drop the
              * backoff so the travel block retries on the next tick rather
              * than waiting out the timer (re-tapping a failed nav zone
@@ -2801,26 +2960,17 @@ extern "C" void app_main(void) {
          * feeling?" answer. EVENT_COMFORTED still lands on the event
          * log below, so a pat actually comforts the pet.
          *
-         * Used in two places below: the zoned-scene fallthrough
-         * (no zone hit + tap on pet), and the unzoned-scene
-         * Zone::Center path. */
-        static const char *const DELIGHT_EXPRS[] = {
-            "curious", "cheerful_wave", "excited",
-            "comforted", "thinking",
-        };
-        constexpr int DELIGHT_N = (int)(sizeof(DELIGHT_EXPRS) /
-                                        sizeof(DELIGHT_EXPRS[0]));
-        static int s_delight_idx = 0;
+         * Spawn a transient mood thought bubble — but DON'T cycle
+         * the pet expression. Earlier we rotated through a delight
+         * pool (curious/cheerful_wave/excited/comforted/thinking) on
+         * pet-tap, but the random-feel didn't read as personality —
+         * just inconsistent. Now the pet keeps its current resting
+         * expression and only the bubble surfaces; the bubble carries
+         * the "what's mochi feeling?" answer through thought_for_pet_tap. */
         static pet_thought_t s_petmood_thought;
-        auto pick_delight = [&]() -> const char * {
-            const char *e = DELIGHT_EXPRS[s_delight_idx % DELIGHT_N];
-            s_delight_idx++;
-            /* Mood bubble piggy-backs on the same transient seed-bubble
-             * channel: the renderer draws it above the pet during the
-             * 5-s tap hold, then the post-hold render_resting() clears
-             * it (its own thought_generate runs against fresh state).
-             * Don't overwrite a talk_seed bubble that already claimed
-             * seed_thought_ptr — talk_seed is the louder signal. */
+        auto spawn_petmood_bubble = [&]() {
+            /* Don't overwrite a talk_seed bubble already on the
+             * seed-bubble channel — talk_seed is the louder signal. */
             if (!seed_thought_ptr) {
                 pet_event_t slice[12];
                 size_t n = event_log_load_recent(slice, 12);
@@ -2830,27 +2980,27 @@ extern "C" void app_main(void) {
                                     &s_petmood_thought);
                 seed_thought_ptr = &s_petmood_thought;
             }
-            return e;
         };
 
         /* When the current scene has authored zones, the corner-
          * quadrant fallback is suppressed: a tap that misses every
-         * zone (after the snap fallback above) resolves to either a
-         * delight expression (pet body — a pat) or "curious" (empty
-         * scene background). */
+         * zone (after the snap fallback above) keeps the resting
+         * expression and (on pet-body taps) spawns a mood bubble. */
         const bool zoned = scene_pack_current_has_zones();
         if (zoned && !scene_hit && !tapped_thought) {
-            expr = tapped_pet ? pick_delight() : "curious";
+            if (tapped_pet) {
+                spawn_petmood_bubble();
+                expr = last_resting_expr;   /* keep current resting face */
+            } else {
+                expr = "curious";
+            }
         }
 
-        /* Unzoned scene + tap on the pet body resolves to a delight
-         * expression too — the legacy zone_to_expr returned "curious"
-         * for Zone::Center, which is fine for non-pet centre taps but
-         * pre-empted the pet-tap delight intent on a tap that landed
-         * on the pet. */
+        /* Unzoned scene + tap on pet body: same deal — bubble only. */
         if (!zoned && !scene_hit && !tapped_thought &&
             z == Zone::Center && tapped_pet) {
-            expr = pick_delight();
+            spawn_petmood_bubble();
+            expr = last_resting_expr;   /* keep current resting face */
         }
 
         /* event-kind zones: derive expr from the pack-supplied
