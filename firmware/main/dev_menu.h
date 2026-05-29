@@ -154,6 +154,7 @@ enum class TouchResult : uint8_t {
     OpenModels,       /* push the ModelsModal sub-screen (in-place) */
     CycleVoiceModel,  /* (modal) cycle the voice model — handled in dev_menu */
     CycleTextModel,   /* (modal) cycle the text model — handled in dev_menu */
+    ToggleVoiceDebug, /* (modal) flip the admin debug-voice persona (design/27) — handled in dev_menu */
     /* Placeholders surfaced on the kid-facing MenuP1. Both currently
      * land in main.cpp as a "not implemented yet" toast — the rows
      * exist so the page has shape while the underlying data (memory

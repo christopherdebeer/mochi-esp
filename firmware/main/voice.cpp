@@ -8,6 +8,7 @@
 #include "i2c_bus.h"
 #include "openai_key.h"
 #include "pair_creds.h"
+#include "model_prefs.h"
 extern "C" {
 #include "codec_init.h"
 #include "voice/openai_signaling.h"
@@ -129,7 +130,11 @@ static bool fetch_session_config(const char *pet_id,
     if (!raw) return false;
 
     fetch_ctx fc = { raw, RAW_CAP, false };
-    char url[] = "https://mochi.val.run/api/voice/session";
+    /* Admin debug-voice toggle (design/27): when set, ask the server for
+     * the tool-test diagnostic persona instead of the in-character one. */
+    char url[80];
+    snprintf(url, sizeof(url), "https://mochi.val.run/api/voice/session%s",
+        model_prefs_voice_debug() ? "?mode=debug" : "");
     int rc = https_get(url, headers, persona_body, &fc);
 
     bool ok = false;

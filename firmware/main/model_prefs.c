@@ -10,6 +10,7 @@ static const char *TAG = "model_prefs";
 static const char *NS = "models";
 static const char *K_VOICE = "voice";
 static const char *K_TEXT  = "text";
+static const char *K_VDEBUG = "vdebug";   /* admin debug-voice toggle (design/27) */
 
 /* Curated lists. Index 0 = default = today's hardcoded behaviour.
  * Voice: speech-to-speech realtime models (translate/whisper variants
@@ -69,3 +70,23 @@ void model_prefs_text(char *out, size_t cap) {
 }
 void model_prefs_cycle_voice(void) { cycle(K_VOICE, VOICE_MODELS, VOICE_N); }
 void model_prefs_cycle_text(void)  { cycle(K_TEXT, TEXT_MODELS, TEXT_N); }
+
+bool model_prefs_voice_debug(void) {
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) return false;
+    uint8_t v = 0;
+    nvs_get_u8(h, K_VDEBUG, &v);   /* absent → stays 0 (off) */
+    nvs_close(h);
+    return v != 0;
+}
+
+void model_prefs_toggle_voice_debug(void) {
+    bool next = !model_prefs_voice_debug();
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return;
+    esp_err_t e1 = nvs_set_u8(h, K_VDEBUG, next ? 1 : 0);
+    esp_err_t ec = nvs_commit(h);
+    nvs_close(h);
+    if (e1 == ESP_OK && ec == ESP_OK) ESP_LOGI(TAG, "voice_debug → %d", next);
+    else ESP_LOGW(TAG, "voice_debug save failed: %d %d", e1, ec);
+}

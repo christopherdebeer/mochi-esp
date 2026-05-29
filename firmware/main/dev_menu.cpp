@@ -429,11 +429,16 @@ static void render_models(epaper_driver_display *epd) {
     char vm[48], tm[48];
     model_prefs_voice(vm, sizeof(vm));
     model_prefs_text(tm, sizeof(tm));
+    /* design/27: admin debug-voice persona toggle. Off = the normal
+     * in-character persona; On = the server's tool-test diagnostic
+     * persona (voice.cpp appends ?mode=debug). */
+    const char *dbg = model_prefs_voice_debug() ? "on" : "off";
     const Tile tiles[] = {
-        { "Voice", TouchResult::CycleVoiceModel, true, vm, nullptr },
-        { "Text",  TouchResult::CycleTextModel,  true, tm, nullptr },
+        { "Voice", TouchResult::CycleVoiceModel,  true, vm,  nullptr },
+        { "Text",  TouchResult::CycleTextModel,   true, tm,  nullptr },
+        { "Debug", TouchResult::ToggleVoiceDebug, true, dbg, nullptr },
     };
-    layout_tiles(epd, tiles, 2, 22, 1);
+    layout_tiles(epd, tiles, 3, 22, 1);
 }
 
 /* ─── render_mode ──────────────────────────────────────────────────
@@ -523,6 +528,10 @@ TouchResult dispatch_touch(int x, int y) {
             return TouchResult::None;
         case TouchResult::CycleTextModel:
             model_prefs_cycle_text();
+            toggle_flash(Mode::ModelsModal, action);
+            return TouchResult::None;
+        case TouchResult::ToggleVoiceDebug:
+            model_prefs_toggle_voice_debug();
             toggle_flash(Mode::ModelsModal, action);
             return TouchResult::None;
         case TouchResult::ToggleChannel:
