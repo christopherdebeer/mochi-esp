@@ -144,7 +144,28 @@ zone smaller → pet reads as further away, no extra UI needed). The
 ZoneCanvas "show pet" preview now draws the sprite into that cell's pet
 zone (square, foot on the bottom edge) instead of the old plan anchor.
 
-## Sequence
+### Image-gen guide — pet region resolution (done)
+`buildScenePrompt`/`buildGuideSvg` (shared `scenes-spec.ts`) draw a dashed-
+magenta **PET rectangle per cell** that gpt-image-2 must keep clear
+(background surfaces only — no foreground objects), so the generated art
+leaves room where the pet composites. That rectangle is now resolved in
+priority order:
+
+1. **this cell's kind-7 pet zone** when present — clears exactly where the
+   device composites the pet, and the zone is excluded from the dashed
+   *tap*-zone rects so it isn't drawn twice;
+2. else `plan.petAnchor?` (older plans still carry it);
+3. else the **firmware-fixed default** (96×96, centred-x, foot at the
+   device-fixed line) via `defaultPetAnchorForCell`.
+
+Consequence for the **initial** image: a from-scratch text draft
+(`draftScenePlan`) authors **no** pet zone (only the vision re-plan does),
+so first-generation art reserves the **default centered** spot (the
+planner system prompt likewise reserves the centre sub-cell). Per-cell
+pet-aware art kicks in on a *regenerate after saving* a plan that carries
+pet zones. Note the guide reads `plan.petAnchor?` defensively — required
+because retiring `petAnchor` from the studio's `saveScenePlan` means newly
+saved plans omit it (a non-guarded `plan.petAnchor.x` would have thrown).
 
 1. **Vision re-plan** — done (studio).
 2. **Per-cell pet zones** — **done**: firmware honour + planner authoring +
