@@ -41,7 +41,6 @@
 #include "epaper_driver_bsp.h"
 #include "epd_ui.h"
 #include "dev_menu.h"
-#include "lvgl_port.h"
 #include "nvs_creds.h"
 #include "wifi_prov.h"
 #include "wifi_sta.h"
@@ -650,14 +649,11 @@ extern "C" void app_main(void) {
     epd->EPD_Display();
     epd->EPD_DisplayPartBaseImage();
 
-    /* LVGL port — bridges the Waveshare e-paper + FT6336 touch into
-     * LVGL widgets, used by the dev_menu wheel screens (Info /
-     * Actions / WifiModal). Live pet rendering still uses the bare
-     * epd_ui draw helpers; LVGL is opt-in per-screen. */
-    lvgl_port_init(epd);
-
-    /* Dev-menu wheel: PWR-double-tap enters Info; subsequent PWR taps
-     * cycle Info → Actions → Info; 60 s inactivity returns to live. */
+    /* Dev-menu wheel: PWR-double-tap enters MenuP1; subsequent
+     * double-taps page deeper (P1 → P2 → P3 → P1); a single PWR tap
+     * escapes to Live; 60 s inactivity returns to Live. Rendered with
+     * the hand-rolled epd_ui draw helpers + a tap-rect registry (the
+     * LVGL backing was rolled back — see dev_menu.h history). */
     dev_menu::init(epd);
 
     /* Factory-reset watchdog. Runs in parallel with everything from
@@ -2147,20 +2143,15 @@ extern "C" void app_main(void) {
                 s_net_ip, s_net_ssid,
                 (int)s_net_phase, batt_pct_now,
                 pet_status_buf);
-            /* (LVGL is pumped by its own dispatcher task at ~33 Hz —
-             * see lvgl_port.cpp's lv_task. Polling here was too slow
-             * for drag-vs-tap discrimination during menu scrolling.) */
             if (dev_menu::active()) {
                 if (got_touch) {
-                    /* Action buttons are LVGL widgets now — LVGL's
-                     * indev hit-tests them itself; dispatch_touch just
-                     * returns whatever click event fired (or None on a
-                     * miss). Pre-LVGL the menu was a hand-rolled
-                     * tap-rect list and any miss exited the wheel —
-                     * but with LVGL the user expects taps to stay in
-                     * the menu (so they can scroll lists, retry a
-                     * misaligned tap, etc.). Only exit when an actual
-                     * action fired, or when the user PWR-taps. */
+                    /* dev_menu hand-rolls its hit-testing: dispatch_touch
+                     * resolves the tap against the current screen's
+                     * tap-rect registry and returns the action it landed
+                     * on (or None on a miss / non-actionable area). A
+                     * miss keeps the menu up so the user can re-aim;
+                     * PWR×1 is the escape. We only exit to Live when a
+                     * real, non-placeholder action committed. */
                     const auto act = dev_menu::dispatch_touch(
                         (int)ev.x, (int)ev.y);
                     const bool action_fired =
@@ -2250,10 +2241,9 @@ extern "C" void app_main(void) {
                              * page has shape while the substrate
                              * memory ledger + world places list get
                              * wired up. For now: brief toast straight
-                             * to e-paper, then force LVGL to repaint
-                             * its (still-loaded) menu screen so the
-                             * kid lands back on MenuP1 rather than a
-                             * stale toast frame. */
+                             * to e-paper, then dev_menu::repaint() the
+                             * current page so the kid lands back on
+                             * MenuP1 rather than a stale toast frame. */
                             ESP_LOGI(TAG, "dev_menu → %s (not yet wired)",
                                 act == dev_menu::TouchResult::Memories
                                     ? "memories" : "places");
@@ -2266,19 +2256,16 @@ extern "C" void app_main(void) {
                             epd->EPD_Init_Partial();
                             epd->EPD_DisplayPart();
                             vTaskDelay(pdMS_TO_TICKS(1200));
-                            /* Drain any touch events the user
-                             * generated while the toast was on screen
-                             * (a finger lingering past tap-release
-                             * registers as a fresh press during the
-                             * 1.2 s sleep). Without this, the LVGL
-                             * dispatcher catches the late press →
-                             * release transition and stamps a
-                             * pending_action on whatever button sits
-                             * under the finger — committing the wrong
-                             * action when the menu next reads its
-                             * latch. */
+                            /* Drain any touch events the user generated
+                             * while the toast was on screen (a finger
+                             * lingering past tap-release registers as a
+                             * fresh press during the 1.2 s sleep) so the
+                             * stale press doesn't dispatch against the
+                             * repainted menu. Then repaint the menu page
+                             * so the kid lands back on MenuP1 rather than
+                             * the toast frame. */
                             drain_next_touch = true;
-                            lvgl_port_force_full_refresh();
+                            dev_menu::repaint();
                             break;
                         case dev_menu::TouchResult::WifiSwitch: {
                             /* Runtime switch to a stored network — no
@@ -2330,11 +2317,8 @@ extern "C" void app_main(void) {
                         case dev_menu::TouchResult::None:
                         default:
                             /* Touch missed all buttons (or hit a non-
-                             * actionable area). Stay in the menu —
-                             * pre-LVGL this was the "exit on miss"
-                             * path, but LVGL widgets need touches to
-                             * remain so users can re-aim, scroll, and
-                             * generally interact normally. */
+                             * actionable area). Stay in the menu so the
+                             * user can re-aim; PWR×1 is the escape. */
                             break;
                     }
                     /* Either way, we've consumed this touch event for

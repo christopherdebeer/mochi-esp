@@ -43,25 +43,11 @@ dependencies:
   # design/07-voice-architecture.md § "Software-reference AEC scaffold").
   espressif/esp-sr: "^2.4.4"
 
-  # v0.1.6 — LVGL for the dev_menu wheel.
-  #
-  # Provides Info/Actions/WifiModal screens with bigger fonts,
-  # scrollable lists, and proper button hit-tracking. We bind LVGL
-  # to the existing Waveshare 1.54" e-paper via a 1bpp flush_cb
-  # in lvgl_port.{cpp,h}; touch is bridged through the same
-  # `touch::wait_event` queue main.cpp uses, polled non-blocking
-  # in the indev read_cb.
-  #
-  # Monochrome 1bpp (LV_COLOR_DEPTH=1) keeps the framebuffer at
-  # 200×200/8 = 5 KB; widget workspace in PSRAM via LVGL's mem
-  # hooks. Refresh policy is hand-rolled inside the flush_cb:
-  # partials by default, full clear-and-redraw every Nth update
-  # to clear ghost. LVGL doesn't model that, but its dirty-rect
-  # bookkeeping at least lets us suppress refresh entirely when
-  # nothing changed.
-  #
-  # Only the dev_menu screens use LVGL today. The Live pet render,
-  # boot splash, and provisioning paths stay on the bare epaper_driver
-  # / epd_ui draw helpers — they're infrequent and the existing code
-  # works.
-  lvgl/lvgl: "^9.2.0"
+  # NOTE: LVGL (lvgl/lvgl) was added in v0.1.6 to back the dev_menu
+  # wheel and rolled back in v0.3.x. On the FT6336 / e-paper combo its
+  # drag-vs-tap dispatcher was janky (a 33 Hz polling task feeding the
+  # indev just to discriminate scroll from tap, plus a flush_cb
+  # rate-limiter to stop the panel strobing) and bought nothing over a
+  # hand-rolled tap-rect menu. dev_menu now renders through the bare
+  # epd_ui draw helpers again; no managed UI dependency. See
+  # dev_menu.h history + firmware/main/dev_menu.cpp.
