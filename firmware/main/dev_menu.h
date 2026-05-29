@@ -42,7 +42,11 @@
  * History:
  *   v0.1.5 — 4-slot wheel (Splash / Settings / Actions / Wifi).
  *   v0.1.6 — collapsed to 2 slots (Info / Actions); WifiModal off Actions.
- *   v0.1.7 — single Menu screen (info header + actions); LVGL-backed.
+ *   v0.1.7 — risk-paged P1/P2/P3 + Wifi/Models modals; LVGL-backed.
+ *   v0.3.x — LVGL rolled back: same pages/gestures, but rendered with
+ *            the hand-rolled epd_ui draw helpers + a tap-rect registry
+ *            again (LVGL's drag-vs-tap dispatcher was janky on the
+ *            FT6336 / e-paper and bought nothing over hand-rolled).
  *
  * The module owns:
  *   - the current mode (Live / Menu / WifiModal)
@@ -125,6 +129,12 @@ bool active(void);
  * when something else needs the screen (e.g. a touch gesture or
  * a sleep request). The next main-loop tick will redraw the pet. */
 void exit_to_live(void);
+
+/* Re-draw the current (non-Live) screen. main.cpp calls this after it
+ * has drawn a transient toast directly to the panel over a menu page
+ * (e.g. the Memories/Places "coming soon" message) and wants the menu
+ * to come back. No-op while Live. */
+void repaint(void);
 
 /* Touch-driven actions on the active wheel screen. Returned values
  * tell main.cpp what (if anything) to do AFTER dev_menu has

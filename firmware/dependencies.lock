@@ -103,20 +103,12 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.21.1
-  lvgl/lvgl:
-    component_hash: 184e532558c1c45fefed631f3e235423d22582aafb4630f3e8885c35281a49ae
-    dependencies: []
-    source:
-      registry_url: https://components.espressif.com/
-      type: service
-    version: 9.5.0
 direct_dependencies:
 - espressif/esp-sr
 - espressif/esp_audio_codec
 - espressif/esp_codec_dev
 - espressif/esp_peer
 - joltwallet/littlefs
-- lvgl/lvgl
 manifest_hash: f3bf26c58f21cc63e02c51d560940e5597e56c4b1ae8c0d9a5d02b002cff3ccd
 target: esp32s3
 version: 2.0.0
