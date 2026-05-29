@@ -117,7 +117,7 @@ bool pet_sync_consolidation_advised(void);
 void pet_sync_post_voice_session(int duration_s, const char *model,
                                  const char *voice, const char *end_reason,
                                  int turns, int in_tok, int out_tok,
-                                 int total_tok);
+                                 int total_tok, const char *transcript_json);
 
 /* Travel to a place by id (design/17): POST /api/places/:id/enter, and on
  * success optimistically set the local location + sheetId so the device's

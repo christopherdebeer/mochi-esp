@@ -22,6 +22,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -163,6 +164,12 @@ void voice_peer_stop(void);
  * the realtime_sessions row. Any out-pointer may be NULL. */
 void voice_peer_get_session_stats(int *turns, int *in_tok,
                                   int *out_tok, int *total_tok);
+
+/* Emit the session's paired (user, reply) transcript turns as a JSON
+ * array string — [{"user":"…","reply":"…"}, …] — into `out` (design/27).
+ * Bounded to ~12 turns × ~160 chars. Read on the main task AFTER
+ * voice_peer_stop. Empty array "[]" when nothing was transcribed. */
+void voice_peer_get_transcript_json(char *out, size_t cap);
 
 #ifdef __cplusplus
 }

@@ -69,6 +69,19 @@ static atomic_int s_sess_in_tok;
 static atomic_int s_sess_out_tok;
 static atomic_int s_sess_total_tok;
 
+/* Per-session transcript accumulator (design/27): paired (user, reply)
+ * turns, so the session-end POST can ship them as `talked` events with
+ * content for consolidation to metabolise (the device previously logged
+ * only a contentless talked event). Written on the peer worker task as
+ * transcripts arrive; read on the main task AFTER voice_peer_stop (same
+ * post-stop ordering as the token stats), so no lock is needed. */
+#define TX_MAX_TURNS 12
+#define TX_STR_MAX   160
+static char s_tx_user[TX_MAX_TURNS][TX_STR_MAX];
+static char s_tx_reply[TX_MAX_TURNS][TX_STR_MAX];
+static int  s_tx_count;
+static char s_tx_pending_user[TX_STR_MAX];
+
 /* Mirror an ESP_LOGI to both serial and the voice diag buffer.
  * voice_diag is a no-op until reset() is called by start, and
  * survives USB disconnect via flush() in stop. */
@@ -800,6 +813,16 @@ static int pc_on_data(esp_peer_data_frame_t *frame, void *ctx) {
                      * bubble (final text, not streamed). Supersedes any
                      * in-flight "thinking" bubble. */
                     voice_ui_post(VOICE_UI_SPOKEN, t->valuestring);
+                    /* design/27: pair with the last user turn + bank it
+                     * for the session-end `talked` POST (consolidation). */
+                    if (s_tx_count < TX_MAX_TURNS) {
+                        snprintf(s_tx_user[s_tx_count], TX_STR_MAX, "%s",
+                            s_tx_pending_user);
+                        snprintf(s_tx_reply[s_tx_count], TX_STR_MAX, "%s",
+                            t->valuestring);
+                        s_tx_count++;
+                    }
+                    s_tx_pending_user[0] = 0;
                 }
             } else {
                 /* conversation.item.done — only log when role=user.
@@ -820,6 +843,10 @@ static int pc_on_data(esp_peer_data_frame_t *frame, void *ctx) {
                                     part, "transcript");
                                 if (cJSON_IsString(tr) && tr->valuestring) {
                                     voice_diag_log("USER: %.200s", tr->valuestring);
+                                    /* design/27: hold for pairing with the
+                                     * next assistant transcript. */
+                                    snprintf(s_tx_pending_user, TX_STR_MAX,
+                                        "%s", tr->valuestring);
                                     break;
                                 }
                                 cJSON *tx = cJSON_GetObjectItemCaseSensitive(
@@ -1152,6 +1179,25 @@ void voice_peer_get_session_stats(int *turns, int *in_tok,
     if (total_tok) *total_tok = atomic_load(&s_sess_total_tok);
 }
 
+void voice_peer_get_transcript_json(char *out, size_t cap) {
+    if (!out || cap == 0) return;
+    out[0] = 0;
+    cJSON *arr = cJSON_CreateArray();
+    if (!arr) return;
+    int n = s_tx_count > TX_MAX_TURNS ? TX_MAX_TURNS : s_tx_count;
+    for (int i = 0; i < n; i++) {
+        if (!s_tx_user[i][0] && !s_tx_reply[i][0]) continue;
+        cJSON *o = cJSON_CreateObject();
+        if (!o) break;
+        cJSON_AddStringToObject(o, "user", s_tx_user[i]);
+        cJSON_AddStringToObject(o, "reply", s_tx_reply[i]);
+        cJSON_AddItemToArray(arr, o);
+    }
+    char *s = cJSON_PrintUnformatted(arr);
+    cJSON_Delete(arr);
+    if (s) { snprintf(out, cap, "%s", s); cJSON_free(s); }
+}
+
 int voice_peer_start(const char *openai_key, const char *instructions,
                      const char *tools_json) {
     if (atomic_load(&s_peer.running)) {
@@ -1162,6 +1208,8 @@ int voice_peer_start(const char *openai_key, const char *instructions,
     atomic_store(&s_sess_in_tok, 0);
     atomic_store(&s_sess_out_tok, 0);
     atomic_store(&s_sess_total_tok, 0);
+    s_tx_count = 0;
+    s_tx_pending_user[0] = 0;
     if (!openai_key || !*openai_key) {
         ESP_LOGE(TAG, "no openai key");
         return -1;

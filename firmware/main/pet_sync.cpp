@@ -357,23 +357,36 @@ bool pet_sync_consolidation_advised(void) {
 void pet_sync_post_voice_session(int duration_s, const char *model,
                                  const char *voice, const char *end_reason,
                                  int turns, int in_tok, int out_tok,
-                                 int total_tok) {
+                                 int total_tok, const char *transcript_json) {
     struct mochi_pair_creds creds;
     if (!pair_creds_load(&creds) || !creds.pet_id[0]) return;
 
     char sid[40];
     snprintf(sid, sizeof(sid), "dev-%08lx%08lx",
         (unsigned long)esp_random(), (unsigned long)esp_random());
-    char body[320];
-    snprintf(body, sizeof(body),
+
+    /* design/27: ship the paired transcript turns so the server can log
+     * `talked` events with content for consolidation. The array can run
+     * a few KB, so build the body on the heap. An empty "[]" is omitted. */
+    const bool have_tx = transcript_json && transcript_json[0] &&
+        strcmp(transcript_json, "[]") != 0;
+    const size_t tlen = have_tx ? strlen(transcript_json) : 0;
+    const size_t cap_sz = 400 + tlen;
+    char *body = (char *)malloc(cap_sz);
+    if (!body) { ESP_LOGW(TAG, "voice-session body alloc failed"); return; }
+    int n = snprintf(body, cap_sz,
         "{\"session_id\":\"%s\",\"duration_s\":%d,\"model\":\"%s\",\"voice\":\"%s\","
         "\"end_reason\":\"%s\",\"turn_count\":%d,\"in_tok\":%d,\"out_tok\":%d,"
-        "\"total_tok\":%d}",
+        "\"total_tok\":%d",
         sid, duration_s,
         model ? model : "gpt-realtime",
         voice ? voice : "marin",
         end_reason ? end_reason : "ended",
         turns, in_tok, out_tok, total_tok);
+    if (n > 0 && (size_t)n < cap_sz && have_tx) {
+        n += snprintf(body + n, cap_sz - n, ",\"turns\":%s", transcript_json);
+    }
+    if (n > 0 && (size_t)n < cap_sz) snprintf(body + n, cap_sz - n, "}");
 
     char hdr_pet[96];
     snprintf(hdr_pet, sizeof(hdr_pet), "X-Pet-Id: %s", creds.pet_id);
@@ -384,6 +397,7 @@ void pet_sync_post_voice_session(int duration_s, const char *model,
     body_capture_t cap = { NULL, 0 };
     int rc = https_post(url, headers, body, capture_body, &cap);
     free(cap.body);
+    free(body);
     if (rc != 0) ESP_LOGW(TAG, "voice-session post rc=%d", rc);
 }
 

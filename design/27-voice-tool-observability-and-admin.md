@@ -244,10 +244,16 @@ new `backend/costumes-device.ts` (costume orchestration).
   skips when there's genuinely no material. (Confirmed live the gate
   normally blocks: "not enough activity (0/3 talked events since last
   run)" — consistent with the device-voice talk-transcript gap below.)
-  Related open gap (not yet built): device voice posts contentless
-  `talked` events, so consolidation has no on-device dialogue to
-  reflect on — only `set_internal_observation` notes. Posting the
-  transcript as `talked` data is the fix.
+- **Talked-content for consolidation** (follow-up scope): shipped +
+  verified. `voice_peer` now accumulates paired (user, reply) transcript
+  turns during a session; `pet_sync_post_voice_session` ships them in the
+  session-end POST; the server (`/api/device/voice-session`) logs each as
+  a `talked` event `{user, reply, via:"device-voice"}` — the exact shape
+  `gatherConsolidationContext` reads. Closes the gap where device voice
+  produced only contentless `talked` events, so consolidation now has
+  real on-device dialogue (not just `set_internal_observation` notes) to
+  metabolise. Verified live: a session POST with 2 turns logged 2 talked
+  events with content.
 - **E — imagine revise + costume**: *partial / scoped*. The stale
   "v0 stub" comment is corrected (`imagine_place` runs the full device
   pipeline). Remaining, deliberately not rushed because both need work

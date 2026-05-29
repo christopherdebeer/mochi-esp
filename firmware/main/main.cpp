@@ -2695,8 +2695,15 @@ extern "C" void app_main(void) {
                 voice_peer_get_session_stats(&turns, &in_tok, &out_tok, &total_tok);
                 char vmodel[48];
                 model_prefs_voice(vmodel, sizeof(vmodel));
+                /* design/27: ship the session transcript so the server
+                 * logs `talked` events with content for consolidation.
+                 * Heap buffer — the array can run a few KB; the worker
+                 * has stopped by now so the accumulator is stable. */
+                char *tx = (char *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+                if (tx) voice_peer_get_transcript_json(tx, 4096);
                 pet_sync_post_voice_session(dur_s, vmodel, "marin",
-                    "ended", turns, in_tok, out_tok, total_tok);
+                    "ended", turns, in_tok, out_tok, total_tok, tx);
+                free(tx);
             }
         }
 
