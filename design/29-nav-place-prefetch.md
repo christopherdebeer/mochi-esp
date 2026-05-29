@@ -82,6 +82,20 @@ pending. Each drain blocks that single tick (~0.1 s warm HEAD, up to
 ~1.5 s cold GET), but touches between ticks are still serviced, so the
 cost is spread and never stacks. Re-filled on every travel.
 
+### 6. Cold-boot uses the cached home (offline-aware first frame)
+
+Downloaded packs already persist across boots in LittleFS (ETag-keyed),
+but the pre-WiFi first frame for **home** always rendered from the
+*embedded* baseline — so an offline cold boot showed the factory bundle
+even when a newer `scene-bundle-a` was synced last session. Place packs
+didn't have this gap (the deep-sleep restore loads them from LittleFS via
+`pack_cache_load_geom_only`). New `scene_pack_init_cached()` (backed by
+`pack_cache_load_only`, a network-free `<sheet>.pack` LittleFS read) now
+boots home from the last server-synced bundle when cached, falling back to
+embedded on a miss. `open_into_active` seeds `s_home_bytes` from whatever
+it picks, so `scene_pack_load_home()` restores the same bundle. The
+post-WiFi `scene_pack_init()` still ETag-refreshes against the server.
+
 ### 5. Immediate tap feedback (the "unresponsive" symptom)
 
 Before the blocking `enter_place` POST, the `nav_place` handler now paints

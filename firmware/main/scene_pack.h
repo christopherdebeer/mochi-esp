@@ -48,6 +48,16 @@ bool scene_pack_init(void);
  * Idempotent. */
 bool scene_pack_init_embedded(void);
 
+/* Cold-boot bring-up that PREFERS the last server-synced home bundle
+ * from the LittleFS cache over the embedded baseline, falling back to
+ * embedded on a cache miss. Network-free (cache-only), so it's safe
+ * before WiFi — like scene_pack_init_embedded but offline-aware, so a
+ * device that synced a newer "scene-bundle-a" last session shows it on
+ * the very first frame instead of the factory bundle until net_worker
+ * re-syncs. The post-WiFi scene_pack_init() still ETag-refreshes.
+ * Idempotent. See design/29. */
+bool scene_pack_init_cached(void);
+
 /* Swap the active scene pack to a caller-provided MPK1 blob — e.g. a
  * freshly imagined place fetched into PSRAM (design/16). The bytes must
  * OUTLIVE the swap: pass a heap/PSRAM buffer that is never freed, not a

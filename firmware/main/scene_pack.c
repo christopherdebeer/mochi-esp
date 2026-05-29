@@ -64,6 +64,19 @@ bool scene_pack_init_embedded(void) {
     return open_into_active(_binary_scenes_a_mpk_start, "embedded");
 }
 
+bool scene_pack_init_cached(void) {
+    if (s_open) return true;
+    /* Prefer the last server-synced bundle persisted in LittleFS; it's
+     * the same "scene-bundle-a.pack" blob pack_cache_active writes after
+     * a network refresh, so on an offline cold boot we show the authored
+     * home rather than the embedded factory one. open_into_active seeds
+     * s_home_bytes from whatever we pick, so scene_pack_load_home() later
+     * restores this same bundle. */
+    const uint8_t *cached = pack_cache_load_only("scene-bundle-a");
+    if (cached && open_into_active(cached, "cache")) return true;
+    return open_into_active(_binary_scenes_a_mpk_start, "embedded");
+}
+
 bool scene_pack_init(void) {
     /* "Sync at boot" path: pack_cache_active hits the network. Idempotent
      * once WiFi is up — re-running after a prior embedded init upgrades

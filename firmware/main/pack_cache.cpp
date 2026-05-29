@@ -184,6 +184,15 @@ const uint8_t *pack_cache_load_geom_only(const char *sheet,
     return load_cached(cache_sheet);
 }
 
+const uint8_t *pack_cache_load_only(const char *sheet) {
+    if (!sheet) return nullptr;
+    /* Plain "<sheet>.pack" key — mirrors pack_cache_active so the boot
+     * load and the post-WiFi refresh share the same LittleFS blob. */
+    char cache_sheet[48];
+    snprintf(cache_sheet, sizeof(cache_sheet), "%s.pack", sheet);
+    return load_cached(cache_sheet);
+}
+
 bool pack_cache_prefetch_geom(const char *sheet, uint16_t cw, uint16_t ch) {
     if (!sheet || !sheet[0]) return false;
     /* Same (sheet, cw, ch) cache key + URL as pack_cache_active_geom so

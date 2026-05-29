@@ -970,12 +970,15 @@ extern "C" void app_main(void) {
          * compiled (sprite_fetch / sprite_cache::load both still
          * exist) only for the unused MOCHI_SCENE_URL define and as
          * a future fallback for non-bundled scenes. */
-        /* Embedded-only — warm boot renders before WiFi is up; the
-         * full scene_pack_init() does a network probe through
-         * pack_cache_active that asserts inside lwip pre-init.
-         * net_worker calls scene_pack_init() once WiFi's online to
-         * upgrade to the server-synced pack and flag a re-render. */
-        if (scene_pack_init_embedded() &&
+        /* Cache-preferring, network-free bring-up — warm boot renders
+         * before WiFi is up, so the full scene_pack_init() (which probes
+         * the server through pack_cache_active) would assert inside lwip
+         * pre-init. scene_pack_init_cached() reads only LittleFS: it shows
+         * the last server-synced home bundle when one is cached, else the
+         * embedded baseline. net_worker calls scene_pack_init() once WiFi
+         * is online to ETag-refresh against the server + flag a re-render.
+         * design/29. */
+        if (scene_pack_init_cached() &&
             scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H)) {
             ESP_LOGI(TAG, "scene from pack idx=%u",
                 (unsigned)scene_pack_current());
