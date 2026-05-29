@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -18,6 +19,7 @@
 #include "cJSON.h"
 
 #include "device_diag.h"
+#include "ota_channel.h"
 
 static const char *TAG = "ota";
 
@@ -37,7 +39,12 @@ static constexpr size_t MANIFEST_MAX_BYTES = 4096;
 
 namespace {
 
-const char *g_manifest_url = nullptr;
+/* Per-channel manifest URLs (borrowed string literals from main.cpp).
+ * The poll loop picks one each cycle based on the persisted channel
+ * (ota_channel_get()), so a mid-session toggle takes effect at the
+ * next check without restarting the task. */
+const char *g_stable_url = nullptr;
+const char *g_beta_url   = nullptr;
 volatile bool g_reboot_ready = false;
 volatile bool g_task_started = false;
 /* Set by ota_update::check_now() (Settings → "update now"); cuts the
@@ -156,11 +163,69 @@ static bool parse_semver(const char *s, int *maj, int *min, int *pat) {
     return sscanf(s, "%d.%d.%d", maj, min, pat) == 3;
 }
 
-/* Compare two version strings via semver triplet. Returns:
+/* Pre-release tag of a version string, or nullptr if it's a plain
+ * release. That's everything after the first '-' (build metadata after
+ * a '+' is dropped — we never emit it). For "0.3.0-beta.7" this is
+ * "beta.7"; for "0.3.0" it's nullptr. */
+static const char *prerelease_of(const char *s) {
+    if (!s) return nullptr;
+    if (*s == 'v') s++;
+    const char *dash = strchr(s, '-');
+    return dash ? dash + 1 : nullptr;
+}
+
+/* Compare two pre-release strings per semver §11: dot-separated
+ * identifiers compared left to right; all-numeric identifiers compared
+ * numerically, otherwise ASCII; numeric ranks below alphanumeric; if
+ * one runs out of identifiers first (and all preceding were equal) the
+ * shorter set is the lower precedence. Returns -1/0/+1. */
+static int compare_prerelease(const char *a, const char *b) {
+    while (*a && *b) {
+        const char *ae = a; while (*ae && *ae != '.') ae++;
+        const char *be = b; while (*be && *be != '.') be++;
+        size_t alen = (size_t)(ae - a), blen = (size_t)(be - b);
+        bool anum = alen > 0, bnum = blen > 0;
+        for (const char *p = a; p < ae; p++) if (!isdigit((unsigned char)*p)) anum = false;
+        for (const char *p = b; p < be; p++) if (!isdigit((unsigned char)*p)) bnum = false;
+        int cmp;
+        if (anum && bnum) {
+            long av = strtol(a, nullptr, 10);
+            long bv = strtol(b, nullptr, 10);
+            cmp = (av > bv) - (av < bv);
+        } else if (anum != bnum) {
+            cmp = anum ? -1 : 1;   /* numeric < alphanumeric */
+        } else {
+            size_t n = alen < blen ? alen : blen;
+            cmp = strncmp(a, b, n);
+            if (cmp == 0) cmp = (int)alen - (int)blen;
+        }
+        if (cmp != 0) return cmp < 0 ? -1 : 1;
+        a = (*ae == '.') ? ae + 1 : ae;
+        b = (*be == '.') ? be + 1 : be;
+    }
+    if (*a) return 1;    /* a has further identifiers → higher precedence */
+    if (*b) return -1;
+    return 0;
+}
+
+/* Compare two version strings by semver precedence. Returns:
  *    < 0  if a is older than b
  *    == 0 if equal
  *    > 0  if a is newer than b
- * Falls back to strcmp on either side failing to parse. */
+ * Falls back to strcmp if either triplet fails to parse.
+ *
+ * The triplet (major.minor.patch) dominates; on a tie the pre-release
+ * tag breaks it. A plain release outranks any pre-release of the same
+ * triplet (semver §11: "1.0.0" > "1.0.0-beta"). This is what lets the
+ * beta channel work: a "0.3.0-beta.7" build sorts above the previous
+ * "0.2.x" stable (so beta devices roll forward) yet below the eventual
+ * "0.3.0" release (so they land on stable when it ships), and successive
+ * "-beta.<n>" builds order by their monotonic CI run number.
+ *
+ * Note the running version now comes from firmware/version.txt
+ * (PROJECT_VER → esp_app_desc), so it's a clean "0.3.0" rather than the
+ * old `git describe` "0.3.0-2-gSHA". A clean local build therefore
+ * outranks the stable manifest of the same triplet and won't downgrade. */
 static int compare_versions(const char *a, const char *b) {
     int amaj = 0, amin = 0, apat = 0;
     int bmaj = 0, bmin = 0, bpat = 0;
@@ -169,7 +234,13 @@ static int compare_versions(const char *a, const char *b) {
     if (!aok || !bok) return strcmp(a ? a : "", b ? b : "");
     if (amaj != bmaj) return amaj - bmaj;
     if (amin != bmin) return amin - bmin;
-    return apat - bpat;
+    if (apat != bpat) return apat - bpat;
+    const char *apr = prerelease_of(a);
+    const char *bpr = prerelease_of(b);
+    if (!apr && !bpr) return 0;
+    if (!apr) return 1;    /* a release, b pre-release → a newer */
+    if (!bpr) return -1;
+    return compare_prerelease(apr, bpr);
 }
 
 /* esp_https_ota client config callback — invoked by the OTA helper
@@ -226,7 +297,18 @@ void ota_task(void *) {
         char remote_version[32] = {};
         char bin_url[256] = {};
 
-        if (!fetch_manifest(g_manifest_url,
+        /* Pick the manifest for the channel chosen on-device. Read each
+         * cycle so a dev_menu toggle (which also nudges check_now) is
+         * honoured without restarting the task. Beta falls back to the
+         * stable URL if main never supplied one. */
+        const ota_channel_t channel = ota_channel_get();
+        const char *manifest_url =
+            (channel == OTA_CHANNEL_BETA && g_beta_url) ? g_beta_url : g_stable_url;
+        ESP_LOGI(TAG, "checking %s channel: %s",
+            ota_channel_name(channel), manifest_url ? manifest_url : "(none)");
+
+        if (!manifest_url ||
+            !fetch_manifest(manifest_url,
                             remote_version, sizeof(remote_version),
                             bin_url, sizeof(bin_url))) {
             ESP_LOGI(TAG, "no manifest this cycle; sleeping");
@@ -235,26 +317,24 @@ void ota_task(void *) {
         }
 
         const char *running = ota_update::current_version();
-        /* Compare versions semver-numerically rather than via strcmp.
+        /* Compare by semver precedence (pre-release aware), not strcmp.
          *
-         * Running version comes from esp_app_get_description()->version,
-         * which defaults to `git describe --tags --dirty`. On a clean
-         * tagged build that's "v0.0.3"; on the commit *after* a tag it's
-         * "v0.0.3-2-g3b284ff". The manifest version comes from the CI
-         * workflow's ${TAG#v} strip, so it's "0.0.3".
+         * Running version is esp_app_get_description()->version, which
+         * now comes from firmware/version.txt (PROJECT_VER) — a clean
+         * "0.3.0" on stable, "0.3.0-beta.<n>" on a beta build. The
+         * manifest version is the same string the CI baked in.
          *
-         * Two cases we want to suppress upgrade for:
-         *   1. running == remote — already on the latest tag.
-         *   2. running > remote  — hand-flashed dev build with a higher
-         *      semver than the latest published release. Without this
-         *      check, OTA would happily downgrade us. Bites local
-         *      testing of unpublished work.
+         * Two cases we suppress an upgrade for:
+         *   1. running == remote — already on this build.
+         *   2. running >  remote — a higher-precedence build than the
+         *      manifest (e.g. a clean local build of the next version,
+         *      or a beta sitting above the older stable on that channel).
+         *      Without this, OTA would downgrade us.
          *
-         * Only "running < remote" actually triggers an upgrade. The
-         * dev-build trailer ("-N-gSHA") is ignored by parse_semver,
-         * so a "v0.0.3-2-gXYZ" build is treated as identical-version
-         * to "0.0.3" and stays put — that's correct, the user is
-         * testing local work past the tag. */
+         * Only "running < remote" triggers an upgrade — which is exactly
+         * what carries a beta device forward through "-beta.<n>" builds
+         * and onto the matching stable when it ships (see compare_versions
+         * for the precedence rules). */
         int cmp = compare_versions(running, remote_version);
         if (cmp >= 0) {
             ESP_LOGI(TAG, "no upgrade: running=%s remote=%s (cmp=%d); sleeping",
@@ -306,16 +386,19 @@ bool mark_valid_if_pending() {
     return false;
 }
 
-void start_background_task(const char *manifest_url) {
+void start_background_task(const char *stable_url, const char *beta_url) {
     if (g_task_started) {
         ESP_LOGW(TAG, "task already started; ignoring");
         return;
     }
-    if (!manifest_url || !manifest_url[0]) {
-        ESP_LOGE(TAG, "manifest URL empty; not starting task");
+    if (!stable_url || !stable_url[0]) {
+        ESP_LOGE(TAG, "stable manifest URL empty; not starting task");
         return;
     }
-    g_manifest_url = manifest_url;
+    g_stable_url = stable_url;
+    /* beta_url is optional — if null, the beta channel falls back to
+     * stable in the poll loop. */
+    g_beta_url = (beta_url && beta_url[0]) ? beta_url : nullptr;
     /* 6 KB stack — TLS handshakes inside esp_https_ota use a lot of
      * mbedtls scratch space. Lower priority than the touch/render
      * loop (tskIDLE_PRIORITY+1) so OTA work never starves the UI. */

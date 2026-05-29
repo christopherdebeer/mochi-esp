@@ -9,8 +9,9 @@
 Through M13 the only path to new firmware was USB. That's tolerable
 during bring-up — the device sits a metre from the toolchain — but
 it's a bad steady state for an artwork-on-the-shelf pet. We want to
-ship a bug fix or a new scene contract by tagging a release and
-having every device in the wild pull it in by the next morning.
+ship a bug fix or a new scene contract by bumping a checked-in
+version and having every device in the wild pull it in by the next
+morning.
 
 ## Constraints
 
@@ -47,26 +48,52 @@ so first-boot pays the full sprite-cache-cold cost once.
 
 ## Release pipeline
 
-`.github/workflows/firmware-release.yml`:
+`.github/workflows/firmware-release.yml`. The release version is the
+single source of truth in **`firmware/version.txt`** (e.g. `0.3.0`),
+which ESP-IDF reads into `PROJECT_VER` → `esp_app_get_description()->version`.
+No hand-tagging.
 
-- Triggered by any `v*` tag push.
-- Builds in the `espressif/idf:release-v5.3` container (matches
-  `firmware/README.md`'s pinned IDF version).
-- Publishes three artifacts to the GitHub Release:
-  - `eink-pet.bin` — the application image.
-  - `bootloader.bin` + `partition-table.bin` — for users doing the
-    one-time USB reflash.
-  - `latest.json` — the OTA manifest:
-    ```json
-    { "version": "0.1.0",
-      "url": "https://github.com/.../releases/download/v0.1.0/eink-pet.bin",
-      "sha256": "..." }
-    ```
+Two channels, matching what `ota_channel` fetches on-device:
 
-The version field comes from the tag (`v0.1.0` → `0.1.0`). On the
-device the same string is exposed via `esp_app_get_description()->version`
-(ESP-IDF defaults to `git describe` during build, and the CI checkout
-preserves tag history).
+- **stable** — on push to `main` (or a manual `workflow_dispatch`). Reads
+  `version.txt`; if no release for `v<version>` exists yet, builds and
+  publishes it as the *latest* release and tags `v<version>`. Pushes that
+  don't change the version are a no-op, so the flow is: **bump
+  `version.txt` in a PR → merge → released**.
+- **beta** — on pull requests into `main`. Builds with version
+  `<version.txt>-beta.<run_number>` baked in and refreshes a single
+  rolling **pre-release** with the fixed tag `beta`. The fixed tag gives
+  the device a stable URL (`/releases/download/beta/latest.json`); only
+  the newest beta build is live. Fork PRs are skipped (no write token).
+
+Both build in the `espressif/idf:release-v5.3` container (matches
+`firmware/README.md`'s pinned IDF version) and publish the same three
+artifacts to their release:
+
+- `eink-pet.bin` — the application image.
+- `bootloader.bin` + `partition-table.bin` — for the one-time USB reflash.
+- `latest.json` — the OTA manifest:
+  ```json
+  { "version": "0.3.0",
+    "url": "https://github.com/.../releases/download/v0.3.0/eink-pet.bin",
+    "sha256": "..." }
+  ```
+
+The manifest `version` is the exact `esp_app_get_description()->version`
+the build embedded, so the device's compare is string-for-string with
+what it's running.
+
+**Version precedence.** `ota_update`'s comparator is semver-aware
+(§11 pre-release ordering): a `-beta.<n>` build sorts *above* the previous
+stable but *below* the matching release. So a beta device rolls forward
+through betas and lands on the final stable when it ships. Practically:
+bump `version.txt` to the next target in the PR, so its betas (e.g.
+`0.3.0-beta.42`) are ahead of current stable (`0.2.x`).
+
+**Stable release notes.** The workflow appends a git-log changelog
+(previous `v*` tag → HEAD) plus GitHub's PR-based "What's Changed" to
+whatever was already drafted on the release (`append_body`), rather than
+overwriting it.
 
 ## Device flow
 
@@ -81,13 +108,13 @@ boot
  ↓
 ota_update::mark_valid_if_pending()    ← promotes a PENDING_VERIFY image
  ↓
-ota_update::start_background_task(MOCHI_OTA_MANIFEST_URL)
- ↓                                       └──► sleeps 30 s, then
-[existing boot path: RTC, SHTC3,           polls manifest;
- voice init, sprite cache, pairing,        if version differs from
- first render, touch loop]                 running, streams new .bin
- ↓                                         into inactive slot, flips
-[touch loop]                               otadata, sets reboot_ready
+ota_update::start_background_task(stable_url, beta_url)
+ ↓                                       └──► sleeps 30 s, then polls
+[existing boot path: RTC, SHTC3,           the channel's manifest
+ voice init, sprite cache, pairing,        (ota_channel_get()); if it's
+ first render, touch loop]                 newer than running, streams
+ ↓                                         new .bin into inactive slot,
+[touch loop]                               flips otadata, sets reboot_ready
  ↓
 if ota_update::reboot_ready() && !voice::is_active()
    && idle for ≥60 s:
@@ -123,10 +150,11 @@ TLS handshake competing.
   header validation is what we rely on for corruption detection.
   Adding sha256 closes a small gap (a maliciously crafted image that
   passes IDF header checks but isn't ours).
-- **Staged rollout / pet-id gating.** Today every device pulls the
-  same manifest. A future val.town `/api/firmware/latest` could
-  proxy to GitHub and gate by pet_id (e.g. ring-0 dev devices first),
-  with no device-side change.
+- **Staged rollout / pet-id gating.** The beta channel (dev menu →
+  RISK → `Channel: beta`, persisted in NVS via `ota_channel`) is the
+  manual first step: opt a device into pre-release builds. A future
+  val.town `/api/firmware/latest` could go further — proxy to GitHub
+  and gate by pet_id (e.g. ring-0 dev devices first) automatically.
 - **Update on USB-power only.** We could gate downloads on the
   battery sense reading >4 V (i.e. plugged in) to avoid draining a
   near-empty LiPo on a multi-MB download.

@@ -136,6 +136,7 @@ enum class TouchResult : uint8_t {
     ChangeWifi,       /* reboot into SoftAP provisioning (add a network) */
     ForgetWifi,       /* forget the joined SSID + reboot (flip to next known) */
     UpdateNow,        /* force an immediate OTA manifest check */
+    ToggleChannel,    /* flip OTA channel stable<->beta (handled in dev_menu) */
     RePair,           /* clear pairing + reboot into the pairing flow */
     GoHome,           /* reset the pet's location to home */
     SwitchWifi,       /* push the WifiModal sub-screen (in-place) */

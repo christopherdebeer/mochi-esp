@@ -50,6 +50,7 @@ idf_component_register(
         "pack_cache.cpp"
         "device_diag.c"
         "ota_update.cpp"
+        "ota_channel.c"
         "key_portal.cpp"
         "decay.c"
         "engagement.c"

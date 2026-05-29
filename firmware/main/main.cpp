@@ -127,14 +127,21 @@ static constexpr size_t SCENE_BYTES = (SCENE_W / 8) * SCENE_H;  /* 5000 */
 #define SCENE_NAV_FULL_EVERY 4
 #define MOCHI_PET_CELL_URL_BASE "https://mochi.val.run/devsprite/cell/pet-v1/"
 
-/* OTA — manifest is uploaded as a release asset by the GitHub
- * Actions workflow on every tag push. The `/releases/latest/download/`
- * URL is GitHub's redirector to the latest release's asset, so we
- * never have to bake a version number into firmware. The redirect
- * lands on objects.githubusercontent.com and is followed by the
- * default HTTP client. */
-#define MOCHI_OTA_MANIFEST_URL \
+/* OTA — manifests are uploaded as release assets by the GitHub Actions
+ * workflow. Two channels (the device picks one via ota_channel / the
+ * dev_menu toggle):
+ *   stable — `/releases/latest/download/`: GitHub's redirector to the
+ *            newest published, non-prerelease release. Set by merges to
+ *            main that bump firmware/version.txt.
+ *   beta   — `/releases/download/beta/`: the rolling "beta" prerelease
+ *            refreshed by PR builds. Fixed tag, so the URL is stable.
+ * Both redirect to objects.githubusercontent.com, followed by the
+ * default HTTP client. We no longer bake a version into firmware — the
+ * running version comes from firmware/version.txt (PROJECT_VER). */
+#define MOCHI_OTA_MANIFEST_URL_STABLE \
     "https://github.com/christopherdebeer/mochi-esp/releases/latest/download/latest.json"
+#define MOCHI_OTA_MANIFEST_URL_BETA \
+    "https://github.com/christopherdebeer/mochi-esp/releases/download/beta/latest.json"
 
 /* Pet cell geometry — pet-v1 template grid is 96×96. The fetcher
  * verifies the wire-format header matches before copying. */
@@ -491,7 +498,8 @@ static void net_worker(void *arg) {
      * freshly-installed pending image and starts the update poller. */
     ota_update::mark_valid_if_pending();
     ESP_LOGI(TAG, "running firmware version: %s", ota_update::current_version());
-    ota_update::start_background_task(MOCHI_OTA_MANIFEST_URL);
+    ota_update::start_background_task(MOCHI_OTA_MANIFEST_URL_STABLE,
+                                      MOCHI_OTA_MANIFEST_URL_BETA);
 
     /* Wall-clock sync for substrate timestamps. */
     time_sync_init();
