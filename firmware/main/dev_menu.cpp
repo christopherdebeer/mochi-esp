@@ -18,6 +18,7 @@
 #include "model_prefs.h"
 #include "ota_channel.h"
 #include "ota_update.h"
+#include "sprite_cache.h"   /* ui-v1 icon cells for the stat rows (design/30) */
 
 static const char *TAG = "dev_menu";
 
@@ -52,6 +53,79 @@ static char                 s_ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
 static int                  s_net_phase    = 0;
 static int                  s_batt_pct     = 0;
 static char                 s_pet_status[80] = {};
+/* Numeric pet stats [0,100] for MenuP1's icon + bar rows; <0 = unknown. */
+static int                  s_happy = -1;
+static int                  s_full  = -1;
+static int                  s_energy = -1;
+
+/* ─── ui-v1 icon cache (design/30) ──────────────────────────────────
+ *
+ * The home chrome already fetches + caches four ui-v1 cells as 48×48
+ * 2-plane (ink+mask) blobs under sprite_cache keys
+ * "<key>_icon_48x48_{ink,mask}" (main.cpp CARE_ICON_KEYS). The dev menu
+ * reuses those for the stat rows. We lazily load each requested key once
+ * into small PSRAM buffers; a miss (offline before the first fetch) just
+ * means the row falls back to a one-letter tag. */
+static constexpr int ICON_DIM   = 48;                       /* cached size */
+static constexpr int ICON_STRIDE = (ICON_DIM + 7) / 8;      /* 6 bytes/row */
+static constexpr int ICON_BYTES  = ICON_STRIDE * ICON_DIM;  /* 288 */
+
+struct IconSlot {
+    char     key[16];
+    uint8_t *ink;
+    uint8_t *mask;
+    bool     ok;
+};
+static constexpr int ICON_SLOTS = 6;
+static IconSlot s_icon_cache[ICON_SLOTS] = {};
+static int      s_icon_n = 0;
+
+/* Return the cached icon for `key`, loading it from sprite_cache on first
+ * use. Returns nullptr (and the caller draws a text fallback) on a cache
+ * miss or alloc failure. Idempotent + cheap after the first hit. */
+static const IconSlot *get_icon(const char *key) {
+    for (int i = 0; i < s_icon_n; i++)
+        if (strcmp(s_icon_cache[i].key, key) == 0)
+            return s_icon_cache[i].ok ? &s_icon_cache[i] : nullptr;
+    if (s_icon_n >= ICON_SLOTS) return nullptr;
+
+    IconSlot &slot = s_icon_cache[s_icon_n++];
+    snprintf(slot.key, sizeof(slot.key), "%s", key);
+    slot.ok = false;
+    slot.ink  = (uint8_t *)heap_caps_malloc(ICON_BYTES, MALLOC_CAP_SPIRAM);
+    slot.mask = (uint8_t *)heap_caps_malloc(ICON_BYTES, MALLOC_CAP_SPIRAM);
+    if (!slot.ink || !slot.mask) return nullptr;
+
+    char ink_s[40], mask_s[40];
+    snprintf(ink_s,  sizeof(ink_s),  "%s_icon_%dx%d_ink",  key, ICON_DIM, ICON_DIM);
+    snprintf(mask_s, sizeof(mask_s), "%s_icon_%dx%d_mask", key, ICON_DIM, ICON_DIM);
+    size_t gi = 0, gm = 0;
+    if (sprite_cache::load("ui-v1", ink_s,  slot.ink,  ICON_BYTES, &gi) && gi == ICON_BYTES &&
+        sprite_cache::load("ui-v1", mask_s, slot.mask, ICON_BYTES, &gm) && gm == ICON_BYTES) {
+        slot.ok = true;
+    }
+    return slot.ok ? &slot : nullptr;
+}
+
+/* Nearest-neighbour blit of a cached 48×48 2-plane icon into an out×out
+ * box at (x,y), drawing only its black ink (the tile/panel is white, so
+ * paper pixels need no write). Matches compositor.cpp's bit convention:
+ * MSB-first within a byte, mask bit 1 = transparent, ink bit 0 = black. */
+static void blit_icon(epaper_driver_display *epd, int x, int y, int out,
+                      const IconSlot *ic) {
+    if (!ic) return;
+    for (int oy = 0; oy < out; oy++) {
+        const int sy = oy * ICON_DIM / out;
+        for (int ox = 0; ox < out; ox++) {
+            const int sx = ox * ICON_DIM / out;
+            const int off = sy * ICON_STRIDE + (sx >> 3);
+            const uint8_t bit = (uint8_t)(1u << (7 - (sx & 7)));
+            if (ic->mask[off] & bit) continue;            /* transparent */
+            if ((ic->ink[off] & bit) == 0)                /* ink 0 = black */
+                epd->EPD_DrawColorPixel(x + ox, y + oy, DRIVER_COLOR_BLACK);
+        }
+    }
+}
 
 /* ─── Tile registry + hit-testing ──────────────────────────────────
  *
@@ -236,25 +310,6 @@ static void draw_glyphs_centered_in(epaper_driver_display *epd, int x, int w,
     draw_glyphs(epd, tx, y, scale, text, ink);
 }
 
-/* Draw a possibly-multiline ('\n'-separated) string, each line centred
- * on the panel, starting at `y`. Returns the y just below the block.
- * Used for the plain-text headers (pet status, device info) that sit
- * above the tile grid and must NOT look tappable. */
-static int draw_multiline_centered(epaper_driver_display *epd, int y,
-                                    const char *text, int line_h) {
-    char buf[96];
-    snprintf(buf, sizeof(buf), "%s", text);
-    char *line = buf;
-    while (line) {
-        char *nl = strchr(line, '\n');
-        if (nl) *nl = '\0';
-        epd_ui::draw_text_centered(epd, y, 1, line);
-        y += line_h;
-        line = nl ? nl + 1 : nullptr;
-    }
-    return y;
-}
-
 /* ─── Tiles ─────────────────────────────────────────────────────────*/
 
 static void draw_tile(epaper_driver_display *epd, int x, int y, int w, int h,
@@ -324,19 +379,59 @@ static void layout_tiles(epaper_driver_display *epd, const Tile *tiles, int n,
  * it to white in render_mode) and registers its tap-rects. The panel
  * refresh is driven by render_mode after these return. */
 
-/* Page 1: kid-facing. Pet-status header (plain text) + a 2×2 grid of
- * big, safe exploratory actions (Memories, Places, Go home). */
+/* One stat row (design/30): a 16 px ui-v1 icon on the left, a filled
+ * progress bar to `value`/100 across the middle, and the numeric value on
+ * the right. Falls back to a one-letter tag when the icon cell isn't
+ * cached yet (offline before the first ui-v1 fetch). Skipped if value<0. */
+static void draw_stat_row(epaper_driver_display *epd, int y, const char *key,
+                          char fallback, int value) {
+    if (value < 0) return;
+    if (value > 100) value = 100;
+    const int icon = 16;
+    const IconSlot *ic = get_icon(key);
+    if (ic) {
+        blit_icon(epd, MARGIN, y, icon, ic);
+    } else {
+        char fb[2] = { fallback, 0 };
+        draw_glyphs(epd, MARGIN + 4, y + (icon - 8) / 2, 1, fb, DRIVER_COLOR_BLACK);
+    }
+    char vbuf[8];
+    snprintf(vbuf, sizeof(vbuf), "%d", value);
+    const int val_w = 3 * 8;                                   /* room for "100" */
+    const int bar_x = MARGIN + icon + 6;
+    const int bar_w = (MOCHI_EPD_WIDTH - MARGIN - val_w - 4) - bar_x;
+    const int bar_h = 12;
+    const int bar_y = y + (icon - bar_h) / 2;
+    draw_rect_border(epd, bar_x, bar_y, bar_w, bar_h);
+    const int fill_w = ((bar_w - 4) * value) / 100;
+    if (fill_w > 0)
+        fill_rect(epd, bar_x + 2, bar_y + 2, fill_w, bar_h - 4, DRIVER_COLOR_BLACK);
+    draw_glyphs(epd, MOCHI_EPD_WIDTH - MARGIN - (int)strlen(vbuf) * 8,
+                y + (icon - 8) / 2, 1, vbuf, DRIVER_COLOR_BLACK);
+}
+
+/* Page 1: kid-facing. Title (pet name + mood) + three icon/progress-bar
+ * stat rows (design/30) + a grid of big, safe exploratory actions. */
 static void render_menu_p1(epaper_driver_display *epd) {
-    int y = 6;
-    y = draw_multiline_centered(epd,
-        y, s_pet_status[0] ? s_pet_status : "Mochi", 11);
-    if (y < 34) y = 34;
+    /* Title = first line of the status string (name + mood); the numeric
+     * second line is now the icon rows below. */
+    char title[sizeof(s_pet_status)];
+    snprintf(title, sizeof(title), "%s", s_pet_status[0] ? s_pet_status : "Mochi");
+    char *nl = strchr(title, '\n');
+    if (nl) *nl = '\0';
+    epd_ui::draw_text_centered(epd, 6, 1, title);
+
+    int y = 22;
+    draw_stat_row(epd, y, "heart", 'H', s_happy);  y += 20;
+    draw_stat_row(epd, y, "bowl",  'F', s_full);   y += 20;
+    draw_stat_row(epd, y, "star",  'E', s_energy); y += 20;
+
     const Tile tiles[] = {
         { "Memories", TouchResult::Memories, false, nullptr, nullptr },
         { "Places",   TouchResult::Places,   false, nullptr, nullptr },
         { "Go home",  TouchResult::GoHome,   false, nullptr, nullptr },
     };
-    layout_tiles(epd, tiles, 3, y, 2);
+    layout_tiles(epd, tiles, 3, y + 4, 2);
 }
 
 /* Page 2: settings — network/device info header + a 2-col grid of the
@@ -559,7 +654,8 @@ bool tick(epaper_driver_display * /*epd*/, bool /*paired*/,
           const char *pet_name, const char *version,
           const char *ip_str, const char *ssid,
           int net_phase, int batt_pct,
-          const char *pet_status) {
+          const char *pet_status,
+          int happy, int full, int energy) {
     const int64_t now_us = esp_timer_get_time();
     bool changed = false;
 
@@ -573,6 +669,7 @@ bool tick(epaper_driver_display * /*epd*/, bool /*paired*/,
     if (pet_status) snprintf(s_pet_status, sizeof(s_pet_status), "%s", pet_status);
     s_net_phase = net_phase;
     s_batt_pct  = batt_pct;
+    s_happy = happy; s_full = full; s_energy = energy;
 
     /* Consume any PWR presses the watcher latched since the last tick.
      * exchange returns the prior value and resets the flag — so a burst

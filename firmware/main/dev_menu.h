@@ -115,8 +115,14 @@ bool tick(epaper_driver_display *epd, bool paired,
           int net_phase, int batt_pct,
           /* Pet status snapshot for MenuP1's kid-facing header.
            * Formatted by the caller (mood + happiness/fullness/energy);
-           * dev_menu just renders it verbatim. nullptr → blank. */
-          const char *pet_status);
+           * dev_menu renders its FIRST line (name + mood) as the title.
+           * nullptr → blank. */
+          const char *pet_status,
+          /* Numeric stats [0,100] for MenuP1's icon + progress-bar rows
+           * (design/30). Same decayed values the pet_status text encodes;
+           * passed numerically so the bars + percentages render without
+           * re-parsing the string. <0 → row skipped. */
+          int happy, int full, int energy);
 
 /* Current wheel mode. Mode::Live means main.cpp owns the screen. */
 Mode current(void);

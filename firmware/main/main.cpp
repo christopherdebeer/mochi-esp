@@ -2165,6 +2165,7 @@ extern "C" void app_main(void) {
              * AND inside the inactivity-driven idle path is fine —
              * dev_menu's fallback is the pet name. */
             char pet_status_buf[80] = {};
+            int st_happy = -1, st_full = -1, st_energy = -1;
             {
                 int64_t now_ms = now_ms_wall();
                 pet_event_t slice[12];
@@ -2172,6 +2173,9 @@ extern "C" void app_main(void) {
                 pet_t decayed = current_pet_decayed(now_ms);
                 mood_t m = project_mood(&decayed, slice, n, now_ms);
                 const char *mname = mood_to_name(m);
+                st_happy  = (int)decayed.stats.happiness;
+                st_full   = (int)decayed.stats.fullness;
+                st_energy = (int)decayed.stats.energy;
                 snprintf(pet_status_buf, sizeof(pet_status_buf),
                     "%s  %s\nhappy %u  full %u  energy %u",
                     pair.pet_name[0] ? pair.pet_name : "mochi",
@@ -2187,7 +2191,8 @@ extern "C" void app_main(void) {
                 ota_update::current_version(),
                 s_net_ip, s_net_ssid,
                 (int)s_net_phase, batt_pct_now,
-                pet_status_buf);
+                pet_status_buf,
+                st_happy, st_full, st_energy);
             if (dev_menu::active()) {
                 if (got_touch) {
                     /* dev_menu hand-rolls its hit-testing: dispatch_touch
