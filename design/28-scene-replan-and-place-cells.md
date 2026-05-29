@@ -173,6 +173,21 @@ a pet zone per cell (e.g. `the-forest-a` has none — its "pet_rest"/
 "sleeping nook" entries are plain `rest` zones, not kind 7), so most cells
 legitimately fall back to the default until a pet zone is authored.
 
+### Every cell gets a pet zone — `withDefaultPet` (done)
+Follow-up to the "rely on the model?" question: the planner is unreliable
+about emitting a `pet` action per cell (the-forest-a got none). So
+`draftScenePlan` + the vision re-plan now wrap each cell's mapped zones in
+`withDefaultPet` (studio `api.ts`): if the cell has no kind-7 zone, it
+**synthesizes one at the device's default spot** (`defaultPetAnchor` /
+`petRegionSize` — centred-x, 96px sprite, foot on the ground), so the pet's
+placement is authored + draggable instead of leaning on the firmware
+fallback constant. Non-destructive: skipped when the cell is already at the
+8-zone cap (that cell keeps the firmware-anchor fallback), so authored
+zones are never displaced. A planner-authored pet is always kept as-is.
+The on-device render is unchanged when the synthesized zone equals the
+fallback — the win is that placement is now explicit, editable per cell,
+and visible in the ZoneCanvas without the dashed "default" ghost.
+
 ### Image-gen guide — pet region resolution (done)
 `buildScenePrompt`/`buildGuideSvg` (shared `scenes-spec.ts`) draw a dashed-
 magenta **PET rectangle per cell** that gpt-image-2 must keep clear
