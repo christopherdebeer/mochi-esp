@@ -23,6 +23,26 @@ Generate them (Icons panel) then the firmware migrates its `ui-v1` fetches
 sheet, one keying config, one generation pass. (That firmware pointer swap
 is the remaining step; `ui-v1` stays as the fallback until then.)
 
+### Icon cell size MUST be 80×80 (not the scene default 200)
+
+The device UI-icon path expects **80×80 native** cells (`main.cpp`
+`UI_CELL_NATIVE_W/H = 80`, an 800-byte buffer) which it downsamples to the
+48px `ICON`; it **rejects** any other size (`w != 80`). `ui-icons-a` was
+created at the scene default **200×200** — 2.5× oversized for a 48px target
+*and* incompatible with the firmware. Fixed: resized to **80×80**
+(= `ui-v1`), titles preserved — so the migration is now a one-line
+sheet-id swap (same native size). And the studio create default is now
+**category-aware** (`NewSheet.tsx`): scene→200, pet→96, ui/item→80, so new
+icon sheets start correct.
+
+**To actually use it in the dev menu, three things remain:** (1) size — done;
+(2) generate + commit the icon art (Icons panel; until then cells are
+empty); (3) the firmware pointer swap `ui-v1` → `ui-icons-a` for the
+stat-row + care icons (the device-critical keys `heart`/`star`/`bowl`/`ball`
+are present), plus wiring the menu-tile icons (those aren't drawn from the
+sheet yet — the tile restyle is still backlog below). Steps 2–3 are the
+next pass; (3) ships on an OTA.
+
 ## Studio panels (this pass)
 
 To avoid bloating the Sheet panel, the **Icons** panel (`studio/panels/
