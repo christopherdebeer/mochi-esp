@@ -109,6 +109,6 @@ direct_dependencies:
 - espressif/esp_codec_dev
 - espressif/esp_peer
 - joltwallet/littlefs
-manifest_hash: f3bf26c58f21cc63e02c51d560940e5597e56c4b1ae8c0d9a5d02b002cff3ccd
+manifest_hash: e6a38208569f9a94d0bd4394525bd321fb8419441d5187e600b4c0acda02adc0
 target: esp32s3
 version: 2.0.0
