@@ -196,6 +196,34 @@ alongside the scene/planner ones. Wiring:
 Verified live: listing includes `icon.imagegen.v1` (family `icon`), and
 PUT→override / DELETE→revert round-trips cleanly.
 
+### Icon dither preset — ui cells now run the pipeline (done)
+
+`POSTPROCESS.icon` was **dead config**: the serve path
+(`devsprite.ts`) only ran the dither pipeline for `pet`/`scene`
+(`usesPostProcess`), routing `ui`/`item` through `cellToNativeFB` (flat
+threshold) — so editing the preset did nothing on-device (the Dither
+workbench previews it client-side via a `cfgOverride`, which is why it
+*looked* applied). Wired up + tuned:
+
+- `presets.ts` `POSTPROCESS.icon`: flat `threshold` → **line-screen**
+  (`algorithm: "screen"`, `threshold 128`, `contrast 0.44`, `angle 45`,
+  `spacing 4`). The studio export omitted `angle`/`spacing` because they
+  equal the `dither-pipeline` defaults (45°/4px); pinned explicit here.
+- `devsprite.ts`: `usesPostProcess` now includes `icon`, so ui/item cells
+  run `cellToNativePipeline(POSTPROCESS.icon)` and their cache keys gain
+  the `:pp<ver>` suffix.
+- `encode.ts`: `POSTPROCESS_VERSION` 5 → 6 (cache-bust; now also keys icon
+  cells), and the three cross-val pins in `backend/devsprite-encode.ts`
+  bumped `@366` → `@491` so the server serve path picks up the new
+  presets/version.
+
+Verified: `/devsprite/cell/ui-v1/heart?nocache=1` re-encodes `200`, 80×80,
+2-plane. **Note:** this also re-dithers the live `ui-v1` care/stats chrome
+(heart/star/bowl/ball) to the line-screen on next device refetch — and a
+4px screen on a 48px glyph is coarse, so the `contrast 0.44` mix may want
+revisiting once seen on-panel (tune in the workbench → paste into
+`POSTPROCESS.icon` → bump version + pins).
+
 ## Firmware: what shipped this pass
 
 - **MenuP1 stats** (`dev_menu.cpp` `render_menu_p1`): the
