@@ -227,6 +227,27 @@ new `backend/costumes-device.ts` (costume orchestration).
   `?mode=debug`. (Net-state + `device_diag` tail readers are easy
   follow-ups — they need small accessors.) `force_doze`/`force_live`
   intentionally not built.
+- **Scene/nav context to the model** (follow-up scope): shipped
+  (server `c15r/mochi`). The model now learns *where it is*, not just
+  where it can go: current place name+vibe in the normal persona's
+  RIGHT NOW block (was debug-only), and `move_to_location`'s result
+  enriched with the destination vibe + live reachable exits — so it's
+  re-oriented on each navigation (the only live channel, since the
+  device never `session.update`s). Place-enum descriptions fall back to
+  `seed_vibe`. **Not** done: zone / per-cell scene-plan intents to the
+  model (device-local + planner only), and a `session.update` refresh
+  on intra-pack cell/scene navigation — both tracked as deeper work.
+- **Force consolidation** (follow-up scope): shipped. dev_menu P3
+  "Consolidate" → `consolidate_start_forced()` (firmware) bypasses the
+  local debounce; `/api/consolidate/orchestration?force=1` + persist
+  `force:true` bypass the server eligibility gates. The server still
+  skips when there's genuinely no material. (Confirmed live the gate
+  normally blocks: "not enough activity (0/3 talked events since last
+  run)" — consistent with the device-voice talk-transcript gap below.)
+  Related open gap (not yet built): device voice posts contentless
+  `talked` events, so consolidation has no on-device dialogue to
+  reflect on — only `set_internal_observation` notes. Posting the
+  transcript as `talked` data is the fix.
 - **E — imagine revise + costume**: *partial / scoped*. The stale
   "v0 stub" comment is corrected (`imagine_place` runs the full device
   pipeline). Remaining, deliberately not rushed because both need work
