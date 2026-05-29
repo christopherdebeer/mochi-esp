@@ -92,24 +92,37 @@ cell set, so a `bust` bump isn't enough). Verified the round-trip is a
 clean idempotent `200`. So `ui-icons-a`'s `cell_00…` can be renamed to the
 wishlist icon names, ready to drive generation.
 
-### Generation half — still to build
+### Icon generation — green chroma (done)
 
-With titles in place, the icon-gen flow is: build a prompt from the task +
-the per-cell **titles as targets** + **chroma instructions** (paper/cream
-background to key out), send the **grid guide with titles** (the labelled
-`layoutSvg` — no zone overlays; UI sheets have none) + an **exemplar**
-(the existing `ui-v1` four-icon sheet as the style anchor), call gpt-image-2
-(BYO key, mirroring `generateSceneSheet`), then commit → the server keys it
-(`corner-feather`, now editable in the studio) and extracts the cells.
+`SheetPanel` (ui/item sheets) now has a **generate-icons** section:
+`generateIconSheet` (`studio/api.ts`) builds the prompt from the cell
+**titles as per-icon targets**, rasterises the **labelled grid guide**
+(`layout.svg` — cell titles, no zone overlays) and fetches a **style
+exemplar** (default `ui-v1`), calls **gpt-image-2** (`/v1/images/edits`,
+BYO key, mirroring `generateSceneSheet`), previews, then commits via
+`uploadSheetPngBase64` → the server keys it + extracts cells.
 
-- **Per-icon prompts.** A `ui-v1` prompt template (sibling to the scene/
-  places templates) — "a simple 1-bit line-art %s glyph, centred, thick
-  strokes, on a plain cream background", filled per cell title.
-- **Geometry.** Icons are square (native 80×80 → 48×48 cached, plus the
-  ~24px stats variant), drop-in for `sprite_cache`'s
+**Chroma key is GREEN, not cream** (`#00FF00`, `buildIconPrompt`): green is
+never a colour used in black line art, and — crucially — a solid green fill
+*inside enclosed shapes* (ring centres, keyholes) lets the keyer drop those
+**holes**, which a cream key sampled from corners can't guarantee. The
+prompt forbids any green in the artwork and demands a solid green field
+everywhere (gutters + holes). The sheet's `corner-feather` keying
+(corner-sampled → green key colour; green is far from black/white so a
+modest tolerance is safe) removes it cleanly; tune in the keying editor if
+needed. gpt-image sizes snap to the nearest supported (`pickGptImageSize`:
+square/landscape/portrait); the grid-scales-to-art extractor handles the
+1024² output against the 840² grid spec.
+
+- **Geometry.** Icons are square (native → 48×48 cached, plus the ~24px
+  stats variant), drop-in for `sprite_cache`'s
   `<key>_icon_<w>x<h>_{ink,mask}` keys.
-- **Review.** The keyed-on-checker preview already catches a too-light
-  stroke before it ships.
+- **Verification.** Transpiles (200); `layout.svg` guide + keying endpoints
+  confirmed live. The gpt-image-2 round-trip itself runs browser-side with
+  the user's key — unverified here, but mirrors the proven scene path.
+- **Optional next.** Promote the inline prompt to a substrate-editable
+  `ui-v1` prompt template (sibling to scene/places) so wording is tunable
+  without a code edit.
 
 ## Firmware: what shipped this pass
 
