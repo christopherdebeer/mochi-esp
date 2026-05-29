@@ -39,6 +39,16 @@
 #include "voice_ui.h"      /* on-screen tool-result bubble (design/27) */
 #include "model_prefs.h"
 
+/* Read-only device introspection for the debug persona (design/27). */
+#include "esp_heap_caps.h"
+#include "esp_timer.h"
+#include "power.h"
+#include "battery.h"
+#include "shtc3.h"
+#include "voice_peer.h"
+#include "voice_mic.h"
+#include "voice_aec.h"
+
 #define TAG "voice_tools"
 
 #define LOGI_DIAG(fmt, ...) do {              \
@@ -284,6 +294,47 @@ static void worker_task(void *arg) {
                         ? "I can't paint right now — too busy"
                         : "I need both a name and a vibe");
             }
+            intercepted = true;
+        }
+        /* Read-only device-introspection tools (design/27). Handled
+         * fully on-device; the result JSON is what the (debug) persona
+         * reads back. Server only offers these in mode=debug, but
+         * intercepting unconditionally is harmless — they expose no
+         * secrets and mutate nothing. */
+        else if (strcmp(req->name, "get_power_state") == 0) {
+            char j[256];
+            power_telemetry_ctx(j, sizeof(j));
+            result.ok = true;
+            result.message = strdup(j);
+            intercepted = true;
+        } else if (strcmp(req->name, "get_device_health") == 0) {
+            uint16_t mv = 0; uint8_t pct = 0;
+            battery_read(&mv, &pct);
+            float tc = 0.0f, rh = 0.0f;
+            shtc3_read(&tc, &rh);
+            char j[224];
+            snprintf(j, sizeof(j),
+                "{\"batt_mv\":%u,\"batt_pct\":%u,\"temp_c\":%d,\"rh_pct\":%d,"
+                "\"heap_free\":%u,\"psram_free\":%u,\"up_s\":%lld}",
+                (unsigned)mv, (unsigned)pct, (int)tc, (int)rh,
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                (long long)(esp_timer_get_time() / 1000000));
+            result.ok = true;
+            result.message = strdup(j);
+            intercepted = true;
+        } else if (strcmp(req->name, "get_voice_stats") == 0) {
+            int turns = 0, in_tok = 0, out_tok = 0, total_tok = 0;
+            voice_peer_get_session_stats(&turns, &in_tok, &out_tok, &total_tok);
+            char j[192];
+            snprintf(j, sizeof(j),
+                "{\"turns\":%d,\"in_tok\":%d,\"out_tok\":%d,\"total_tok\":%d,"
+                "\"mic_peak_dbfs\":%d,\"aec\":%s}",
+                turns, in_tok, out_tok, total_tok,
+                voice_mic_last_peak_dbfs(),
+                voice_aec_is_enabled() ? "true" : "false");
+            result.ok = true;
+            result.message = strdup(j);
             intercepted = true;
         }
 

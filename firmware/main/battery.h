@@ -21,6 +21,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 bool battery_init(void);
 
 /* Take one ADC sample. Returns true and fills *out_mv with VBAT in
@@ -28,3 +32,7 @@ bool battery_init(void);
  * *out_pct with a coarse 0..100 charge estimate. Either output
  * pointer may be NULL. */
 bool battery_read(uint16_t *out_mv, uint8_t *out_pct);
+
+#ifdef __cplusplus
+}
+#endif
