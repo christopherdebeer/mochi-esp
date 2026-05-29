@@ -43,9 +43,15 @@ button in the Plan panel (`c15r/mochi-device`, deployed). It:
   normaliser and review-in-Zones → "save plan + zones" flow. **No image
   regeneration** — the art is untouched; only `plan_json` + the device
   zone store change.
-- is **additive**: stored `nav_place` (kind 5) edges the fresh draft
-  didn't reproduce are re-attached, so imagine-grown portals (below)
-  survive a re-plan.
+- is **non-destructive (merge, not replace)**: it starts from the stored
+  plan and only touches cells the model actually re-planned this pass. A
+  skipped cell — or a partial/weak model response — keeps its existing
+  zones, so a re-plan can never wipe a rich plan (e.g. `the-forest-a`'s
+  96 zones). Existing `nav_place` (kind 5) edges are preserved even on
+  re-planned cells, so imagine-grown portals (below) survive. The result
+  note reports coverage (`re-planned N/M cells`) and warns to pick a
+  stronger planner model when coverage is low — mini models under-produce
+  on dense 16-cell sheets (observed first pass on `the-forest-a`).
 
 This fixes drifted/empty cells on any **fetched** bundle live. (For the
 embedded `home` bundle it currently requires an `scenes_a.mpk` rebuild +
