@@ -132,19 +132,22 @@ deprecated.** Shipped:
   fire, on the sill"); `mapDraftZone` maps it to kind 7 and, unlike tap
   zones, does **not** clamp it to the 48–70px range (the pet is ~96px).
 
-### Remaining (follow-up)
-- **Studio**: repoint the ZoneCanvas pet-drag to author/update a *per-cell*
-  kind-7 zone (it already drags a box), and retire the plan-level
-  `petAnchorX/petFootY` fields + `plan.petAnchor`. Until then, manual pet
-  placement still edits the (device-ignored) plan anchor; the re-plan +
-  firmware path already deliver per-cell placement.
-- **Size depth**: the rect already drives size on-device; expose a size
-  handle in the studio once the pet-drag is per-cell.
+### Studio — petAnchor retired (done)
+The plan-level `petAnchorX/petFootY` fields + `plan.petAnchor` are gone
+(`PlanMeta`, `DEFAULT_PLAN_META`, `saveScenePlan`/`fetchScenePlan`, the
+draft returns, the Plan panel number fields, and the App↔Zones wiring).
+The pet is now just a **kind-7 zone** in the cell: it's created/edited
+via the normal Zones controls (KIND_OPTS already has "pet" + an
+expression selector) and **moved/resized with the standard zone drag** —
+which the firmware honours for both placement *and* size (resize the pet
+zone smaller → pet reads as further away, no extra UI needed). The
+ZoneCanvas "show pet" preview now draws the sprite into that cell's pet
+zone (square, foot on the bottom edge) instead of the old plan anchor.
 
 ## Sequence
 
 1. **Vision re-plan** — done (studio).
-2. **Per-cell pet zones** — firmware honour + planner authoring **done**;
-   studio pet-drag refactor + petAnchor removal remaining.
+2. **Per-cell pet zones** — **done**: firmware honour + planner authoring +
+   studio (kind-7 zone editing, petAnchor retired).
 3. **Place-cell pinning** — substrate + device + enter route.
 4. **Home as fetched growable place** — base + imagine-grown edge layer.
