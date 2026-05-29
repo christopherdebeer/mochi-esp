@@ -27,16 +27,20 @@ CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 
-# 1kHz tick is a small power hit vs the default 100Hz but gives much
-# finer-grained vTaskDelay for animation frame pacing later. Revisit
-# if power profiling complains.
-#
-# NOTE (design/26): with MOCHI_LIGHT_SLEEP on, a 1kHz tick caps
-# tickless-idle residency (up to 1000 idle wakeups/s). Tickless idle
-# still suppresses ticks while idle, but lowering to 100Hz would
-# improve doze residency — revisit once the power telemetry shows the
-# achieved sleep ratio.
-CONFIG_FREERTOS_HZ=1000
+# 100Hz tick (the IDF default). design/26: the first doze-enabled
+# release (v0.2.0) ran at 1000Hz and the telemetry showed ~no battery
+# saving despite ~98% doze-tier residency — a 1kHz tick wakes the SoC
+# up to 1000x/s, capping real light-sleep residency. Dropped to 100Hz
+# (10ms granularity, still ample for our 100ms+ delays) so light sleep
+# can actually accumulate. The 1kHz "for animation pacing later" never
+# had a consumer.
+CONFIG_FREERTOS_HZ=100
+
+# Run-time stats: lets power.cpp read the idle-task run-time counter to
+# report ACTUAL light-sleep residency (sleep_pct) in the power
+# telemetry — the ground truth the tier counter can't give. esp_timer
+# source (default) keeps counting through light sleep. design/26.
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 
 # Power management (design/26). Automatic light sleep while the device
 # is dozing (idle): the SoC sleeps between events with RAM + the e-paper

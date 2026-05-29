@@ -382,6 +382,49 @@ If the residency number comes back low (say <80 %), that explains any
 shortfall vs the ~5–7× target and points straight at the poll-suspend
 follow-up before any deeper change.
 
+## Field result — v0.2.0 (hypothesis REFUTED) → v0.3.0 iteration
+
+First doze-enabled build (v0.2.0, `FREERTOS_HZ=1000`, WiFi kept at
+`PS_MAX_MODEM`) ran overnight on one device. Telemetry verdict:
+
+- **Tier machine works, stability fine:** one boot all night (no
+  light-sleep crash-loop), ~98% *doze-tier* residency
+  (`doze_ms 26,546 s` vs `live_ms 495 s`), clean transitions, visible
+  consolidation wake/doze cycles.
+- **But ~no battery saving.** Matched voltage band (3800–3920 mV):
+  doze boot **−20.4 mV/h** vs baseline Live **−21 to −23 mV/h** — within
+  noise. The 5–7× projection was wrong. (Per-boot %/h *looked* better —
+  −2.6 vs −4.2 %/h — but that's a LiPo-curve artifact: the baseline run
+  discharged through the steep sub-3.4 V end; matched-band mV/h is the
+  honest comparison and it's flat.)
+
+**Root-cause hypothesis:** the tier counter reports *intent* (we set
+`tier=doze`), not whether the SoC actually light-slept. The prime suspect
+is **wake cadence**: the 100 ms touch-poll task + the 1 kHz FreeRTOS tick
+wake the SoC ~10–1000×/s regardless of tier, so real light-sleep
+residency never accumulates. WiFi-associated PM behaviour is the
+secondary suspect.
+
+**v0.3.0 changes (this release) — attack cadence + measure the truth:**
+1. **`FREERTOS_HZ` 1000 → 100** — stop the tick waking the SoC 1000×/s.
+2. **Touch poll 10 Hz → 1 Hz while dozing** (`touch::set_low_power`,
+   driven from the doze/wake edges) — the INT line still wakes instantly;
+   the poll is only the fallback, so worst-case wake-by-touch latency is
+   ~1 s while dozing.
+3. **`sleep_pct` telemetry** — core-0 idle (≈ light-sleep) fraction per
+   snapshot, from the FreeRTOS idle run-time counter
+   (`CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS`). This is the ground truth:
+   if v0.2.0 was dozing-but-not-sleeping, `sleep_pct` will read low; the
+   fix should push it high.
+
+**Deliberately deferred: dropping WiFi.** The data points first at the
+wake cadence (cheap, low-risk, reversible), and shipping a blind
+`esp_wifi_stop`/reconnect to OTA risks connectivity loss with no way to
+validate it here. `sleep_pct` from this build decides it: if residency
+goes high but discharge still doesn't improve, WiFi is the remaining
+draw and the WiFi-drop is the next beta; if residency is still low,
+something else holds the SoC awake. Measure, then cut.
+
 ## Telemetry
 
 All power telemetry flows through the existing `device_diag` →
@@ -395,7 +438,7 @@ doze-time accounting are always recorded.
 | `init` | boot, once | `sleep_en, wifi_ps, doze_s, deep_s, cpu_max, cpu_min` — the active policy, so each run is segmentable |
 | `doze` | Live→Doze edge | `prev_ms` (time spent Live), `batt_mv`, `up_s` |
 | `wake` | Doze→Live edge | `prev_ms` (time spent dozing), `batt_mv`, `up_s` |
-| `snapshot` | every ~5 min (with the health heartbeat) | `tier, live_ms, doze_ms` (cumulative), `doze_n`, `sleep_en, wifi_ps, doze_s, batt_mv, up_s` |
+| `snapshot` | every ~5 min (with the health heartbeat) | `tier, live_ms, doze_ms` (cumulative), `doze_n`, **`sleep_pct`** (actual core-0 idle/light-sleep % since last snapshot; −1 if unavailable), `sleep_en, wifi_ps, doze_s, batt_mv, up_s` |
 
 Tunability is via Kconfig today (`MOCHI_DOZE_TIMEOUT_S`,
 `MOCHI_DEEP_SLEEP_TIMEOUT_S`, `MOCHI_DOZE_WIFI_POWERSAVE`,
