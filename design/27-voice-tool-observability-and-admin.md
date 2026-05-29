@@ -199,6 +199,40 @@ Server `c15r/mochi`: `shared/persona.ts` (`buildDebugPrompt`),
 (refusal events), `backend/voice-tools-spec-route.ts` (costume enum),
 new `backend/costumes-device.ts` (costume orchestration).
 
+## Implementation status (2026-05-29)
+
+- **A — tool telemetry**: shipped (firmware). `voice` tag `tool call`
+  {tool,args_len} + `tool result` {tool,ok,reason} in `device_logs`.
+  Build green.
+- **B — care + environment injection**: shipped (firmware).
+  `voice_peer_inject_note` (system role + cancel-when-speaking), care
+  note on care taps during a session, imagine-ready notice. Build green.
+- **C — admin debug persona**: shipped end-to-end. Firmware: `model_prefs`
+  `voice_debug` + dev_menu "Debug" pill + `?mode=debug`. Server
+  (`c15r/mochi`, deployed + verified): `buildDebugPrompt` +
+  `voice-session.ts` branch. Normal path unchanged (verified 200).
+- **D — server reject telemetry**: shipped + verified (`c15r/mochi`).
+  Central refusal `events` row in `runVoiceTool` — confirmed
+  `move_to_location` "don't know that place" now logs.
+- **E — imagine revise + costume**: *partial / scoped*. The stale
+  "v0 stub" comment is corrected (`imagine_place` runs the full device
+  pipeline). Remaining, deliberately not rushed because both need work
+  that can't be hardware-validated in this environment:
+  - **True imagine_place revise**: today the device passes `revising`
+    (a place *name*) as `from_place_id`, so a revise behaves as a fresh
+    birth styled after the old place. A true in-place revise needs a
+    device name→id resolve + the `POST /api/places/:id/revise` →
+    orchestration flow on-device (the local intercept currently bypasses
+    the server's `runImaginePlace` revise branch).
+  - **imagine_costume / wear / take_off on device**: server substrate is
+    complete, but there is (a) no costume `/orchestration` endpoint
+    (needs a new `backend/costumes-device.ts` mirroring `places-device.ts`),
+    and (b) **no device costume sheet-swap rendering** — the hard
+    blocker. Until rendering lands, the device tool-spec must keep the
+    empty costume enum (`voice-tools-spec-route.ts`) so the model isn't
+    offered a tool whose effect can't be shown. Wiring this is a
+    self-contained follow-up that wants on-hardware validation.
+
 ## Open questions
 
 1. Distance / "too far" travel model — is a place graph wanted, or is

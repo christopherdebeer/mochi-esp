@@ -233,10 +233,14 @@ static void worker_task(void *arg) {
         bool intercepted = false;
         if (strcmp(req->name, "imagine_place") == 0) {
             /* Args follow shared/voice-tools-spec.ts: { name, vibe,
-             * revising? }. We translate `revising` (a place name)
-             * into `from_place_id` later — the v0 stub doesn't
-             * care since it doesn't actually call the queue
-             * endpoint yet. */
+             * revising? }. imagine_start() runs the full on-device
+             * pipeline (queue → orchestration → gpt-image → upload →
+             * ready; see imagine.c). NOTE (design/27): `revising` (a
+             * place *name*) is currently passed as `from_place_id`,
+             * which makes a revise behave as a fresh birth styled after
+             * the old place rather than a true in-place revise via
+             * POST /api/places/:id/revise. True revise needs a device
+             * name→id resolve; tracked as remaining work in design/27. */
             imagine_req_t ireq = {0};
             cJSON *args = req->args_json ? cJSON_Parse(req->args_json) : NULL;
             if (args) {
