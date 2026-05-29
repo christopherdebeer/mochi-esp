@@ -158,6 +158,36 @@ static constexpr size_t PET_CELL_BYTES = (PET_CELL_W / 8) * PET_CELL_H;  /* 1152
 static constexpr int PET_DX = (MOCHI_EPD_WIDTH  - (int)PET_CELL_W) / 2;
 static constexpr int PET_DY = (MOCHI_EPD_HEIGHT - (int)PET_CELL_H) - 12;
 
+/* Pet placement (design/28). A format=1 scene cell may carry an
+ * MPK_ACTION_PET zone that places + sizes the pet per cell; honour it,
+ * else fall back to the fixed firmware anchor (PET_DX/PET_DY, 96×96).
+ * Used by both the composite and the pet tap-hit so the tappable body
+ * tracks the rendered pet. */
+static void pet_dest(int *ox, int *oy, int *side) {
+    int zx, zy, zs;
+    if (scene_pack_current_pet_zone(&zx, &zy, &zs)) {
+        *ox = zx; *oy = zy; *side = zs;
+    } else {
+        *ox = PET_DX; *oy = PET_DY; *side = (int)PET_CELL_W;
+    }
+}
+
+/* Blit the loaded pet cell into dst at its per-cell spot. Expression
+ * stays caller-driven (the pet emotes live from mood/phase — a scene
+ * pet zone's authored expr index is not used for live scenes). */
+static void composite_pet(uint8_t *dst, const uint8_t *ink, const uint8_t *mask) {
+    int ox, oy, side;
+    pet_dest(&ox, &oy, &side);
+    if (side == (int)PET_CELL_W) {
+        compositor::blit_two_plane(dst, MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
+            ink, mask, PET_CELL_W, PET_CELL_H, ox, oy);
+    } else {
+        compositor::blit_two_plane_scaled(dst, MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
+            ink, mask, PET_CELL_W, PET_CELL_H, ox, oy,
+            (size_t)side, (size_t)side);
+    }
+}
+
 static constexpr int RESTING_AFTER_TAP_MS = 5000;
 
 /* Care icons — 4 ui-v1 cells, one per zone, downsampled from 80×80
@@ -1416,10 +1446,7 @@ extern "C" void app_main(void) {
          * the top, hiding whatever the cell drew up there. */
         memcpy(composite, scene_fb, SCENE_BYTES);
 
-        compositor::blit_two_plane(composite,
-            MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
-            pet_ink, pet_mask,
-            PET_CELL_W, PET_CELL_H, PET_DX, PET_DY);
+        composite_pet(composite, pet_ink, pet_mask);
         render_chrome();
 
         /* M11.5a — thought bubble on top of chrome. Centered above
@@ -1550,10 +1577,7 @@ extern "C" void app_main(void) {
         memcpy(composite, scene_fb, SCENE_BYTES);
         memset(composite, 0xFF, 25 * STATUS_BAR_H);
         if (got_pet) {
-            compositor::blit_two_plane(composite,
-                MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
-                pet_ink, pet_mask,
-                PET_CELL_W, PET_CELL_H, PET_DX, PET_DY);
+            composite_pet(composite, pet_ink, pet_mask);
         }
 
         /* Status bar: centred string, no icons. Reuse the inline
@@ -1667,8 +1691,16 @@ extern "C" void app_main(void) {
      * read as pet taps, and a tap on the actual drawn body is no
      * longer pre-empted by a zone hiding behind those corners. */
     auto pet_silhouette_hit = [&](uint16_t x, uint16_t y) -> bool {
-        const int lx = (int)x - PET_DX;
-        const int ly = (int)y - PET_DY;
+        /* Follow the per-cell pet spot (design/28): map the panel tap into
+         * the pet box, then into 96×96 cell coords (nearest-neighbour
+         * inverse of the scaled blit) before testing the mask. */
+        int ox, oy, side;
+        pet_dest(&ox, &oy, &side);
+        const int px = (int)x - ox;
+        const int py = (int)y - oy;
+        if (px < 0 || px >= side || py < 0 || py >= side) return false;
+        const int lx = px * (int)PET_CELL_W / side;
+        const int ly = py * (int)PET_CELL_H / side;
         if (lx < 0 || lx >= (int)PET_CELL_W ||
             ly < 0 || ly >= (int)PET_CELL_H) return false;
         const size_t stride = PET_CELL_W >> 3;          /* 12 bytes/row */

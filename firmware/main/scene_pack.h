@@ -106,6 +106,15 @@ bool scene_pack_current_has_zones(void);
  * no zones. */
 const mpk_zone_t *scene_pack_current_zones(uint8_t *out_count);
 
+/* Per-cell pet placement (design/28). If the current scene (format=1
+ * only — the embedded format=0 home bundle has none) carries an
+ * MPK_ACTION_PET zone, fills *ox,*oy with the square pet box's top-left
+ * and *side with its size (cell-local px; foot on the zone's bottom
+ * edge, centred-x) and returns true. Returns false when there's no pet
+ * zone, so the caller uses the fixed firmware anchor (PET_DX/PET_DY).
+ * Any out-pointer may be NULL. */
+bool scene_pack_current_pet_zone(int *ox, int *oy, int *side);
+
 /* Forgiving hit-test: returns the zone whose rectangle is nearest
  * (Chebyshev distance in cell-local pixels) to (x, y), provided that
  * distance is ≤ slop_px. Direct hits return distance 0. Returns true

@@ -102,8 +102,49 @@ rest move to their own bundles? The hub model preserves the offline
 "one embedded sheet" property; the split is cleaner data. Leaning hub +
 cell-pinning.
 
+## Pet placement: per-cell pet zones (deprecating petAnchor) — shipped (firmware + planner)
+
+Two pet-placement mechanisms existed, both in a bad spot:
+
+- **`petAnchor`** — *plan-level* (one `{x, foot_y}` per sheet), draggable
+  in the studio, **but the firmware ignored it** and hardcoded
+  `PET_DX/PET_DY` (x-centred, foot 12px off the bottom, fixed 96×96). The
+  planner stopped authoring it on 2026-05-27. So the pet read as uniform
+  for two reasons: one value per sheet *and* the device never read it.
+- **Pet zone (kind 7)** — the *per-cell* format (rect places **and** sizes
+  the pet; `data` = expression index). It existed end-to-end but **only
+  the splash honoured it**; normal scenes ignored it.
+
+Decision: **pet zones are the per-cell source of truth; petAnchor is
+deprecated.** Shipped:
+
+- **Firmware**: `scene_pack_current_pet_zone()` returns the current
+  scene's MPK_ACTION_PET rect (square = min(w,h), centred-x, foot on the
+  zone's bottom edge); `main.cpp` composites the pet there via
+  `blit_two_plane_scaled` (so a smaller box reads as further away), and
+  the pet **tap-hit follows** the same rect (panel→cell nearest-neighbour
+  map). Falls back to the fixed `PET_DX/PET_DY` anchor when a cell has no
+  pet zone — so format=0 packs (the embedded home bundle) and any unzoned
+  cell are unchanged. Expression stays **live** (mood/phase-driven); a
+  scene pet zone's authored `data` index is not applied to a living pet.
+- **Planner**: the vision re-plan now authors one `pet` zone per cell
+  grounded in the art ("where the pet would rest — on the rug, by the
+  fire, on the sill"); `mapDraftZone` maps it to kind 7 and, unlike tap
+  zones, does **not** clamp it to the 48–70px range (the pet is ~96px).
+
+### Remaining (follow-up)
+- **Studio**: repoint the ZoneCanvas pet-drag to author/update a *per-cell*
+  kind-7 zone (it already drags a box), and retire the plan-level
+  `petAnchorX/petFootY` fields + `plan.petAnchor`. Until then, manual pet
+  placement still edits the (device-ignored) plan anchor; the re-plan +
+  firmware path already deliver per-cell placement.
+- **Size depth**: the rect already drives size on-device; expose a size
+  handle in the studio once the pet-drag is per-cell.
+
 ## Sequence
 
 1. **Vision re-plan** — done (studio).
-2. **Place-cell pinning** — substrate + device + enter route.
-3. **Home as fetched growable place** — base + imagine-grown edge layer.
+2. **Per-cell pet zones** — firmware honour + planner authoring **done**;
+   studio pet-drag refactor + petAnchor removal remaining.
+3. **Place-cell pinning** — substrate + device + enter route.
+4. **Home as fetched growable place** — base + imagine-grown edge layer.

@@ -123,6 +123,27 @@ uint16_t scene_pack_set(uint16_t idx) {
     return s_current;
 }
 
+bool scene_pack_current_pet_zone(int *ox, int *oy, int *side) {
+    /* Pet zones are inline format=1 zones; format=0 packs (the embedded
+     * scenes_a home bundle) carry none, so they fall back to the fixed
+     * firmware anchor. Mirrors the splash placement in epd_ui.cpp: a
+     * square box (min of w,h), centred-x, foot on the zone's bottom edge. */
+    if (!s_open || s_pack.format != 1) return false;
+    const uint8_t zc = mpk_zone_count(&s_pack, s_current);
+    for (uint8_t z = 0; z < zc; z++) {
+        mpk_zone_v1_t zn;
+        if (!mpk_zone_get(&s_pack, s_current, z, &zn)) continue;
+        if (zn.kind != MPK_ACTION_PET) continue;
+        int sd = (zn.w < zn.h ? (int)zn.w : (int)zn.h);
+        if (sd < 1) sd = 1;
+        if (ox)   *ox   = (int)zn.x + ((int)zn.w - sd) / 2;
+        if (oy)   *oy   = (int)zn.y + ((int)zn.h - sd);
+        if (side) *side = sd;
+        return true;
+    }
+    return false;
+}
+
 uint16_t scene_pack_advance(int delta) {
     if (!s_open || s_pack.count == 0) return 0;
     int next = (int)s_current + delta;
