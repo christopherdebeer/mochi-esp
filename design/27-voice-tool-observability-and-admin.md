@@ -214,6 +214,19 @@ new `backend/costumes-device.ts` (costume orchestration).
 - **D — server reject telemetry**: shipped + verified (`c15r/mochi`).
   Central refusal `events` row in `runVoiceTool` — confirmed
   `move_to_location` "don't know that place" now logs.
+- **On-screen voice bubbles** (follow-up scope): shipped (firmware).
+  New `voice_ui` bridge → main loop renders the model's final spoken
+  transcript as a talk bubble (every session, not streamed), a
+  busy/think bubble while a tool is in flight, and `imagine_place`'s
+  ~30s "painting…". In debug mode these become a live tool trace
+  (`> tool` / `ok|x tool: reason`). Bubbles are informational (not
+  tappable). Build green.
+- **Debug read-only diag tools** (follow-up scope): shipped. Local
+  intercept of `get_power_state` / `get_device_health` /
+  `get_voice_stats` in `voice_tools.c`; server offers them only in
+  `?mode=debug`. (Net-state + `device_diag` tail readers are easy
+  follow-ups — they need small accessors.) `force_doze`/`force_live`
+  intentionally not built.
 - **E — imagine revise + costume**: *partial / scoped*. The stale
   "v0 stub" comment is corrected (`imagine_place` runs the full device
   pipeline). Remaining, deliberately not rushed because both need work
