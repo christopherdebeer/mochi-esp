@@ -1,7 +1,35 @@
 # 30 — UI sprites for the dev-menu + stats (and the icons we still need)
 
-Status: stats page implemented (firmware); studio keying editor shipped;
-menu-tile restyle + new icons are spec + backlog below.
+Status: stats page implemented (firmware); studio keying editor, cell-title
+editor + green-chroma icon generation shipped (in a dedicated **Icons**
+panel); `ui-icons-a` seeded as the single consolidated icon sheet;
+menu-tile restyle is spec + backlog below.
+
+## Consolidation: one icon sheet (`ui-icons-a`)
+
+Rather than grow a second sheet, `ui-icons-a` (4×4 = 16 cells) is seeded as
+the **single** UI icon set — the existing `ui-v1` four (`heart`, `star`,
+`bowl`, `ball`; stats + care chrome) plus the menu wishlist, row-major:
+
+```
+heart   star     bowl   ball
+home    memories places voice
+wifi    wifi_off key    models
+update  channel  repair consolidate
+```
+
+Generate them (Icons panel) then the firmware migrates its `ui-v1` fetches
+(`CARE_ICON_KEYS`, the stat-row `get_icon` keys) to `ui-icons-a` — one
+sheet, one keying config, one generation pass. (That firmware pointer swap
+is the remaining step; `ui-v1` stays as the fallback until then.)
+
+## Studio panels (this pass)
+
+To avoid bloating the Sheet panel, the **Icons** panel (`studio/panels/
+Icons.tsx`, shown for ui/item) owns the icon-authoring workflow — **cell
+titles** + **generation** — while `SheetPanel` keeps only art mechanics
+(source upload / geometry / keying / cell grid). Scene-only panels (Plan,
+Zones, Places, the plan-driven Generate) are hidden for non-scene sheets.
 
 ## Goal
 
