@@ -144,6 +144,35 @@ zone smaller → pet reads as further away, no extra UI needed). The
 ZoneCanvas "show pet" preview now draws the sprite into that cell's pet
 zone (square, foot on the bottom edge) instead of the old plan anchor.
 
+### No actionless zones — inert taps default to talk_seed (done)
+Reviewing the re-planned `the-forest-a` surfaced ~30 zones that named a
+diegetic object + an `intent` (`inspect`/`rest`) but carried **no
+`deviceAction`** → kind 0 → **dead on-device** (the rect looks tappable
+but does nothing). The `intent` verb is only image-gen steering; it has no
+runtime effect. Fix: `mapDraftZone` (studio `api.ts`, used by BOTH the
+from-scratch draft and the vision re-plan) now **defaults an actionless
+labeled zone to a talk_seed (kind 4)** seeded from the descriptive `role`
+("thorny ring", "fern bed", …) — so a tap makes the pet remark on what's
+there. A `talk_seed` action with no explicit seed gets the same role
+fallback. Only a truly unlabeled zone (`role` empty / "object") stays kind
+none. The planner system prompt was also tightened: *every diegetic object
+that isn't a path or a care affordance should be a talk_seed — never leave
+an interactive-looking object actionless.*
+
+Existing `the-forest-a` was migrated in place (30 kind-0 → kind-4; the plan
+now has 0 inert zones: kind 1×5 care, 2×48 nav, 4×42 talk, 5×1 place).
+
+### ZoneCanvas pet preview — always show device placement (done)
+The "show pet" toggle previously appeared only when a cell HAD a kind-7
+pet zone, so a cell relying on the firmware's fixed fallback showed nothing
+— reads as "no pet / stale". Now the preview always renders where the
+device actually draws the pet: the cell's kind-7 zone if present, else a
+dashed **`PET·default`** ghost at the firmware-fixed centred anchor
+(`defaultPetAnchor`/`petRegionSize`). NB: the re-plan does not always emit
+a pet zone per cell (e.g. `the-forest-a` has none — its "pet_rest"/
+"sleeping nook" entries are plain `rest` zones, not kind 7), so most cells
+legitimately fall back to the default until a pet zone is authored.
+
 ### Image-gen guide — pet region resolution (done)
 `buildScenePrompt`/`buildGuideSvg` (shared `scenes-spec.ts`) draw a dashed-
 magenta **PET rectangle per cell** that gpt-image-2 must keep clear
