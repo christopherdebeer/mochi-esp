@@ -384,8 +384,9 @@ static void render_menu_p3(epaper_driver_display *epd) {
         { "Add WiFi",    TouchResult::ChangeWifi,    false, nullptr, nullptr },
         { "Forget WiFi", TouchResult::ForgetWifi,    false, nullptr, nullptr },
         { "Re-pair",     TouchResult::RePair,        false, nullptr, nullptr },
+        { "Consolidate", TouchResult::ConsolidateNow, false, nullptr, nullptr },
     };
-    layout_tiles(epd, tiles, 5, 20, 2);
+    layout_tiles(epd, tiles, 6, 20, 2);
 }
 
 /* WiFi modal — pushed from "Switch WiFi" on P2. A single wide column

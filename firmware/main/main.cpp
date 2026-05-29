@@ -2200,6 +2200,24 @@ extern "C" void app_main(void) {
                             epd->EPD_Init_Partial();
                             epd->EPD_DisplayPart();
                             break;
+                        case dev_menu::TouchResult::ConsolidateNow: {
+                            /* design/27: force a consolidation pass now —
+                             * bypasses the asleep + activity + cooldown
+                             * gates (server still skips if no material).
+                             * Runs in the background worker; toast just
+                             * acknowledges the tap. */
+                            const bool kicked = consolidate_start_forced();
+                            ESP_LOGI(TAG, "dev_menu → consolidate now (kicked=%d)",
+                                kicked);
+                            epd_ui::clear(epd);
+                            epd_ui::draw_text_centered(epd, 84, 1,
+                                kicked ? "Consolidating" : "Busy - try");
+                            epd_ui::draw_text_centered(epd, 104, 1,
+                                kicked ? "in background..." : "again shortly");
+                            epd->EPD_Init_Partial();
+                            epd->EPD_DisplayPart();
+                            break;
+                        }
                         case dev_menu::TouchResult::ChangeWifi:
                             ESP_LOGI(TAG, "dev_menu → change WiFi (SoftAP)");
                             nvs_creds_set_prov_on_boot(true);

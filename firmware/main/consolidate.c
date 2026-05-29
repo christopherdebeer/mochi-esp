@@ -61,6 +61,7 @@ static const char *TAG = "consolidate";
 static QueueHandle_t s_queue;
 static atomic_bool   s_in_flight;
 static atomic_bool   s_running;
+static atomic_bool   s_force;   /* next pass bypasses eligibility (design/27 dev-menu) */
 static int64_t       s_last_attempt_us;
 
 /* ─── HTTP helper (generous timeout, growing response buffer) ──────── */
@@ -158,6 +159,13 @@ static void run_consolidate(void) {
         return;
     }
 
+    /* Read+clear the force flag for this pass (design/27). When set, we
+     * append ?force=1 to orchestration (bypass eligibility) and
+     * {"force":true} to persist — a dev-menu "Consolidate now" trigger
+     * that runs even when the pet isn't asleep / hasn't met the gates.
+     * The server still refuses if there's genuinely no material. */
+    bool force = atomic_exchange(&s_force, false);
+
     char hdr_pet[96];
     snprintf(hdr_pet, sizeof(hdr_pet), "X-Pet-Id: %s", creds.pet_id);
     char hdr_ct[] = "Content-Type: application/json";
@@ -169,7 +177,8 @@ static void run_consolidate(void) {
     char text_model[48];
     model_prefs_text(text_model, sizeof(text_model));
     char url[200];
-    snprintf(url, sizeof(url), "%s%s?model=%s", MOCHI_BASE, ORCH_PATH, text_model);
+    snprintf(url, sizeof(url), "%s%s?model=%s%s", MOCHI_BASE, ORCH_PATH,
+        text_model, force ? "&force=1" : "");
     char *get_headers[] = { hdr_pet, NULL };
     char *obody = NULL;
     int ostatus = http_do("GET", url, get_headers, NULL, ORCH_TIMEOUT_MS,
@@ -285,9 +294,23 @@ static void run_consolidate(void) {
     char *post_headers[] = { hdr_pet, hdr_ct, NULL };
     char purl[160];
     snprintf(purl, sizeof(purl), "%s%s", MOCHI_BASE, PERSIST_PATH);
+    /* Forced run: add {"force":true} so persist bypasses its own
+     * eligibility re-check (matches ?force=1 on orchestration). */
+    char *force_body = NULL;
+    const char *persist_body = result;
+    if (force) {
+        cJSON *rj = cJSON_Parse(result);
+        if (rj) {
+            cJSON_AddBoolToObject(rj, "force", true);
+            force_body = cJSON_PrintUnformatted(rj);
+            cJSON_Delete(rj);
+            if (force_body) persist_body = force_body;
+        }
+    }
     char *pbody = NULL;
-    int pstatus = http_do("POST", purl, post_headers, result, POST_TIMEOUT_MS,
-                          &pbody, NULL);
+    int pstatus = http_do("POST", purl, post_headers, persist_body,
+                          POST_TIMEOUT_MS, &pbody, NULL);
+    free(force_body);
     free(result);
     if (pstatus != 200) ESP_LOGW(TAG, "persist HTTP %d", pstatus);
     free(pbody);
@@ -364,6 +387,22 @@ bool consolidate_start(void) {
     int tok = 1;
     if (xQueueSend(s_queue, &tok, 0) != pdTRUE) return false;
     s_last_attempt_us = now_us;
+    atomic_store(&s_in_flight, true);
+    return true;
+}
+
+bool consolidate_start_forced(void) {
+    if (!s_queue) return false;
+    if (atomic_load(&s_in_flight)) return false;
+    /* Bypass the local debounce (the whole point of a manual trigger)
+     * and mark the pass forced so run_consolidate skips eligibility. */
+    atomic_store(&s_force, true);
+    int tok = 1;
+    if (xQueueSend(s_queue, &tok, 0) != pdTRUE) {
+        atomic_store(&s_force, false);
+        return false;
+    }
+    s_last_attempt_us = esp_timer_get_time();
     atomic_store(&s_in_flight, true);
     return true;
 }
