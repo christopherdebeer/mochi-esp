@@ -148,9 +148,33 @@ square/landscape/portrait); the grid-scales-to-art extractor handles the
 - **Verification.** Transpiles (200); `layout.svg` guide + keying endpoints
   confirmed live. The gpt-image-2 round-trip itself runs browser-side with
   the user's key — unverified here, but mirrors the proven scene path.
-- **Optional next.** Promote the inline prompt to a substrate-editable
-  `ui-v1` prompt template (sibling to scene/places) so wording is tunable
-  without a code edit.
+
+### Icon prompt is an editable template (done)
+
+The prompt is no longer hardcoded — it's a registered template
+**`icon.imagegen.v1`** in the prompt-template system, so it's
+**editable / overridable / previewable** in the studio Templates panel
+alongside the scene/planner ones. Wiring:
+
+- `shared/scenes-spec.ts`: `PROMPT_TEMPLATE_IDS.iconImagegen`,
+  `DEFAULT_ICON_IMAGEGEN`, the `PromptTemplates.iconImagegen` field +
+  default, `PROMPT_PLACEHOLDERS` (`cols` / `rows` / `chroma` / `titleList`),
+  and `mergePromptTemplates`.
+- `backend/prompt-templates.ts`: a new **`icon`** family in the
+  `GET /api/prompt-templates` listing + `defaultBodyFor` / `labelFor` /
+  `familyFor`, so `PUT` (override) and `DELETE` (revert) work for it.
+- `studio/api.ts`: `generateIconSheet` now fetches the template body
+  (override or default) and resolves `{cols}{rows}{chroma}{titleList}`
+  **client-side** (`buildIconPrompt`) — the BYO key stays off the server,
+  and the studio avoids importing a new cross-val `scenes-spec` symbol
+  (sidesteps the esm-cache lag); a built-in fallback covers an unreachable
+  listing.
+- `studio/panels/Templates.tsx`: an **icon-gen** picker group + a local
+  `resolveIconPlaceholders(sheet)` so the preview resolves against the
+  selected sheet's cell titles.
+
+Verified live: listing includes `icon.imagegen.v1` (family `icon`), and
+PUT→override / DELETE→revert round-trips cleanly.
 
 ## Firmware: what shipped this pass
 
