@@ -78,21 +78,38 @@ re-derives) and Reset-to-default (→ `DELETE /keying`). Backed by new
 `fetchKeying` / `saveKeying` / `resetKeying` / `sheetDerivedURL` in
 `studio/api.ts` hitting the same endpoints.
 
-### Generation half — still needed
+### Cell titles = per-icon prompts (done)
 
-- **Per-icon prompts.** Each cell wants its own short prompt ("a simple
-  1-bit line-art %s glyph, centred, thick strokes, transparent
-  background") rather than the scene style preamble. A `ui-v1` prompt
-  template (sibling to the scene/places templates in `scenes-spec.ts` /
-  `places-spec.ts`) keyed per icon name.
-- **Geometry.** Icons are square (native 80×80 → 48×48 cached, and we now
-  also want a ~24px stats variant). The UI sheet config should pin the
-  native cell size + the downsample targets the firmware expects, so a
-  regenerated sheet stays drop-in for `sprite_cache`'s
+For a UI icon sheet, a cell's **key IS its title** — the device fetches
+`/devsprite/cell/<sheet>/<key>`, and the key doubles as the one-word
+generation target (`memories`, `places`, `home`, …). The server's
+`saveUserTemplate` already accepts custom cell keys (sanitises to
+`[A-Za-z0-9_]`, dedups). The studio `SheetPanel` now has a **cell-titles
+editor** (`studio/panels/Sheet.tsx`, user sheets only): one text field per
+cell, Save → `saveCellKeys` (re-POSTs the template with new keys, geometry
+preserved) → `onReload` refetches the sheet list (renaming changes the
+cell set, so a `bust` bump isn't enough). Verified the round-trip is a
+clean idempotent `200`. So `ui-icons-a`'s `cell_00…` can be renamed to the
+wishlist icon names, ready to drive generation.
+
+### Generation half — still to build
+
+With titles in place, the icon-gen flow is: build a prompt from the task +
+the per-cell **titles as targets** + **chroma instructions** (paper/cream
+background to key out), send the **grid guide with titles** (the labelled
+`layoutSvg` — no zone overlays; UI sheets have none) + an **exemplar**
+(the existing `ui-v1` four-icon sheet as the style anchor), call gpt-image-2
+(BYO key, mirroring `generateSceneSheet`), then commit → the server keys it
+(`corner-feather`, now editable in the studio) and extracts the cells.
+
+- **Per-icon prompts.** A `ui-v1` prompt template (sibling to the scene/
+  places templates) — "a simple 1-bit line-art %s glyph, centred, thick
+  strokes, on a plain cream background", filled per cell title.
+- **Geometry.** Icons are square (native 80×80 → 48×48 cached, plus the
+  ~24px stats variant), drop-in for `sprite_cache`'s
   `<key>_icon_<w>x<h>_{ink,mask}` keys.
-- **Review.** The keyed-on-checker preview above already catches a
-  too-light stroke before it ships; a paper-white-vs-tile toggle would
-  finish this off.
+- **Review.** The keyed-on-checker preview already catches a too-light
+  stroke before it ships.
 
 ## Firmware: what shipped this pass
 
