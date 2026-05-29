@@ -102,8 +102,10 @@ the real scene a tick later as before.
 
 ## Status / verification
 
-Implemented firmware-side; compiles in CI. **Not yet verified on
-hardware** — needs a device run to confirm: (a) onward travel from a
+Implemented firmware-side; **builds clean** under ESP-IDF v5.3
+(`idf.py build`, esp32s3, `-Werror`, no warnings — verified locally).
+**Not yet verified on hardware** — needs a device run to confirm: (a)
+onward travel from a
 freshly-loaded place is warm (look for `pack_cache: prefetch` diag events
 and a `ETag unchanged` on the subsequent real travel), and (b) the idle
 drain doesn't visibly hitch the pet animation.
