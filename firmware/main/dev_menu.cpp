@@ -229,7 +229,10 @@ static void render_menu_p2(epaper_driver_display *epd) {
     epd_ui::draw_text_centered(epd, 4, 1, "SETTINGS  (PWR exits)");
 
     const size_t free_psr = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    char l0[40], l1[40], l2[40];
+    /* Sized for the worst case the compiler's format-truncation
+     * analysis assumes: pet_name + version are each up to 39 chars,
+     * so l0 needs room for both plus the separator. */
+    char l0[96], l1[64], l2[64];
     snprintf(l0, sizeof(l0), "%s  %s",
         s_pet_name[0] ? s_pet_name : "?",
         s_version[0]  ? s_version  : "?");
