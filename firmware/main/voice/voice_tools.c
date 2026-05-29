@@ -36,6 +36,8 @@
 
 #include "voice_diag.h"
 #include "device_diag.h"
+#include "voice_ui.h"      /* on-screen tool-result bubble (design/27) */
+#include "model_prefs.h"
 
 #define TAG "voice_tools"
 
@@ -204,6 +206,21 @@ static void send_function_call_output(const char *call_id, const char *name,
         result->reason ? result->reason : "");
     device_diag_event(result->ok ? DIAG_INFO : DIAG_WARN,
         "voice", "tool result", rctx);
+    /* design/27: on-screen trace. In debug mode show the result as a
+     * talk bubble (ok/✗ + reason) so tool use is watchable on-device
+     * without serial. In normal mode just clear the "…" busy cue — the
+     * model's spoken reply (if any) lands its own talk bubble. */
+    if (model_prefs_voice_debug()) {
+        char btxt[96];
+        snprintf(btxt, sizeof(btxt), "%s %.40s%s%.40s",
+            result->ok ? "ok" : "x",
+            name ? name : "?",
+            result->reason ? ": " : "",
+            result->reason ? result->reason : "");
+        voice_ui_post(VOICE_UI_SPOKEN, btxt);
+    } else {
+        voice_ui_clear();
+    }
     free(wrap_str);
     free(resp_str);
 }

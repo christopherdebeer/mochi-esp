@@ -63,6 +63,7 @@
 #include "voice/voice_peer.h"   /* voice_peer_get_session_stats (design/18 ph3b) */
 extern "C" {
 #include "voice/voice_diag.h"
+#include "voice/voice_ui.h"     /* on-screen voice talk/think bubbles (design/27) */
 }
 #include "sprite_cache.h"
 #include "ota_update.h"
@@ -2701,11 +2702,39 @@ extern "C" void app_main(void) {
          * main task. Only re-renders on transition. */
         {
             voice::Phase cur = voice::phase();
-            if (cur != last_voice_phase) {
+            const bool v_active_now = voice::is_active();
+            /* design/27: voice-driven bubbles. The worker tasks post the
+             * model's spoken transcript (talk bubble) + busy/imagine
+             * notices (thought bubble) via voice_ui; render them over the
+             * pet. Re-render on EITHER a phase change OR a new bubble so a
+             * phase flip doesn't wipe an active bubble, and vice-versa.
+             * These bubbles are informational, not tappable — we keep
+             * s_thought_active false so the touch classifier ignores the
+             * rect render_with_expression caches. */
+            static char voice_bubble[160];
+            static voice_ui_kind_t voice_bubble_kind = VOICE_UI_NONE;
+            const bool bubble_changed = v_active_now &&
+                voice_ui_take(voice_bubble, sizeof(voice_bubble),
+                              &voice_bubble_kind);
+            if (cur != last_voice_phase || bubble_changed) {
                 const char *e = phase_expr(cur);
                 if (e) {
-                    ESP_LOGI(TAG, "voice phase → %d, render %s", (int)cur, e);
-                    render_with_expression(e, false, nullptr);
+                    if (v_active_now && voice_bubble_kind != VOICE_UI_NONE &&
+                        voice_bubble[0]) {
+                        pet_thought_t t;
+                        memset(&t, 0, sizeof(t));
+                        t.action_kind = THOUGHT_ACTION_NONE;
+                        t.text = voice_bubble;
+                        t.style = (voice_bubble_kind == VOICE_UI_SPOKEN)
+                            ? THOUGHT_STYLE_SPOKEN : THOUGHT_STYLE_THOUGHT;
+                        t.persistent = true;
+                        s_thought_active = false;
+                        render_with_expression(e, false, &t);
+                    } else {
+                        ESP_LOGI(TAG, "voice phase → %d, render %s",
+                            (int)cur, e);
+                        render_with_expression(e, false, nullptr);
+                    }
                 }
                 last_voice_phase = cur;
             }

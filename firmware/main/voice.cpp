@@ -15,6 +15,7 @@ extern "C" {
 #include "voice/voice_peer.h"
 #include "voice/voice_https.h"
 #include "voice/voice_tools.h"
+#include "voice/voice_ui.h"
 #include "esp_peer_signaling.h"
 #include "cJSON.h"
 }
@@ -339,6 +340,7 @@ int start_session(void) {
             ESP_LOGE(TAG, "voice_peer_start rc=%d", rc);
             goto cleanup;
         }
+        voice_ui_reset();   /* clear any stale on-screen bubble (design/27) */
         s_active = true;
     }
 
@@ -364,6 +366,7 @@ void stop_session(void) {
     ESP_LOGI(TAG, "stopping voice session…");
     voice_peer_stop();
     s_active = false;
+    voice_ui_reset();   /* drop any lingering bubble (design/27) */
     ESP_LOGI(TAG, "voice session stopped");
 }
 

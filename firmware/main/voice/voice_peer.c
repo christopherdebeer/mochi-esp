@@ -55,6 +55,8 @@
 #include "voice_mic.h"
 #include "voice_aec.h"
 #include "device_diag.h"   /* /api/device/diag — survives USB disconnect */
+#include "voice_ui.h"      /* on-screen talk/think bubbles (design/27) */
+#include "model_prefs.h"   /* voice_debug → richer on-screen tool trace */
 
 #define TAG "voice_peer"
 
@@ -753,6 +755,17 @@ static int pc_on_data(esp_peer_data_frame_t *frame, void *ctx) {
                         name_str,
                         (unsigned)(args_str ? strlen(args_str) : 0));
                     device_diag_event(DIAG_INFO, "voice", "tool call", tctx);
+                    /* design/27: on-screen busy cue while the call is in
+                     * flight. Debug mode shows the tool name (a live tool
+                     * trace); normal mode a quiet ellipsis. imagine_place
+                     * overrides this with "painting…" from imagine.c. */
+                    if (model_prefs_voice_debug()) {
+                        char btxt[64];
+                        snprintf(btxt, sizeof(btxt), "> %.48s", name_str);
+                        voice_ui_post(VOICE_UI_THINKING, btxt);
+                    } else {
+                        voice_ui_post(VOICE_UI_THINKING, "\xe2\x80\xa6");  /* … */
+                    }
                     voice_tools_dispatch(cid->valuestring, name_str, args_str);
                 } else {
                     LOGW_DIAG("tool .done with no known name (call_id=%s)",
@@ -783,6 +796,10 @@ static int pc_on_data(esp_peer_data_frame_t *frame, void *ctx) {
                 cJSON *t = cJSON_GetObjectItemCaseSensitive(root, "transcript");
                 if (cJSON_IsString(t) && t->valuestring) {
                     voice_diag_log("ASSISTANT: %.200s", t->valuestring);
+                    /* design/27: surface what mochi just said as a talk
+                     * bubble (final text, not streamed). Supersedes any
+                     * in-flight "thinking" bubble. */
+                    voice_ui_post(VOICE_UI_SPOKEN, t->valuestring);
                 }
             } else {
                 /* conversation.item.done — only log when role=user.

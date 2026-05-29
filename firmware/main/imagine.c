@@ -52,6 +52,7 @@
 
 #include "voice/voice_https.h"
 #include "voice/voice_peer.h"
+#include "voice/voice_ui.h"
 #include "sprite_fetch.h"
 #include "openai_key.h"
 #include "pair_creds.h"
@@ -358,6 +359,9 @@ static void fail_reason(const char *reason, const char *pet_id,
     }
     set_phase(IMAGINE_FAILED);
     atomic_store(&s_in_flight, false);
+    /* design/27: drop the "painting…" busy bubble on failure (success
+     * lets the spoken ready-notice replace it instead). */
+    if (voice_peer_is_running()) voice_ui_clear();
 }
 
 /* ─── worker ──────────────────────────────────────────────────────── */
@@ -379,6 +383,12 @@ static void run_imagine(const imagine_req_t *req) {
 
     /* 1 — queue ----------------------------------------------------- */
     set_phase(IMAGINE_QUEUEING);
+    /* design/27: long (~30s) op — show a busy bubble so the silence
+     * during generation doesn't read as broken. Cleared at DONE/FAILED.
+     * Only matters while a voice session is live (the only consumer). */
+    if (voice_peer_is_running()) {
+        voice_ui_post(VOICE_UI_THINKING, "painting a new place\xe2\x80\xa6");
+    }
     char qbody[600];
     /* JSON-escaping: seed_name/seed_vibe come from the model; they may
      * contain quotes. Build via cJSON to escape safely. */

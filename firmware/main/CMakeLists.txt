@@ -69,6 +69,7 @@ idf_component_register(
         "voice/voice_peer.c"
         "voice/voice_diag.c"
         "voice/voice_tools.c"
+        "voice/voice_ui.c"
         "voice/voice_mic.c"
         "voice/voice_aec.c"
         "voice/peer_log_shim.c"
