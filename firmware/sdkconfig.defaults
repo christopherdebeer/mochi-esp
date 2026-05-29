@@ -81,6 +81,21 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_MBEDTLS_SSL_PROTO_DTLS=y
 CONFIG_MBEDTLS_SSL_DTLS_SRTP=y
 
+# mbedTLS scratch in PSRAM. Default (INTERNAL) chops up the ~120 KB
+# internal heap during voice start: esp_peer's DTLS-SRTP context + ICE
+# agent allocate before the OpenAI signaling POST tries to set up its
+# own TLS, and mbedtls_ssl_setup needs a contiguous ~36 KB block (16K
+# in_buf + 4K out_buf + handshake state + cert scratch). Once the
+# largest free internal block drops below that, ssl_setup returns
+# MBEDTLS_ERR_SSL_ALLOC_FAILED (-0x7F00) and voice start fails with
+# "Fail to post data to https://api.openai.com/v1/realtime/calls".
+# Routing to PSRAM gives mbedtls 8 MB to play with, untouched by the
+# WebRTC stack. Hardware AES/SHA still run on-SoC; only the working
+# buffers move, so handshake CPU cost is unchanged. Throughput drops
+# a few % vs internal SRAM but it's network-bound anyway.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+# CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC is not set
+
 # OTA — over-the-air firmware updates from GitHub Releases (M14).
 #
 # Rollback: if a freshly-installed image fails to call
