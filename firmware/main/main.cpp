@@ -218,7 +218,7 @@ static constexpr int ICON_MARGIN = 4;
  *   BR (bottom-right) → ball   → 'excited'
  */
 static const char *CARE_ICON_KEYS[4] = { "heart", "star", "bowl", "ball" };
-#define MOCHI_UI_CELL_URL_BASE "https://mochi.val.run/devsprite/cell/ui-v1/"
+#define MOCHI_UI_CELL_URL_BASE "https://mochi.val.run/devsprite/cell/" MOCHI_UI_SHEET "/"
 
 /* Status bar — full-width slab at the top of the panel. Time on
  * left, pet name centred, battery on right. The bar is its own
@@ -552,7 +552,7 @@ static void net_worker(void *arg) {
     if (ctx->cache_ok) {
         struct { const char *sheet; const char *url; } probes[] = {
             { "pet-v1",   "https://mochi.val.run/devsprite/cell/pet-v1/neutral" },
-            { "ui-v1",    "https://mochi.val.run/devsprite/cell/ui-v1/heart"    },
+            { MOCHI_UI_SHEET, "https://mochi.val.run/devsprite/cell/" MOCHI_UI_SHEET "/heart" },
             { "scene-v1", "https://mochi.val.run/devsprite/scene-v1/day"        },
         };
         for (auto &p : probes) {
@@ -603,8 +603,8 @@ static void net_worker(void *arg) {
                     CARE_ICON_KEYS[i], suffix);
                 snprintf(mask_s, sizeof(mask_s), "%s%s_mask",
                     CARE_ICON_KEYS[i], suffix);
-                sprite_cache::store("ui-v1", ink_s,  ctx->icon_ink[i],  ICON_BYTES);
-                sprite_cache::store("ui-v1", mask_s, ctx->icon_mask[i], ICON_BYTES);
+                sprite_cache::store(MOCHI_UI_SHEET, ink_s,  ctx->icon_ink[i],  ICON_BYTES);
+                sprite_cache::store(MOCHI_UI_SHEET, mask_s, ctx->icon_mask[i], ICON_BYTES);
             }
             ESP_LOGI(TAG, "icon '%s' fetched + cached", CARE_ICON_KEYS[i]);
             s_net_render_dirty = true;
@@ -1070,10 +1070,10 @@ extern "C" void app_main(void) {
             size_t got_ink = 0, got_mask = 0;
             bool from_cache =
                 cache_ok &&
-                sprite_cache::load("ui-v1", ink_suffix,
+                sprite_cache::load(MOCHI_UI_SHEET, ink_suffix,
                     icon_ink[i], ICON_BYTES, &got_ink) &&
                 got_ink == ICON_BYTES &&
-                sprite_cache::load("ui-v1", mask_suffix,
+                sprite_cache::load(MOCHI_UI_SHEET, mask_suffix,
                     icon_mask[i], ICON_BYTES, &got_mask) &&
                 got_mask == ICON_BYTES;
             if (from_cache) {

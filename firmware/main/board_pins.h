@@ -79,3 +79,9 @@
 #define MOCHI_AUDIO_PA_GPIO     GPIO_NUM_46   /* speaker-amp enable, active-high */
 #define MOCHI_ES8311_I2C_ADDR   0x18          /* ES8311_CODEC_DEFAULT_ADDR */
 #define MOCHI_AUDIO_SAMPLE_RATE 24000         /* OpenAI Realtime PCM16 native */
+
+/* Consolidated UI icon sheet (design/30). The device's care/stat icons and
+ * the dev-menu tile icons all fetch + cache from this one sheet (80×80
+ * cells → downsampled to 48). Was "ui-v1"; ui-icons-a folds those four plus
+ * the menu glyphs into a single keyed sheet. */
+#define MOCHI_UI_SHEET "ui-icons-a"

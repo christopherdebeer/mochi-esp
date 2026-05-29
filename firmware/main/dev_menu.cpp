@@ -18,7 +18,9 @@
 #include "model_prefs.h"
 #include "ota_channel.h"
 #include "ota_update.h"
-#include "sprite_cache.h"   /* ui-v1 icon cells for the stat rows (design/30) */
+#include "sprite_cache.h"   /* ui-icons-a cells for stat rows + tile icons (design/30) */
+#include "sprite_fetch.h"   /* lazy on-demand fetch of menu/tile icons */
+#include "compositor.h"     /* downsample native 80×80 → 48 */
 
 static const char *TAG = "dev_menu";
 
@@ -69,14 +71,19 @@ static int                  s_energy = -1;
 static constexpr int ICON_DIM   = 48;                       /* cached size */
 static constexpr int ICON_STRIDE = (ICON_DIM + 7) / 8;      /* 6 bytes/row */
 static constexpr int ICON_BYTES  = ICON_STRIDE * ICON_DIM;  /* 288 */
+/* Native ui cell on the sheet (server delivers 80×80 2-plane); downsampled
+ * to ICON_DIM. Must match main.cpp UI_CELL_NATIVE_*. */
+static constexpr int UI_NATIVE_DIM   = 80;
+static constexpr int UI_NATIVE_BYTES = (UI_NATIVE_DIM / 8) * UI_NATIVE_DIM;  /* 800 */
 
 struct IconSlot {
-    char     key[16];
+    char     key[24];
     uint8_t *ink;
     uint8_t *mask;
     bool     ok;
 };
-static constexpr int ICON_SLOTS = 6;
+/* Enough for the care/stat icons + every distinct menu-tile glyph. */
+static constexpr int ICON_SLOTS = 18;
 static IconSlot s_icon_cache[ICON_SLOTS] = {};
 static int      s_icon_n = 0;
 
@@ -100,10 +107,37 @@ static const IconSlot *get_icon(const char *key) {
     snprintf(ink_s,  sizeof(ink_s),  "%s_icon_%dx%d_ink",  key, ICON_DIM, ICON_DIM);
     snprintf(mask_s, sizeof(mask_s), "%s_icon_%dx%d_mask", key, ICON_DIM, ICON_DIM);
     size_t gi = 0, gm = 0;
-    if (sprite_cache::load("ui-v1", ink_s,  slot.ink,  ICON_BYTES, &gi) && gi == ICON_BYTES &&
-        sprite_cache::load("ui-v1", mask_s, slot.mask, ICON_BYTES, &gm) && gm == ICON_BYTES) {
+    if (sprite_cache::load(MOCHI_UI_SHEET, ink_s,  slot.ink,  ICON_BYTES, &gi) && gi == ICON_BYTES &&
+        sprite_cache::load(MOCHI_UI_SHEET, mask_s, slot.mask, ICON_BYTES, &gm) && gm == ICON_BYTES) {
         slot.ok = true;
+        return &slot;
     }
+    /* Cache miss → fetch the native 80×80 cell from the sheet, downsample to
+     * ICON_DIM, and cache it. Blocking, but only the first time a given icon
+     * is needed (when a menu page that uses it is first opened); the care/
+     * stat icons are already warmed at boot by main.cpp. Offline → the fetch
+     * fails → the caller falls back to a one-letter tag. */
+    uint8_t *ni = (uint8_t *)heap_caps_malloc(UI_NATIVE_BYTES, MALLOC_CAP_SPIRAM);
+    uint8_t *nm = (uint8_t *)heap_caps_malloc(UI_NATIVE_BYTES, MALLOC_CAP_SPIRAM);
+    if (ni && nm) {
+        char url[128];
+        snprintf(url, sizeof(url),
+            "https://mochi.val.run/devsprite/cell/" MOCHI_UI_SHEET "/%s", key);
+        uint16_t w = 0, h = 0;
+        uint32_t ms = 0;
+        if (sprite_fetch_cell(url, ni, nm, UI_NATIVE_BYTES, &w, &h, &ms) &&
+            w == UI_NATIVE_DIM && h == UI_NATIVE_DIM) {
+            memset(slot.ink,  0xFF, ICON_BYTES);
+            memset(slot.mask, 0xFF, ICON_BYTES);
+            compositor::downsample_plane(slot.ink,  ICON_DIM, ICON_DIM, ni, UI_NATIVE_DIM, UI_NATIVE_DIM);
+            compositor::downsample_plane(slot.mask, ICON_DIM, ICON_DIM, nm, UI_NATIVE_DIM, UI_NATIVE_DIM);
+            if (sprite_cache::store(MOCHI_UI_SHEET, ink_s,  slot.ink,  ICON_BYTES))
+                sprite_cache::store(MOCHI_UI_SHEET, mask_s, slot.mask, ICON_BYTES);
+            slot.ok = true;
+        }
+    }
+    heap_caps_free(ni);
+    heap_caps_free(nm);
     return slot.ok ? &slot : nullptr;
 }
 
@@ -177,6 +211,7 @@ struct Tile {
     bool        toggle;
     const char *value;   /* toggle pill text; nullptr for actions */
     const char *ssid;    /* WifiSwitch payload; nullptr otherwise */
+    const char *icon;    /* ui-icons-a key for the tile glyph; nullptr = text-only */
 };
 
 static void clear_buttons(void) {
@@ -314,9 +349,23 @@ static void draw_glyphs_centered_in(epaper_driver_display *epd, int x, int w,
 
 static void draw_tile(epaper_driver_display *epd, int x, int y, int w, int h,
                       const Tile &t, bool flash) {
+    /* Icon action (design/30): a ui-icons-a glyph centred in the upper area
+     * with the label centred below — flat (no fill/border) so the line-art
+     * icon reads. Falls through to the legacy filled style when no icon is
+     * set or it isn't available yet (offline first paint). Toggles keep
+     * their pill (handled below). */
+    const IconSlot *ic = (t.icon && !t.toggle) ? get_icon(t.icon) : nullptr;
+    if (ic) {
+        int isz = h - 16;
+        if (isz > 44) isz = 44;
+        if (isz < 16) isz = 16;
+        blit_icon(epd, x + (w - isz) / 2, y + 3, isz, ic);
+        draw_glyphs_centered_in(epd, x, w, y + h - 11, 1, t.label, DRIVER_COLOR_BLACK);
+        return;
+    }
     if (!t.toggle) {
-        /* Action: filled black with a white centred label — reads as
-         * "press to do" and visually distinct from a toggle. */
+        /* Action without an (available) icon: filled black with a white
+         * centred label — reads as "press to do". */
         fill_rect(epd, x, y, w, h, DRIVER_COLOR_BLACK);
         draw_glyphs_centered_in(epd, x, w, y + (h - 8) / 2, 1,
                                 t.label, DRIVER_COLOR_WHITE);
@@ -427,9 +476,9 @@ static void render_menu_p1(epaper_driver_display *epd) {
     draw_stat_row(epd, y, "star",  'E', s_energy); y += 20;
 
     const Tile tiles[] = {
-        { "Memories", TouchResult::Memories, false, nullptr, nullptr },
-        { "Places",   TouchResult::Places,   false, nullptr, nullptr },
-        { "Go home",  TouchResult::GoHome,   false, nullptr, nullptr },
+        { "Memories", TouchResult::Memories, false, nullptr, nullptr, "memories" },
+        { "Places",   TouchResult::Places,   false, nullptr, nullptr, "places" },
+        { "Go home",  TouchResult::GoHome,   false, nullptr, nullptr, "home" },
     };
     layout_tiles(epd, tiles, 3, y + 4, 2);
 }
@@ -458,9 +507,9 @@ static void render_menu_p2(epaper_driver_display *epd) {
     epd_ui::draw_text(epd, MARGIN, 42, 1, l2);
 
     const Tile tiles[] = {
-        { "Switch WiFi", TouchResult::SwitchWifi,    false, nullptr, nullptr },
-        { "OpenAI key",  TouchResult::OpenKeyPortal, false, nullptr, nullptr },
-        { "AI models",   TouchResult::OpenModels,    false, nullptr, nullptr },
+        { "Switch WiFi", TouchResult::SwitchWifi,    false, nullptr, nullptr, "wifi" },
+        { "OpenAI key",  TouchResult::OpenKeyPortal, false, nullptr, nullptr, "secret_key" },
+        { "AI models",   TouchResult::OpenModels,    false, nullptr, nullptr, "sparkle_stars" },
     };
     layout_tiles(epd, tiles, 3, 56, 2);
 }
@@ -474,12 +523,12 @@ static void render_menu_p3(epaper_driver_display *epd) {
     /* Channel pill value — buffer must outlive layout_tiles (same scope). */
     const char *chan = ota_channel_name(ota_channel_get());
     const Tile tiles[] = {
-        { "Update now",  TouchResult::UpdateNow,     false, nullptr, nullptr },
-        { "Channel",     TouchResult::ToggleChannel, true,  chan,    nullptr },
-        { "Add WiFi",    TouchResult::ChangeWifi,    false, nullptr, nullptr },
-        { "Forget WiFi", TouchResult::ForgetWifi,    false, nullptr, nullptr },
-        { "Re-pair",     TouchResult::RePair,        false, nullptr, nullptr },
-        { "Consolidate", TouchResult::ConsolidateNow, false, nullptr, nullptr },
+        { "Update now",  TouchResult::UpdateNow,     false, nullptr, nullptr, "update" },
+        { "Channel",     TouchResult::ToggleChannel, true,  chan,    nullptr, nullptr },
+        { "Add WiFi",    TouchResult::ChangeWifi,    false, nullptr, nullptr, "wifi" },
+        { "Forget WiFi", TouchResult::ForgetWifi,    false, nullptr, nullptr, "wifi_off" },
+        { "Re-pair",     TouchResult::RePair,        false, nullptr, nullptr, "repair" },
+        { "Consolidate", TouchResult::ConsolidateNow, false, nullptr, nullptr, "dream" },
     };
     layout_tiles(epd, tiles, 6, 20, 2);
 }
@@ -505,7 +554,7 @@ static void render_wifi(epaper_driver_display *epd) {
         snprintf(labels[n], sizeof(labels[n]), "%s%s",
                  is_cur ? "* " : "", c.ssid);
         snprintf(ssids[n], sizeof(ssids[n]), "%s", c.ssid);
-        tiles[n] = { labels[n], TouchResult::WifiSwitch, false, nullptr, ssids[n] };
+        tiles[n] = { labels[n], TouchResult::WifiSwitch, false, nullptr, ssids[n], nullptr };
         n++;
     }
     if (n == 0) {
@@ -530,9 +579,9 @@ static void render_models(epaper_driver_display *epd) {
      * persona (voice.cpp appends ?mode=debug). */
     const char *dbg = model_prefs_voice_debug() ? "on" : "off";
     const Tile tiles[] = {
-        { "Voice", TouchResult::CycleVoiceModel,  true, vm,  nullptr },
-        { "Text",  TouchResult::CycleTextModel,   true, tm,  nullptr },
-        { "Debug", TouchResult::ToggleVoiceDebug, true, dbg, nullptr },
+        { "Voice", TouchResult::CycleVoiceModel,  true, vm,  nullptr, nullptr },
+        { "Text",  TouchResult::CycleTextModel,   true, tm,  nullptr, nullptr },
+        { "Debug", TouchResult::ToggleVoiceDebug, true, dbg, nullptr, nullptr },
     };
     layout_tiles(epd, tiles, 3, 22, 1);
 }

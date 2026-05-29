@@ -35,13 +35,26 @@ sheet-id swap (same native size). And the studio create default is now
 **category-aware** (`NewSheet.tsx`): scene→200, pet→96, ui/item→80, so new
 icon sheets start correct.
 
-**To actually use it in the dev menu, three things remain:** (1) size — done;
-(2) generate + commit the icon art (Icons panel; until then cells are
-empty); (3) the firmware pointer swap `ui-v1` → `ui-icons-a` for the
-stat-row + care icons (the device-critical keys `heart`/`star`/`bowl`/`ball`
-are present), plus wiring the menu-tile icons (those aren't drawn from the
-sheet yet — the tile restyle is still backlog below). Steps 2–3 are the
-next pass; (3) ships on an OTA.
+**Dev-menu use — all shipped (firmware 0.3.10):** (1) size — done; (2) art
+generated + committed (Icons panel); (3) firmware now points at
+`ui-icons-a` and the **dev-menu tiles draw icons** too:
+
+- Shared `MOCHI_UI_SHEET "ui-icons-a"` (`board_pins.h`); `main.cpp` fetches
+  the care/stat icons (heart/star/bowl/ball) + ETag-probes + caches under
+  it (the device-critical keys are present).
+- `dev_menu.cpp` `get_icon` now **lazy-fetches on a cache miss** (native
+  80×80 → downsample 48 → cache), so any tile glyph loads the first time
+  its page opens (care/stats are pre-warmed at boot, so only menu-only
+  glyphs fetch on open). `ICON_SLOTS` raised to 18.
+- `Tile` gained an `icon` key; `draw_tile` renders **icon-top + label-
+  below, flat** for icon actions (falls back to the filled style if the
+  icon isn't available yet — e.g. offline first paint; toggles keep their
+  pill). Per-page mapping: home/memories/places · wifi/secret_key/
+  sparkle_stars · update/(channel toggle)/wifi/wifi_off/repair/dream.
+
+Builds clean (esp32s3, -Werror); 0.3.10 baked. Needs on-device review —
+the line-screen icon dither + tile layout are unverified on the panel,
+and the first open of each menu page does a brief blocking icon fetch.
 
 ## Studio panels (this pass)
 
