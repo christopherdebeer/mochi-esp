@@ -1,7 +1,7 @@
 # 30 — UI sprites for the dev-menu + stats (and the icons we still need)
 
-Status: stats page implemented (this branch); menu-tile restyle + new icons
-are spec + backlog below.
+Status: stats page implemented (firmware); studio keying editor shipped;
+menu-tile restyle + new icons are spec + backlog below.
 
 ## Goal
 
@@ -52,14 +52,34 @@ Mood glyphs for the stats title are a separate set if we ever want them
 Today `ui-v1` cells are authored ad-hoc; the studio has no first-class way
 to (re)generate icon cells the way it generates scene sheets. To fill the
 wishlist repeatably we want a small **UI-sheet config** in the studio,
-distinct from scene-sheet generation:
+distinct from scene-sheet generation. The **keying** half is **shipped**;
+the **generation** half (per-icon prompts) is the remaining gap.
 
-- **Keying / transparency.** Scene cells are opaque backdrops; UI icons are
-  **transparent-margin glyphs** (the 2-plane ink+mask the device blits —
-  mask=1 transparent, ink=0 black, design/05 + compositor.cpp). The gen +
-  keying pipeline must emit a clean alpha so the downsample preserves a
-  tight silhouette on paper, not a filled box. This is the opposite keying
-  intent from scenes and needs its own keying-pixel / threshold config.
+### Keying editor — ported into the studio (done)
+
+Investigated the legacy `/dev` keying (design notes in this doc's history):
+it's a **corner-sample chroma key** (`c15r/mochi` `backend/keying-pixel.ts`)
+— average the four PNG corners → key colour, `alpha=0` within `tolerance`
+(0–100 → RGB distance), optional **corner-feather** edge smoothing — then
+the device 1-bit ink+mask threshold (`c15r/mochi-device` `encode.ts` +
+`presets.ts`, `icon` preset = flat threshold 128). It's already
+**category-aware**: `ui`/`pet`/`item` default to `corner-feather`, `scene`
+to `off` (`shared/sheets/keying.ts`), with per-sheet params stored at
+`mochi-sheets:keying:<id>` and a server re-derive on save
+(`GET/PUT/DELETE /sheets/:id/keying`, `backend/sheets.ts`).
+
+The studio now exposes this directly (no more bouncing to `/dev`):
+`ui` is already a selectable category in `NewSheet.tsx` (so uploads key
+with `corner-feather` by default), and `SheetPanel` gained a **keying
+editor** (`studio/panels/Sheet.tsx`) — algorithm + tolerance/featherPx/
+cornerSamplePx controls, a **source-vs-keyed preview** (keyed shown on a
+checkerboard so transparency is visible), Save (→ `PUT /keying`, server
+re-derives) and Reset-to-default (→ `DELETE /keying`). Backed by new
+`fetchKeying` / `saveKeying` / `resetKeying` / `sheetDerivedURL` in
+`studio/api.ts` hitting the same endpoints.
+
+### Generation half — still needed
+
 - **Per-icon prompts.** Each cell wants its own short prompt ("a simple
   1-bit line-art %s glyph, centred, thick strokes, transparent
   background") rather than the scene style preamble. A `ui-v1` prompt
@@ -70,12 +90,9 @@ distinct from scene-sheet generation:
   native cell size + the downsample targets the firmware expects, so a
   regenerated sheet stays drop-in for `sprite_cache`'s
   `<key>_icon_<w>x<h>_{ink,mask}` keys.
-- **Review.** Because keying for line-art is finicky, the studio should
-  preview each icon on **both** paper-white and a tile (the device draws
-  them on white tiles) so a too-light stroke is caught before it ships.
-
-This is a studio + server change (devsprite keying + a UI prompt template +
-a sheet-type flag); scoped here as the design, not yet built.
+- **Review.** The keyed-on-checker preview above already catches a
+  too-light stroke before it ships; a paper-white-vs-tile toggle would
+  finish this off.
 
 ## Firmware: what shipped this pass
 
