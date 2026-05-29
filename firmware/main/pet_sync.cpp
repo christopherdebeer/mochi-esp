@@ -47,6 +47,16 @@ static bool  s_have_snapshot;
  * at device geometry (design/17). Guarded by s_mtx like s_pet. */
 static char s_location[40];
 static char s_location_sheet[64];
+/* Cached id→sheetId map of every place in /api/state's root-level
+ * places[], refreshed on every pull/mutate. Lets prefetch resolve a
+ * nav_place target id to its device sheet with no extra round-trip
+ * (design/29). s_mtx-guarded like s_location. */
+#define PS_MAX_PLACES      16
+#define PS_PLACE_ID_MAX    40
+#define PS_PLACE_SHEET_MAX 64
+static char    s_place_ids[PS_MAX_PLACES][PS_PLACE_ID_MAX];
+static char    s_place_sheets[PS_MAX_PLACES][PS_PLACE_SHEET_MAX];
+static uint8_t s_place_count;
 /* Current costume id ("" = base species). The device renders the pet
  * from costume-<petId>-<costumeId>-v1 when set (design/17). */
 static char s_costume_id[40];
@@ -197,6 +207,36 @@ static bool parse_state_response(const char *body, int len,
         }
     }
 
+    /* Cache the full id→sheetId map for prefetch (design/29). Refreshed
+     * wholesale each parse so a dropped/added place is reflected. Locked
+     * because resolve() reads it from the main loop while a pull on
+     * net_worker / the push worker writes it here; the callers take s_mtx
+     * only AFTER parse_state_response returns, so this nested-free lock
+     * is safe. */
+    {
+        if (!s_mtx) s_mtx = xSemaphoreCreateMutex();
+        xSemaphoreTake(s_mtx, portMAX_DELAY);
+        s_place_count = 0;
+        cJSON *pl = cJSON_GetObjectItemCaseSensitive(root, "places");
+        if (cJSON_IsArray(pl)) {
+            cJSON *p = NULL;
+            cJSON_ArrayForEach(p, pl) {
+                if (s_place_count >= PS_MAX_PLACES) break;
+                cJSON *pid = cJSON_GetObjectItemCaseSensitive(p, "id");
+                cJSON *psh = cJSON_GetObjectItemCaseSensitive(p, "sheetId");
+                if (cJSON_IsString(pid) && pid->valuestring && pid->valuestring[0] &&
+                    cJSON_IsString(psh) && psh->valuestring && psh->valuestring[0]) {
+                    snprintf(s_place_ids[s_place_count], PS_PLACE_ID_MAX,
+                        "%s", pid->valuestring);
+                    snprintf(s_place_sheets[s_place_count], PS_PLACE_SHEET_MAX,
+                        "%s", psh->valuestring);
+                    s_place_count++;
+                }
+            }
+        }
+        xSemaphoreGive(s_mtx);
+    }
+
     /* consolidationAdvised: an object when the server advises a pass,
      * null otherwise (see backend/consolidate.ts buildStateResponse). */
     if (out_advised) {
@@ -328,6 +368,23 @@ void pet_sync_current_location(char *id_out, size_t id_cap,
     if (id_out && id_cap) snprintf(id_out, id_cap, "%s", s_location);
     if (sheet_out && sheet_cap) snprintf(sheet_out, sheet_cap, "%s", s_location_sheet);
     xSemaphoreGive(s_mtx);
+}
+
+bool pet_sync_resolve_place_sheet(const char *place_id, char *out, size_t cap) {
+    if (!place_id || !place_id[0] || !out || cap == 0) return false;
+    out[0] = '\0';
+    if (!s_mtx) return false;   /* no pull yet → nothing cached */
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    bool found = false;
+    for (uint8_t i = 0; i < s_place_count; i++) {
+        if (strcmp(s_place_ids[i], place_id) == 0) {
+            snprintf(out, cap, "%s", s_place_sheets[i]);
+            found = out[0] != '\0';
+            break;
+        }
+    }
+    xSemaphoreGive(s_mtx);
+    return found;
 }
 
 void pet_sync_seed_location(const char *place_id, const char *sheet) {

@@ -150,6 +150,20 @@ typedef struct {
 bool scene_pack_action_at(int16_t x, int16_t y, int slop_px,
                           scene_pack_action_t *out);
 
+/* Max length (incl. NUL) of a nav_place target id; matches the device's
+ * location-id buffers (pet_sync s_location is 40). */
+#define SCENE_PLACE_ID_MAX 40
+
+/* Collect the distinct nav_place target place-ids referenced by ANY cell
+ * of the active pack (design/29 — eager prefetch of reachable places).
+ * Only format=1 packs carry inline nav_place zones; format=0 (the embedded
+ * home bundle) has none, so this returns 0 there. Writes up to `max`
+ * NUL-terminated ids into out_ids[] (each SCENE_PLACE_ID_MAX bytes) and
+ * returns the number collected. Does not disturb the current scene index.
+ * Duplicates are coalesced; ids longer than the buffer are skipped. */
+uint8_t scene_pack_collect_place_targets(char out_ids[][SCENE_PLACE_ID_MAX],
+                                         uint8_t max);
+
 #ifdef __cplusplus
 }
 #endif

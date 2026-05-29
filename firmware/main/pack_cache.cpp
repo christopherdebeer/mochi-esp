@@ -183,3 +183,65 @@ const uint8_t *pack_cache_load_geom_only(const char *sheet,
         sheet, (unsigned)cw, (unsigned)ch);
     return load_cached(cache_sheet);
 }
+
+bool pack_cache_prefetch_geom(const char *sheet, uint16_t cw, uint16_t ch) {
+    if (!sheet || !sheet[0]) return false;
+    /* Same (sheet, cw, ch) cache key + URL as pack_cache_active_geom so
+     * a prefetch warms exactly the blob the later travel load reads. */
+    char cache_sheet[64];
+    snprintf(cache_sheet, sizeof(cache_sheet), "%s.%ux%u.pack",
+        sheet, (unsigned)cw, (unsigned)ch);
+    char url[160];
+    snprintf(url, sizeof(url),
+        "https://mochi.val.run/devsprite/pack/%s?cw=%u&ch=%u",
+        sheet, (unsigned)cw, (unsigned)ch);
+
+    /* ETag probe. Offline → nothing to warm; the travel path will keep
+     * its own existing fallbacks. */
+    char remote[40] = {};
+    if (!sprite_fetch_head_etag(url, remote, sizeof(remote))) {
+        ESP_LOGD(TAG, "prefetch '%s' ETag probe failed (offline?)", sheet);
+        return false;
+    }
+
+    /* Already warm: a matching ETag means we stored this body alongside
+     * the ETag on a prior fetch. Skip the GET entirely — this is the
+     * cheap steady-state case once a neighbour has been seen once. */
+    char local[40] = {};
+    sprite_cache::load_etag(cache_sheet, local, sizeof(local));
+    if (remote[0] && strcmp(remote, local) == 0) {
+        ESP_LOGD(TAG, "prefetch '%s' already warm (%s)", sheet, remote);
+        return true;
+    }
+
+    /* Changed / cold → GET into a TEMPORARY PSRAM buffer, validate,
+     * persist to LittleFS, then FREE it. We deliberately do not keep the
+     * bytes: prefetch only warms the disk cache, it doesn't swap the
+     * live pack. */
+    uint8_t *buf = (uint8_t *)heap_caps_malloc(PACK_MAX_BYTES, MALLOC_CAP_SPIRAM);
+    if (!buf) {
+        ESP_LOGW(TAG, "prefetch '%s' PSRAM alloc failed", sheet);
+        return false;
+    }
+    size_t got = 0;
+    uint32_t ms = 0;
+    bool ok = sprite_fetch_blob(url, buf, PACK_MAX_BYTES, &got, &ms);
+    if (!ok || !looks_like_mpk1(buf, got)) {
+        ESP_LOGW(TAG, "prefetch '%s' fetch invalid (ok=%d, %u bytes)",
+            sheet, (int)ok, (unsigned)got);
+        heap_caps_free(buf);
+        return false;
+    }
+    bool stored = sprite_cache::store(cache_sheet, PACK_SUFFIX, buf, got);
+    if (stored) {
+        sprite_cache::store_etag(cache_sheet, remote);
+        ESP_LOGI(TAG, "prefetched '%s' %u bytes in %u ms (ETag %s)",
+            sheet, (unsigned)got, (unsigned)ms, remote);
+        device_diag_eventf(DIAG_INFO, "pack_cache",
+            "{\"src\":\"prefetch\"}", "%s warmed", sheet);
+    } else {
+        ESP_LOGW(TAG, "prefetch '%s' cache store failed", sheet);
+    }
+    heap_caps_free(buf);
+    return stored;
+}

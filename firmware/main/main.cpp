@@ -1858,6 +1858,15 @@ extern "C" void app_main(void) {
                                             * re-render (e-paper flash) on each
                                             * 30 s retry. Cleared on success. */
     int64_t travel_retry_at_us     = 0;
+    /* Eager place prefetch (design/29): on each travel swap we collect the
+     * place ids reachable from the newly-loaded pack into this queue and
+     * drain it one-per-idle-tick (warming each pack's LittleFS cache) so a
+     * subsequent nav_place tap hits the fast warm path instead of a cold
+     * GET. Bounded to a handful — a cell rarely exits to more than a few
+     * places, and we only need the immediately-reachable ring. */
+    char    prefetch_ids[6][SCENE_PLACE_ID_MAX];
+    uint8_t prefetch_n = 0;   /* collected this travel */
+    uint8_t prefetch_i = 0;   /* next to drain */
     /* Backing store for the failure bubble's text. Static so the
      * file-scope s_active_thought.text pointer stays valid after we pin
      * it as a persistent, pageable passive bubble. Sized for the worst
@@ -2561,6 +2570,7 @@ extern "C" void app_main(void) {
             }
             char loc[40], lsheet[64];
             pet_sync_current_location(loc, sizeof(loc), lsheet, sizeof(lsheet));
+            bool traveled_this_tick = false;   /* gate the prefetch drain below */
             if (loc[0] && strcmp(loc, last_location) != 0) {
                 bool swapped = false;
                 bool fetch_attempted = false;
@@ -2620,6 +2630,14 @@ extern "C" void app_main(void) {
                         s_thought_active = false;
                         memset(&s_active_thought, 0, sizeof(s_active_thought));
                     }
+                    /* Collect the places reachable from the pack we just
+                     * loaded so the idle drain below can warm them ahead of
+                     * the next nav_place tap (design/29). Drained on later
+                     * ticks, not now — the arrival repaint already paid for
+                     * a fetch. format=0 home returns 0 (nothing to warm). */
+                    prefetch_n = scene_pack_collect_place_targets(prefetch_ids, 6);
+                    prefetch_i = 0;
+                    traveled_this_tick = true;
                 } else if (fetch_attempted) {
                     /* Couldn't reach the place. Stay on the current scene
                      * but float a thought bubble so the failure isn't a
@@ -2661,6 +2679,27 @@ extern "C" void app_main(void) {
                  * loop every tick. On failure the backoff above forces a
                  * later retry; re-tapping the nav zone forces one now. */
                 snprintf(last_location, sizeof(last_location), "%s", loc);
+            }
+
+            /* Eager prefetch drain (design/29): warm one reachable place
+             * pack per idle tick so a later nav_place tap hits the warm
+             * cache path instead of a cold GET. Skip the tick we actually
+             * traveled (its repaint already cost a fetch) and only when
+             * online with no touch pending / portal / imagine in flight —
+             * each warm is a blocking HEAD (+ a cold GET on first sight)
+             * that mustn't stall a live interaction. Once a place's ring is
+             * warm the HEAD just confirms the ETag and the queue idles
+             * until the next travel refills it. Best-effort throughout. */
+            if (!traveled_this_tick && prefetch_i < prefetch_n &&
+                s_net_phase == NetPhase::Online && !got_touch &&
+                !key_portal::active() && !imagine_in_flight()) {
+                char psheet[64];
+                const char *pid = prefetch_ids[prefetch_i++];
+                if (pet_sync_resolve_place_sheet(pid, psheet, sizeof(psheet)) &&
+                    psheet[0]) {
+                    ESP_LOGI(TAG, "prefetch warming '%s' (sheet %s)", pid, psheet);
+                    pack_cache_prefetch_geom(psheet, SCENE_W, SCENE_H);
+                }
             }
         }
 
@@ -3004,6 +3043,19 @@ extern "C" void app_main(void) {
                 ? scene_act.seed_len : sizeof(place_id) - 1;
             memcpy(place_id, scene_act.seed_text, n);
             ESP_LOGI(TAG, "scene nav_place → %s", place_id);
+            /* Instant tap ack (design/29): the enter POST + travel fetch
+             * below block for up to a few seconds; without a render here
+             * the tap reads as a dead button. Pop a quick partial-refresh
+             * "traveling" bubble first; the travel block repaints the real
+             * scene a tick later (and passes no thought, clearing this). */
+            {
+                static pet_thought_t s_travel_thought;
+                memset(&s_travel_thought, 0, sizeof(s_travel_thought));
+                s_travel_thought.action_kind = THOUGHT_ACTION_NONE;
+                s_travel_thought.text        = "traveling...";
+                s_travel_thought.style       = THOUGHT_STYLE_THOUGHT;
+                render_with_expression("thinking", false, &s_travel_thought);
+            }
             pet_sync_enter_place(place_id);
             /* Force the travel block to re-render even when the user
              * tapped to go to the place they're already in. Without

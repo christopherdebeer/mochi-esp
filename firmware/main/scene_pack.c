@@ -296,6 +296,40 @@ static void name_to_action(const char *name, scene_pack_action_t *out) {
     }
 }
 
+uint8_t scene_pack_collect_place_targets(char out_ids[][SCENE_PLACE_ID_MAX],
+                                         uint8_t max) {
+    if (!s_open || !out_ids || max == 0) return 0;
+    /* nav_place zones are inline (format=1) only; the embedded format=0
+     * home bundle navigates within itself, nothing to prefetch. */
+    if (s_pack.format != 1) return 0;
+
+    uint8_t n = 0;
+    for (uint16_t cell = 0; cell < s_pack.count && n < max; cell++) {
+        const uint8_t zc = mpk_zone_count(&s_pack, cell);
+        for (uint8_t z = 0; z < zc && n < max; z++) {
+            mpk_zone_v1_t zn;
+            if (!mpk_zone_get(&s_pack, cell, z, &zn)) continue;
+            if (zn.kind != MPK_ACTION_NAV_PLACE) continue;
+            if (!zn.seed_text || zn.seed_len == 0) continue;
+            if (zn.seed_len >= SCENE_PLACE_ID_MAX) continue;  /* too long; skip */
+
+            /* seed_text is borrowed and NOT NUL-terminated. */
+            char id[SCENE_PLACE_ID_MAX];
+            memcpy(id, zn.seed_text, zn.seed_len);
+            id[zn.seed_len] = '\0';
+
+            bool dup = false;
+            for (uint8_t i = 0; i < n; i++) {
+                if (strcmp(out_ids[i], id) == 0) { dup = true; break; }
+            }
+            if (dup) continue;
+            memcpy(out_ids[n], id, (size_t)zn.seed_len + 1);
+            n++;
+        }
+    }
+    return n;
+}
+
 bool scene_pack_action_at(int16_t x, int16_t y, int slop_px,
                           scene_pack_action_t *out) {
     if (!s_open || !out) return false;
