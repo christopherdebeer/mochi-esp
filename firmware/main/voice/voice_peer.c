@@ -742,6 +742,17 @@ static int pc_on_data(esp_peer_data_frame_t *frame, void *ctx) {
                     LOGI_DIAG("tool dispatch: %s call_id=%s args=%u B",
                         name_str, cid->valuestring,
                         (unsigned)(args_str ? strlen(args_str) : 0));
+                    /* Mirror the call to device_logs (design/27) so tool
+                     * use is visible OTA, not just in the USB voice_diag
+                     * dump. Args value omitted (free text); length only.
+                     * The matching "tool result" row (voice_tools.c)
+                     * carries ok/reason. */
+                    char tctx[96];
+                    snprintf(tctx, sizeof(tctx),
+                        "{\"tool\":\"%.48s\",\"args_len\":%u}",
+                        name_str,
+                        (unsigned)(args_str ? strlen(args_str) : 0));
+                    device_diag_event(DIAG_INFO, "voice", "tool call", tctx);
                     voice_tools_dispatch(cid->valuestring, name_str, args_str);
                 } else {
                     LOGW_DIAG("tool .done with no known name (call_id=%s)",
@@ -1359,6 +1370,60 @@ int voice_peer_send_text(const char *text) {
         int r2 = esp_peer_send_data(s_peer.pc, &f2);
         rc = (r1 == ESP_PEER_ERR_NONE && r2 == ESP_PEER_ERR_NONE) ? 0 : -1;
         LOGI_DIAG("send_text: %d/%d ('%s')", r1, r2, text);
+    }
+    free(item_json);
+    free(resp_json);
+    return rc;
+}
+
+int voice_peer_inject_note(const char *text) {
+    if (!text || !*text) return -1;
+    if (!s_peer.dc_stream_known) {
+        LOGW_DIAG("inject_note: no dc stream");
+        return -1;
+    }
+    /* Substrate→model context push (design/27): a system-role note the
+     * model folds into its next reply — care taps ("[from your body] …")
+     * and environment changes ("[notice] …"). Mirrors the legacy web
+     * client's notifyCare/notifyEnvironment. If the model is mid-utterance
+     * we cancel it first so the note lands promptly (a barge-in), then
+     * create the item + a response so the model reacts. */
+    if ((voice_phase_t)atomic_load(&s_peer.phase) == VOICE_PHASE_SPEAKING) {
+        cJSON *cancel = cJSON_CreateObject();
+        cJSON_AddStringToObject(cancel, "type", "response.cancel");
+        char *cancel_json = cJSON_PrintUnformatted(cancel);
+        cJSON_Delete(cancel);
+        if (cancel_json) { voice_peer_send_dc_json(cancel_json); free(cancel_json); }
+    }
+
+    /* { conversation.item.create, item:{ type:message, role:system,
+     *   content:[{ type:input_text, text }] } } + { response.create } */
+    cJSON *item_root = cJSON_CreateObject();
+    cJSON_AddStringToObject(item_root, "type", "conversation.item.create");
+    cJSON *item = cJSON_CreateObject();
+    cJSON_AddItemToObject(item_root, "item", item);
+    cJSON_AddStringToObject(item, "type", "message");
+    cJSON_AddStringToObject(item, "role", "system");
+    cJSON *content = cJSON_CreateArray();
+    cJSON_AddItemToObject(item, "content", content);
+    cJSON *part = cJSON_CreateObject();
+    cJSON_AddItemToArray(content, part);
+    cJSON_AddStringToObject(part, "type", "input_text");
+    cJSON_AddStringToObject(part, "text", text);
+    char *item_json = cJSON_PrintUnformatted(item_root);
+    cJSON_Delete(item_root);
+
+    cJSON *resp_root = cJSON_CreateObject();
+    cJSON_AddStringToObject(resp_root, "type", "response.create");
+    char *resp_json = cJSON_PrintUnformatted(resp_root);
+    cJSON_Delete(resp_root);
+
+    int rc = -1;
+    if (item_json && resp_json) {
+        int r1 = voice_peer_send_dc_json(item_json);
+        int r2 = voice_peer_send_dc_json(resp_json);
+        rc = (r1 == 0 && r2 == 0) ? 0 : -1;
+        LOGI_DIAG("inject_note: %d/%d ('%.48s')", r1, r2, text);
     }
     free(item_json);
     free(resp_json);

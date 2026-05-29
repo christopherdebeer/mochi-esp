@@ -51,6 +51,7 @@
 #include "cJSON.h"
 
 #include "voice/voice_https.h"
+#include "voice/voice_peer.h"
 #include "sprite_fetch.h"
 #include "openai_key.h"
 #include "pair_creds.h"
@@ -538,6 +539,19 @@ static void run_imagine(const imagine_req_t *req) {
     }
     set_phase(IMAGINE_DONE);
     atomic_store(&s_in_flight, false);
+    /* design/27: if the voice session that requested this is still live
+     * (~25-30 s later), tell the model the new place is ready so it can
+     * react — the device's analogue of the web client's
+     * notifyEnvironment. Substrate still owns the "somewhere new" hint;
+     * this is just the in-session nudge so the model isn't blind to an
+     * environment change it kicked off. */
+    if (voice_peer_is_running()) {
+        char note[176];
+        snprintf(note, sizeof(note),
+            "[notice] the place you imagined (\"%.48s\") is ready now — "
+            "you can drift there when you like.", req->seed_name);
+        voice_peer_inject_note(note);
+    }
     ESP_LOGI(TAG, "imagine done (ready, not traveled): place=%s sheet=%s",
         s_place_id, sheet_id);
 }

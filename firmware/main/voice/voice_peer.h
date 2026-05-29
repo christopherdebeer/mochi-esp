@@ -96,6 +96,18 @@ bool voice_peer_stop_requested(void);
 int voice_peer_send_text(const char *text);
 
 /*
+ * Inject a system-role note into the live session (design/27).
+ *
+ * Like voice_peer_send_text but with role "system" — a substrate→model
+ * context push (care taps "[from your body] …", environment changes
+ * "[notice] …") the model folds into its next reply. If the model is
+ * mid-utterance it issues a response.cancel first so the note lands
+ * promptly. Mirrors the legacy web client's notifyCare/notifyEnvironment.
+ * Returns 0 on success; -1 if the data channel isn't open or a send fails.
+ */
+int voice_peer_inject_note(const char *text);
+
+/*
  * Send a raw JSON string as one event over the data channel.
  *
  * Lower-level than voice_peer_send_text — caller owns the full

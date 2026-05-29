@@ -35,6 +35,7 @@
 #include "cJSON.h"
 
 #include "voice_diag.h"
+#include "device_diag.h"
 
 #define TAG "voice_tools"
 
@@ -156,7 +157,8 @@ static bool dispatch_to_valrun(const tool_req_t *req, tool_result_t *out) {
  * via the data channel. Refused calls and successful calls both get
  * their tool_result_t serialised here so the model sees a uniform
  * shape. */
-static void send_function_call_output(const char *call_id, const tool_result_t *result) {
+static void send_function_call_output(const char *call_id, const char *name,
+                                      const tool_result_t *result) {
     /* Build the model-facing JSON: {"ok":bool, "message"?:..., "reason"?:...}.
      * Stringified once and embedded as the .output field. */
     cJSON *model_root = cJSON_CreateObject();
@@ -193,6 +195,15 @@ static void send_function_call_output(const char *call_id, const tool_result_t *
     int r1 = voice_peer_send_dc_json(wrap_str);
     int r2 = resp_str ? voice_peer_send_dc_json(resp_str) : -1;
     LOGI_DIAG("tool result sent: ok=%d r1=%d r2=%d", result->ok, r1, r2);
+    /* Mirror the result to device_logs (design/27) — this is the row
+     * that makes refusals ("too far"/"tummy full"/asleep) visible OTA.
+     * WARN level on a refusal so it stands out in a level filter. */
+    char rctx[160];
+    snprintf(rctx, sizeof(rctx), "{\"tool\":\"%.48s\",\"ok\":%s,\"reason\":\"%.64s\"}",
+        name ? name : "?", result->ok ? "true" : "false",
+        result->reason ? result->reason : "");
+    device_diag_event(result->ok ? DIAG_INFO : DIAG_WARN,
+        "voice", "tool result", rctx);
     free(wrap_str);
     free(resp_str);
 }
@@ -262,7 +273,7 @@ static void worker_task(void *arg) {
             result.reason = strdup("couldn't reach my body");
         }
 
-        send_function_call_output(req->call_id, &result);
+        send_function_call_output(req->call_id, req->name, &result);
 
         tool_result_clear(&result);
         tool_req_free(req);

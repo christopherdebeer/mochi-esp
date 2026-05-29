@@ -69,6 +69,11 @@ Phase phase(void);
  * for ensuring is_active() is true; returns false otherwise. */
 bool send_text(const char *text);
 
+/* Inject a system-role note into the live session (design/27): care
+ * taps and place/environment changes the model should fold into its
+ * next reply. No-op (returns false) when no session is active. */
+bool send_note(const char *text);
+
 /* True when the worker requested an auto-stop (idle cap, hard cap,
  * or remote-side disconnect). The touch loop polls this and calls
  * stop_session() from its own task context; calling stop from the

@@ -399,6 +399,11 @@ bool send_text(const char *text) {
     return voice_peer_send_text(text) == 0;
 }
 
+bool send_note(const char *text) {
+    if (!s_active) return false;
+    return voice_peer_inject_note(text) == 0;
+}
+
 bool stop_requested(void) {
     return s_active && voice_peer_stop_requested();
 }

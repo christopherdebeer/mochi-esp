@@ -3098,6 +3098,29 @@ extern "C" void app_main(void) {
             /* Keep the dev-pet fallback in sync too, so projection
              * is consistent if the server sync drops out mid-session. */
             s_dev_pet.last_interaction_at = now_ms;
+            /* design/27: if a voice session is live, tell the model the
+             * human just physically cared for the pet so it can
+             * acknowledge — the device otherwise never surfaces the tap
+             * (the legacy web client does this via notifyCare). Curated
+             * to the care kinds; tapped/curious carry no note. */
+            if (voice::is_active()) {
+                const char *verb = nullptr;
+                switch (kind) {
+                    case EVENT_FED:       verb = "fed you";         break;
+                    case EVENT_PLAYED:    verb = "played with you"; break;
+                    case EVENT_COMFORTED: verb = "comforted you";   break;
+                    case EVENT_CHEERED:   verb = "cheered you on";  break;
+                    case EVENT_HUGGED:    verb = "hugged you";      break;
+                    default:              verb = nullptr;           break;
+                }
+                if (verb) {
+                    char note[128];
+                    snprintf(note, sizeof(note),
+                        "[from your body] your human just %s. "
+                        "acknowledge it briefly in your own voice.", verb);
+                    voice::send_note(note);
+                }
+            }
         }
         {
             pet_event_t slice[12];
