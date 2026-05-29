@@ -30,6 +30,15 @@ static bool s_inited = false;
  */
 static TaskHandle_t s_poll_task = nullptr;
 
+/* Poll cadence. Normal 100 ms (10 Hz) for snappy bring-up diagnostics;
+ * raised to a slow cadence while the device is dozing so the poll task
+ * stops waking the SoC ~10×/s and light sleep can actually accumulate
+ * residency between events. The FT6336 INT line still wakes instantly
+ * (see power.cpp's GPIO wake registration); the poll is only the
+ * fallback path, so a slow doze cadence just bounds worst-case
+ * wake-by-touch latency to one interval. */
+static volatile uint32_t s_poll_ms = 100;
+
 /*
  * ISR handler: pushes the GPIO number onto the queue. We don't read
  * I²C from the ISR because i2c_master_transmit_receive can block on
@@ -81,8 +90,14 @@ static void poll_task(void *) {
             last_x = 0xFFFF;
             last_y = 0xFFFF;
         }
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(s_poll_ms));
     }
+}
+
+void set_low_power(bool on) {
+    /* 1 Hz while dozing vs 10 Hz live. A held/new finger is still seen
+     * within one interval, and the INT path is unaffected. */
+    s_poll_ms = on ? 1000 : 100;
 }
 
 void init() {

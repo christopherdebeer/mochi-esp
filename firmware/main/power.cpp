@@ -5,9 +5,13 @@
 #include "esp_log.h"
 #include "esp_wifi.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "battery.h"
 #include "device_diag.h"
 #include "board_pins.h"
+#include "touch.h"
 
 #if CONFIG_MOCHI_LIGHT_SLEEP
 #include "esp_pm.h"
@@ -63,6 +67,11 @@ static uint32_t     s_doze_entries     = 0;
 static bool         s_net_online       = false;
 static bool         s_deep_sleep_req   = false;
 static bool         s_inited           = false;
+/* Actual-sleep telemetry: sampled each snapshot to report the % of
+ * wall time core 0 spent idle (≈ light sleep) since the previous
+ * snapshot — the ground truth the tier counter can't give. */
+static uint32_t     s_prev_idle_ct     = 0;
+static int64_t      s_prev_idle_wall   = 0;
 
 /* Switch WiFi modem-sleep depth. Only meaningful once WiFi is up; the
  * call is a harmless no-op error otherwise, but we gate on s_net_online
@@ -95,10 +104,12 @@ static void apply_tier(power_tier_t want, int64_t now_us) {
     if (want == POWER_TIER_DOZE) {
         s_doze_entries++;
         wifi_powersave(true);
+        touch::set_low_power(true);   /* stop the 10 Hz poll waking the SoC */
         device_diag_event(DIAG_INFO, "power", "doze", ctx);
         ESP_LOGI(TAG, "→ doze (live %lld ms)", (long long)prev_ms);
     } else {
         wifi_powersave(false);
+        touch::set_low_power(false);
         s_deep_sleep_req = false;
         device_diag_event(DIAG_INFO, "power", "wake", ctx);
         ESP_LOGI(TAG, "→ live (doze %lld ms)", (long long)prev_ms);
@@ -115,6 +126,10 @@ void power_init(void) {
     s_last_update_us   = now;
     s_tier_enter_us    = now;
     s_tier             = POWER_TIER_LIVE;
+    s_prev_idle_wall   = now;
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+    s_prev_idle_ct     = (uint32_t)ulTaskGetIdleRunTimeCounter();
+#endif
 
 #if CONFIG_MOCHI_LIGHT_SLEEP
     /* Automatic light sleep: the SoC sleeps whenever no task holds a PM
@@ -197,13 +212,34 @@ void power_telemetry_ctx(char *buf, size_t cap) {
     uint16_t mv = 0;
     battery_read(&mv, NULL);
     const int64_t now = esp_timer_get_time();
+
+    /* Actual core-0 idle (≈ light-sleep) fraction since the last
+     * snapshot. The run-time counter is esp_timer microseconds, so the
+     * ratio against wall-time us is a real residency %. uint32
+     * subtraction is wrap-safe for any interval < ~71 min (snapshots are
+     * ~5 min). -1 when run-time stats aren't compiled in. This is the
+     * number that tells us whether light sleep is *actually* engaging,
+     * vs the tier counter which only reports intent. */
+    int sleep_pct = -1;
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+    const uint32_t idle_now = (uint32_t)ulTaskGetIdleRunTimeCounter();
+    const uint32_t didle    = idle_now - s_prev_idle_ct;   /* wrap-safe */
+    const int64_t  dwall    = now - s_prev_idle_wall;
+    if (dwall > 0) {
+        int p = (int)((100LL * (int64_t)didle) / dwall);
+        sleep_pct = p < 0 ? 0 : (p > 100 ? 100 : p);
+    }
+    s_prev_idle_ct   = idle_now;
+    s_prev_idle_wall = now;
+#endif
+
     snprintf(buf, cap,
         "{\"tier\":\"%s\",\"live_ms\":%lld,\"doze_ms\":%lld,\"doze_n\":%u,"
-        "\"sleep_en\":%d,\"wifi_ps\":%d,\"doze_s\":%d,\"batt_mv\":%u,"
-        "\"up_s\":%lld}",
+        "\"sleep_pct\":%d,\"sleep_en\":%d,\"wifi_ps\":%d,\"doze_s\":%d,"
+        "\"batt_mv\":%u,\"up_s\":%lld}",
         s_tier == POWER_TIER_DOZE ? "doze" : "live",
         (long long)(s_live_us / 1000), (long long)(s_doze_us / 1000),
-        (unsigned)s_doze_entries, PWR_SLEEP_EN, PWR_WIFI_PS,
+        (unsigned)s_doze_entries, sleep_pct, PWR_SLEEP_EN, PWR_WIFI_PS,
         (int)CONFIG_MOCHI_DOZE_TIMEOUT_S, (unsigned)mv,
         (long long)(now / 1000000));
 }

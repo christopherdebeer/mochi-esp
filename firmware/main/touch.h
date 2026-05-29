@@ -46,4 +46,11 @@ bool wait_event(Event *out, int timeout_ms);
  * same zone. */
 bool current_point(Event *out);
 
+/* Low-power poll cadence. When `on`, the diagnostic poll task drops to
+ * ~1 Hz so it stops waking the SoC out of light sleep ~10×/s while the
+ * device is dozing (design/26). The INT-driven wake path is unaffected;
+ * this only bounds worst-case wake-by-touch latency to ~1 s on the
+ * poll-fallback path. Called by the power tier machine on doze/wake. */
+void set_low_power(bool on);
+
 }  /* namespace touch */
