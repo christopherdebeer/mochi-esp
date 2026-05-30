@@ -150,6 +150,11 @@ void set_radio_active(bool active) {
     }
 }
 
+bool is_up(void) {
+    wifi_ap_record_t ap;
+    return esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+}
+
 bool connect_any(char *ip_str, size_t ip_len,
                  char *out_ssid, size_t out_ssid_len) {
     sta_stack_up();

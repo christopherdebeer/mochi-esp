@@ -467,6 +467,38 @@ row). Risk: blind on hardware (the doc's standing caveat) — it's behind
 one Kconfig flag, ships on the beta channel first, and OTA rollback
 covers a boot failure.
 
+### Field result — v0.3.11 confirmed working + a travel-latency regression → v0.3.12
+
+A ~5–10 h v0.3.11 boot confirmed the mechanism: 99% residency, multi-hour
+continuous dozes, and — the proof — **all telemetry batch-flushed on wake
+with one `server_at`**: the device was genuinely offline (radio dropped)
+the whole doze, vs flushing every ~2 min on v0.3.3. No crashes, clean
+reconnect on wake. (Discharge magnitude still pending a deeper unplugged
+run into the matched 3800–3920 mV band.)
+
+But it surfaced a **regression: travel took multiple seconds.** Root cause:
+`pack_cache`'s `resolve_active` did a blocking HEAD ETag probe (8 s
+timeout, `sprite_fetch.cpp`) **before** consulting the cache, on the render
+thread — and with WiFi-drop, travel almost always happens right after a
+doze wake while the link is still down, so the probe rode the full timeout
+before falling back to cache. The cache (already valid) was gated behind a
+doomed network call. **v0.3.12 fixes it:**
+
+1. **Link-gated probe (`wifi_sta::is_up()`).** `resolve_active` +
+   `pack_cache_prefetch_geom` short-circuit to the cache/embedded
+   immediately when the STA isn't associated — no 8 s timeout to discover
+   we're offline. (`is_up()` = a cheap `esp_wifi_sta_get_ap_info` check.)
+2. **Cache-first travel + post-arrival refresh.** The travel block loads
+   the place from `pack_cache_load_geom_only` (cache only, no probe) and
+   renders **instantly**, then calls the new `pack_cache_refresh_geom`,
+   which returns bytes only when the server pack actually changed (NULL +
+   no alloc on offline/unchanged) → a second repaint happens solely on a
+   genuine update. Cold (never-cached) places still block-fetch once.
+
+Net: travel is instant from cache (online or offline), freshness is
+preserved via the background-style refresh, and the prefetch drain no
+longer eats a HEAD timeout per idle tick while dropped.
+
 ## Telemetry
 
 All power telemetry flows through the existing `device_diag` →

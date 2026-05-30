@@ -40,6 +40,13 @@ bool switch_to(const struct mochi_wifi_creds *creds,
  * connected (the driver re-associates to the config it still holds). */
 void set_radio_active(bool active);
 
+/* True when the STA is currently associated to an AP. Cheap, synchronous
+ * probe of the driver state (no network round-trip) — callers gate a
+ * would-be-blocking fetch on it so an offline device (e.g. just woke from
+ * doze with the radio dropped) serves cache instead of eating a TCP/TLS
+ * timeout. Returns false when the driver isn't started / not connected. */
+bool is_up(void);
+
 /* Scan for visible APs, intersect with the stored MRU cred list, and
  * try matching credentials in scan-strength order until one connects
  * or all fail. Used on the already-provisioned branch so a device
