@@ -21,9 +21,14 @@ static int s_retry = 0;
 static constexpr int MAX_RETRY = 8;
 static char s_ip[16] = {};
 static bool s_inited = false;
+/* Set while a disconnect is intentional (doze radio-down, design/26):
+ * the disconnect handler must not fight it with an auto-reconnect.
+ * Cleared by set_radio_active(true), which re-associates on wake. */
+static volatile bool s_suppress_reconnect = false;
 
 static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data) {
     if (id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_suppress_reconnect) return;   /* deliberate doze drop */
         if (s_retry < MAX_RETRY) {
             s_retry++;
             ESP_LOGW(TAG, "disconnect; retry %d/%d", s_retry, MAX_RETRY);
@@ -125,6 +130,24 @@ bool switch_to(const struct mochi_wifi_creds *creds,
     sta_stack_up();
     ESP_LOGI(TAG, "runtime switch → '%s'", creds->ssid);
     return try_one(creds, ip_str, ip_len, 15000);
+}
+
+void set_radio_active(bool active) {
+    if (active) {
+        /* Wake: re-associate to the retained STA config. Non-blocking —
+         * the GOT_IP event refreshes s_ip asynchronously; we don't wait. */
+        s_suppress_reconnect = false;
+        s_retry = 0;
+        esp_err_t e = esp_wifi_connect();
+        if (e != ESP_OK && e != ESP_ERR_WIFI_CONN) {
+            ESP_LOGD(TAG, "set_radio_active(1): %s", esp_err_to_name(e));
+        }
+    } else {
+        /* Doze: drop the link and hold off the auto-reconnect handler so
+         * the radio can stay down instead of tracking DTIM beacons. */
+        s_suppress_reconnect = true;
+        esp_wifi_disconnect();
+    }
 }
 
 bool connect_any(char *ip_str, size_t ip_len,

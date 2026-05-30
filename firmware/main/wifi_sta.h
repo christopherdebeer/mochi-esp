@@ -32,6 +32,14 @@ bool connect(const struct mochi_wifi_creds *creds,
 bool switch_to(const struct mochi_wifi_creds *creds,
                char *ip_str, size_t ip_len);
 
+/* Doze power control (design/26 Option 1). active=false disconnects the
+ * STA and suppresses the auto-reconnect handler so the radio can power
+ * down while dozing; active=true clears the suppression and re-associates
+ * to the retained config (non-blocking — DHCP re-acquires asynchronously,
+ * off the main loop). Assumes the STA stack is already up + was previously
+ * connected (the driver re-associates to the config it still holds). */
+void set_radio_active(bool active);
+
 /* Scan for visible APs, intersect with the stored MRU cred list, and
  * try matching credentials in scan-strength order until one connects
  * or all fail. Used on the already-provisioned branch so a device

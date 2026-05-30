@@ -26,6 +26,21 @@ config MOCHI_DOZE_WIFI_POWERSAVE
         min-modem (the IDF default) on wake. Safe and reversible; yields
         a real saving even without MOCHI_LIGHT_SLEEP.
 
+config MOCHI_DOZE_WIFI_DROP
+    bool "Disconnect WiFi while dozing (reconnect on wake)"
+    default y
+    help
+        On Doze entry, disconnect the STA and suppress the auto-reconnect
+        handler so the radio powers down instead of tracking DTIM beacons;
+        on wake, re-associate to the retained config (non-blocking — DHCP
+        re-acquires off the main loop). This is design/26 Option 1: lower
+        doze power than MOCHI_DOZE_WIFI_POWERSAVE (which keeps the link up
+        at MAX_MODEM) in exchange for inbound-sync latency while idle — the
+        device picks up server state on the next wake / 5-min resync.
+        Overnight telemetry (98% doze residency, still ~4%/h) identified
+        the associated link as the remaining draw, so this is the lever.
+        Takes precedence over MOCHI_DOZE_WIFI_POWERSAVE when both are set.
+
 config MOCHI_LIGHT_SLEEP
     bool "Enable automatic light sleep while dozing"
     default n

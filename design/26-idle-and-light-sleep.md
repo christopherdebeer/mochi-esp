@@ -425,6 +425,48 @@ goes high but discharge still doesn't improve, WiFi is the remaining
 draw and the WiFi-drop is the next beta; if residency is still low,
 something else holds the SoC awake. Measure, then cut.
 
+## Field result — v0.3.3 (residency high, draw flat) → v0.3.11 WiFi-drop
+
+Overnight run on v0.3.3 (one unbroken 15.6 h boot, deep-sleep wake, zero
+errors) is the measurement the v0.3.0 build set up:
+
+- **Residency is now high.** `sleep_pct` held at **98%** all night (a
+  single continuous ~12.5 h doze, 20:01→08:32). The wake-cadence fix
+  (FREERTOS_HZ 1000→100 + 1 Hz doze touch poll) worked — light sleep is
+  genuinely engaging, not just intended.
+- **Discharge is still ~4 %/h.** 67% → 4% over the night, dead linear, no
+  improvement on the Live baseline. The battery hit the cliff (~3.33 V)
+  at ~24 h from full.
+
+This is exactly the decision branch the v0.3.0 note named: *residency high
++ discharge flat ⇒ WiFi is the remaining draw ⇒ the WiFi-drop is the next
+beta.* So **v0.3.11 ships Option 1** behind `MOCHI_DOZE_WIFI_DROP`
+(default y):
+
+- **Doze entry:** `wifi_sta::set_radio_active(false)` —
+  `esp_wifi_disconnect()` plus a `s_suppress_reconnect` latch so the STA
+  auto-reconnect handler (`on_wifi`, 8-retry) doesn't immediately undo
+  it. Only when already online, so the boot-time `connect_any` is never
+  sabotaged.
+- **Wake:** `set_radio_active(true)` — clears the latch and
+  `esp_wifi_connect()` re-associates to the retained config. Non-blocking:
+  DHCP re-acquires asynchronously via the existing `IP_EVENT_STA_GOT_IP`
+  handler, off the main loop (design/21). `s_net_phase` stays `Online`
+  across the drop, so the offline dialog never raises.
+- **Precedence:** drop supersedes `MOCHI_DOZE_WIFI_POWERSAVE` (a dropped
+  link can't also modem-sleep). The `power` `init` record now carries
+  `wifi_drop` alongside `wifi_ps` so boots are segmentable in
+  `device_logs`.
+
+The cost is inbound-sync latency while idle (server pushes / travel land
+on the next wake or the 5-min resync), accepted for a mostly-idle pet.
+**Validation:** compare a v0.3.11 doze-heavy boot's matched-band mV/h
+against the v0.3.3 ~4 %/h baseline (the §Analysis discharge regression);
+the projection is ~2× on top of the as-built doze (≈ the WiFi-PS-vs-off
+row). Risk: blind on hardware (the doc's standing caveat) — it's behind
+one Kconfig flag, ships on the beta channel first, and OTA rollback
+covers a boot failure.
+
 ## Telemetry
 
 All power telemetry flows through the existing `device_diag` →
