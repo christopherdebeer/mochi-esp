@@ -15,6 +15,7 @@
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "esp_partition.h"
+#include "esp_wifi.h"
 
 #include "cJSON.h"
 
@@ -23,15 +24,24 @@
 
 static const char *TAG = "ota";
 
-/* Boot-to-first-check delay. WiFi + sprite + pairing all settle in
- * the first ~10s; we don't want OTA's TLS handshake competing for
- * the radio with the boot-time sprite fetches. */
-static constexpr int OTA_BOOT_DELAY_MS = 30 * 1000;
+/* Boot-to-first-check: wait for WiFi to associate (capped) rather than
+ * a blind fixed delay. A deep-sleep wake is a cold boot, so the STA join
+ * can still be in flight at a fixed 30s — firing the check blind and then
+ * napping the full interval (below) is exactly how a device skips a whole
+ * day of updates. Once up, settle briefly so boot-time sprite / pairing
+ * fetches aren't competing with OTA's TLS handshake. */
+static constexpr int OTA_BOOT_WIFI_WAIT_MS = 60 * 1000;
+static constexpr int OTA_BOOT_SETTLE_MS    = 10 * 1000;
 
-/* Interval between subsequent checks. 24 hours matches the user's
+/* Interval between successful checks. 24 hours matches the user's
  * "auto-check on boot + daily" choice; tightening this is mostly
  * pointless for a hobbyist device. */
 static constexpr int OTA_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+/* Backoff after a failed/offline check. Far shorter than the success
+ * interval so a transient miss (WiFi not up yet at boot, flaky link)
+ * retries within the same session instead of waiting a full day. */
+static constexpr int OTA_RETRY_INTERVAL_MS = 15 * 60 * 1000;
 
 /* Manifest payload cap. A well-formed manifest is <512 bytes — 4 KB
  * gives plenty of headroom and protects against a runaway response. */
@@ -66,6 +76,27 @@ void ota_wait(int ms) {
         vTaskDelay(pdMS_TO_TICKS(CHUNK_MS));
         waited += CHUNK_MS;
     }
+}
+
+/* True when the STA is currently associated to an AP. Gates the manifest
+ * poll: attempting a fetch while offline just fails and (pre-fix) cost a
+ * full 24h nap. esp_wifi_sta_get_ap_info returns ESP_OK only when
+ * connected; any not-connected / not-init state returns an error. */
+bool wifi_is_up(void) {
+    wifi_ap_record_t ap;
+    return esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+}
+
+/* Wait up to `ms` for the STA to associate, polling. Returns the final
+ * link state so the caller can log a still-offline boot. */
+bool wait_for_wifi(int ms) {
+    constexpr int CHUNK_MS = 500;
+    int waited = 0;
+    while (waited < ms && !wifi_is_up()) {
+        vTaskDelay(pdMS_TO_TICKS(CHUNK_MS));
+        waited += CHUNK_MS;
+    }
+    return wifi_is_up();
 }
 
 struct manifest_ctx {
@@ -289,13 +320,35 @@ bool perform_update(const char *bin_url) {
 void ota_task(void *) {
     ESP_LOGI(TAG, "task started; running version=%s", ota_update::current_version());
 
-    /* Boot settle. Let the sprite cache + scene + pet fetches at boot
-     * complete before we eat radio bandwidth on a manifest poll. */
-    vTaskDelay(pdMS_TO_TICKS(OTA_BOOT_DELAY_MS));
+    /* Boot settle. Wait for WiFi to associate (a deep-sleep wake is a
+     * cold boot, so the join may still be in flight), then let the boot
+     * sprite / scene / pet / pairing fetches finish before we eat radio
+     * bandwidth on a manifest poll + TLS handshake. */
+    if (!wait_for_wifi(OTA_BOOT_WIFI_WAIT_MS)) {
+        ESP_LOGI(TAG, "wifi not up after %d ms; first check will short-retry",
+                 OTA_BOOT_WIFI_WAIT_MS);
+    }
+    vTaskDelay(pdMS_TO_TICKS(OTA_BOOT_SETTLE_MS));
+
+    /* One diag warn on the first failure of a streak; cleared on the first
+     * manifest we read. Surfaces "OTA never checked" (the overnight-miss
+     * bug) without letting a flaky/offline link spam device_logs. */
+    int fail_streak = 0;
 
     while (true) {
         char remote_version[32] = {};
         char bin_url[256] = {};
+
+        /* Offline → don't burn the 24h interval on a guaranteed-failed
+         * fetch; short-retry instead. This is the fix for a boot-time
+         * check racing a slow join and then napping a full day. */
+        if (!wifi_is_up()) {
+            if (fail_streak++ == 0)
+                device_diag_event(DIAG_WARN, "ota", "offline; deferring check", NULL);
+            ESP_LOGI(TAG, "wifi down; short-retry");
+            ota_wait(OTA_RETRY_INTERVAL_MS);
+            continue;
+        }
 
         /* Pick the manifest for the channel chosen on-device. Read each
          * cycle so a dev_menu toggle (which also nudges check_now) is
@@ -311,10 +364,16 @@ void ota_task(void *) {
             !fetch_manifest(manifest_url,
                             remote_version, sizeof(remote_version),
                             bin_url, sizeof(bin_url))) {
-            ESP_LOGI(TAG, "no manifest this cycle; sleeping");
-            ota_wait(OTA_CHECK_INTERVAL_MS);
+            if (fail_streak++ == 0)
+                device_diag_event(DIAG_WARN, "ota", "manifest fetch failed", NULL);
+            ESP_LOGI(TAG, "no manifest this cycle; short-retry");
+            ota_wait(OTA_RETRY_INTERVAL_MS);
             continue;
         }
+
+        /* Got a manifest — a real check completed. Clear the streak so a
+         * later failure re-reports. */
+        fail_streak = 0;
 
         const char *running = ota_update::current_version();
         /* Compare by semver precedence (pre-release aware), not strcmp.

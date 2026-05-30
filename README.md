@@ -35,19 +35,20 @@ Waveshare ESP32-S3-Touch-ePaper-1.54 V2:
 ```
 mochi-esp/
 ├── README.md            this file
-├── AGENTS.md            val.town code-gen guidelines (server side)
-├── main.tsx             server-side root (HTTP val; currently a stub)
-├── design/              architecture + per-decision design docs (00–16)
+├── design/              architecture + per-decision design docs (00–30)
 │   ├── 00–06                   architecture · bring-up · boot seq · provisioning · pairing · sprite format · scene contracts
 │   ├── 07-voice-architecture.md   device → OpenAI Realtime, BYO key in NVS (M9–M10)
 │   ├── 08-ota-updates.md          A/B partitions + GitHub Releases manifest (M14)
 │   ├── 09–12                   deep review · QR codes · pet-state-in-C · thought bubble
-│   ├── 13-build-time-asset-packs.md  MPK1 embedded sprite packs
-│   ├── 14-mpk1-edges-and-actions.md  format=1 inline zones + typed actions
-│   ├── 15-device-sprite-consolidation.md  one encoder/studio/format + boot-sync packs
-│   └── 16-on-device-imagine.md    speak a place into being (gpt-image-2, BYO key)
+│   ├── 13–16                   asset packs · MPK1 zones/actions · sprite consolidation · on-device imagine
+│   ├── 17–22                   location/world · observability · world-consolidation · chrome · non-blocking WiFi · settings/sleep
+│   ├── 23–26                   voice UX/latency · device substrate · render cleanup · idle & light sleep
+│   └── 27–30                   voice-tool observability · scene replan · nav prefetch · UI sprites/stats
+├── site/                static project hub → GitHub Pages (.github/workflows/pages.yml)
 └── firmware/            ESP-IDF firmware project (built locally with idf.py)
     ├── README.md        toolchain setup + build/flash instructions
+    ├── TOOLCHAIN.md     one-command ESP-IDF install (laptop / CI / web session)
+    ├── version.txt      PROJECT_VER → esp_app_desc; drives OTA release tags
     ├── CMakeLists.txt
     ├── sdkconfig.defaults     baseline IDF config (target, PSRAM, console, …)
     ├── partitions.csv         8MB partition table (factory + storage/littlefs)
@@ -87,21 +88,37 @@ Repeatable setup (incl. remote/web sessions): **`firmware/TOOLCHAIN.md`**.
 Port-name conventions per OS, flashing, and troubleshooting:
 **`firmware/README.md`**.
 
-## Status (as of 2026-05-24, release v0.0.19 · v0.0.20 pending)
+## Status (as of 2026-05-30, stable v0.3.10 · v0.3.11 in progress)
 
 The architectural spine through realtime voice, OTA, and on-device pet
 state is complete. The **device-sprite pipeline** (`design/13`–`16`) —
 one encoder/studio/format, boot-sync MPK1 packs, on-device imagine —
 landed, then grew into **location & world** (`design/17`): the device
 follows `pets.location`, travels between places (`nav_place` /
-`nav_scene`), and renders costumes. The current track is the **studio
-world consolidation** (`design/19`): the Device Studio is now the world-
-authoring surface — author/generate a scene *plan* (per-cell zoned rooms
-+ a `nav_place` graph), project it to the device pack, and register
-global world places the device travels to. **v0.0.20** packages the
-travelled-to scene-pack fix + travel telemetry (device code for the
-consolidation already shipped through v0.0.19; the rest is server-side
-and boot-syncs).
+`nav_scene`), and renders costumes, and the **studio world
+consolidation** (`design/19`) made the Device Studio the world-authoring
+surface (author a scene *plan* → project to the device pack → register
+global world places the device travels to).
+
+The current track is **power, observability & OTA reliability**:
+
+- **Device observability** (`design/18`) — the firmware POSTs curated
+  diagnostics (boot reason, wifi, OTA, voice, battery, a ~5-min health +
+  power heartbeat) to the substrate `device_logs` table, so a field
+  device is root-causeable from SQL without a serial cable.
+- **Idle tiers & light sleep** (`design/26`) — a Live/Doze/Deep-sleep
+  state machine with automatic light sleep; overnight telemetry showed a
+  98% doze residency but a flat ~4 %/h discharge, identifying the
+  always-associated WiFi link as the remaining draw. **v0.3.11** adds
+  WiFi-drop-on-doze (disconnect on doze, reconnect on wake;
+  `MOCHI_DOZE_WIFI_DROP`) to attack it, plus an OTA-check reliability fix
+  (gate the boot check on WiFi-up + short-retry instead of a 24h nap on a
+  missed check).
+
+Releases are driven by `firmware/version.txt` (`design/08`): a push to
+main with a bumped version cuts a stable release; branch builds publish a
+rolling `-beta.<n>` pre-release on the beta channel (dev menu → RISK →
+Channel).
 
 | Milestone | Status | What it delivered |
 |---|---|---|
@@ -130,8 +147,9 @@ and boot-syncs).
 
 ## Editing the codebase
 
-- **Server-side** (`main.tsx`, future routes under val.town): standard
-  val.town conventions in `AGENTS.md`. Pushed via `vt push`.
+- **Server-side** lives in the separate `c15r/mochi` val (mochi.val.run),
+  not this repo — see the cross-references below. This repo is firmware +
+  design docs + the static `site/` hub (GitHub Pages).
 - **Firmware** (`firmware/`): edit, then `idf.py build flash monitor`.
   `firmware/sdkconfig` is generated and ignored — change `sdkconfig.defaults`
   and re-run `idf.py reconfigure` to apply config tweaks.

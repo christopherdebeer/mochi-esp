@@ -9,6 +9,7 @@
 #include "sprite_fetch.h"
 #include "sprite_cache.h"
 #include "device_diag.h"
+#include "wifi_sta.h"
 
 static const char *TAG = "pack_cache";
 
@@ -71,6 +72,21 @@ static const uint8_t *resolve_active(const char *sheet,
                                      const char *cache_sheet,
                                      const char *url,
                                      const uint8_t *embedded) {
+
+    /* Link down (e.g. just woke from doze with the radio dropped)? Don't
+     * eat the multi-second HEAD timeout to discover we're offline — serve
+     * the cache (or embedded) immediately. Not a failure with WiFi-drop:
+     * it's the normal post-wake path, so INFO not WARN. The pack refreshes
+     * at the next boot / once the link is back (travel uses
+     * pack_cache_refresh_geom for that). */
+    if (!wifi_sta::is_up()) {
+        const uint8_t *cached = load_cached(cache_sheet);
+        device_diag_eventf(DIAG_INFO, "pack_cache",
+            cached ? "{\"src\":\"cache\",\"why\":\"offline\"}"
+                   : "{\"src\":\"embedded\",\"why\":\"offline\"}",
+            "%s", sheet);
+        return cached ? cached : embedded;
+    }
 
     /* Probe the server ETag. Offline → fall back to the last cached
      * pack, then to the embedded baseline. */
@@ -205,6 +221,10 @@ bool pack_cache_prefetch_geom(const char *sheet, uint16_t cw, uint16_t ch) {
         "https://mochi.val.run/devsprite/pack/%s?cw=%u&ch=%u",
         sheet, (unsigned)cw, (unsigned)ch);
 
+    /* Link down? Skip — don't burn the HEAD timeout warming a neighbour
+     * while the radio is dropped (this runs once per idle tick). */
+    if (!wifi_sta::is_up()) return false;
+
     /* ETag probe. Offline → nothing to warm; the travel path will keep
      * its own existing fallbacks. */
     char remote[40] = {};
@@ -253,4 +273,53 @@ bool pack_cache_prefetch_geom(const char *sheet, uint16_t cw, uint16_t ch) {
     }
     heap_caps_free(buf);
     return stored;
+}
+
+const uint8_t *pack_cache_refresh_geom(const char *sheet,
+                                       uint16_t cw, uint16_t ch) {
+    if (!sheet || !sheet[0]) return nullptr;
+    /* Offline → keep whatever the caller already rendered from cache; no
+     * stall. (The render path is cache-first, so there's nothing to wait
+     * for here.) */
+    if (!wifi_sta::is_up()) return nullptr;
+
+    char cache_sheet[64];
+    snprintf(cache_sheet, sizeof(cache_sheet), "%s.%ux%u.pack",
+        sheet, (unsigned)cw, (unsigned)ch);
+    char url[160];
+    snprintf(url, sizeof(url),
+        "https://mochi.val.run/devsprite/pack/%s?cw=%u&ch=%u",
+        sheet, (unsigned)cw, (unsigned)ch);
+
+    char remote[40] = {};
+    if (!sprite_fetch_head_etag(url, remote, sizeof(remote))) return nullptr;
+
+    /* Unchanged → nothing to swap; the cache render already on screen is
+     * current. No alloc, no repaint. */
+    char local[40] = {};
+    sprite_cache::load_etag(cache_sheet, local, sizeof(local));
+    if (remote[0] && strcmp(remote, local) == 0) return nullptr;
+
+    /* Changed (or no cached ETag) → GET the new pack into PSRAM, validate,
+     * persist, and hand the bytes back for a re-render. */
+    uint8_t *buf = (uint8_t *)heap_caps_malloc(PACK_MAX_BYTES, MALLOC_CAP_SPIRAM);
+    if (!buf) return nullptr;
+    size_t got = 0;
+    uint32_t ms = 0;
+    if (!sprite_fetch_blob(url, buf, PACK_MAX_BYTES, &got, &ms) ||
+        !looks_like_mpk1(buf, got)) {
+        ESP_LOGW(TAG, "refresh '%s' fetch invalid (%u bytes)", sheet, (unsigned)got);
+        heap_caps_free(buf);
+        return nullptr;
+    }
+    if (sprite_cache::store(cache_sheet, PACK_SUFFIX, buf, got)) {
+        sprite_cache::store_etag(cache_sheet, remote);
+    }
+    uint8_t *shrunk = (uint8_t *)heap_caps_realloc(buf, got, MALLOC_CAP_SPIRAM);
+    if (shrunk) buf = shrunk;
+    ESP_LOGI(TAG, "refresh '%s' %u bytes in %u ms (ETag %s)",
+        sheet, (unsigned)got, (unsigned)ms, remote);
+    device_diag_eventf(DIAG_INFO, "pack_cache",
+        "{\"src\":\"server\",\"why\":\"refresh\"}", "%s refreshed", sheet);
+    return buf;
 }

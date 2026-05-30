@@ -2585,17 +2585,24 @@ extern "C" void app_main(void) {
                 if (strcmp(loc, "home") == 0) {
                     swapped = scene_pack_load_home();
                 } else if (lsheet[0]) {
-                    /* Travel place packs go through pack_cache so they
-                     * survive reboot/sleep. v0.1.7 fetched directly
-                     * into a RAM-only travel_pack buffer; on a flaky
-                     * network or after a deepsleep wake the device
-                     * couldn't restore the last place at all. With
-                     * pack_cache_active_geom, the body is written to
-                     * LittleFS keyed by (sheet, cell_w, cell_h) and
-                     * served by ETag on subsequent boots. */
+                    /* Cache-first travel (design/29): render the place from
+                     * its LittleFS cache INSTANTLY — no ETag probe on the
+                     * render path. The post-arrival refresh below picks up a
+                     * server change without making travel wait, and the
+                     * offline case (common right after a doze wake with WiFi
+                     * dropped) no longer eats the 8 s HEAD timeout before
+                     * falling back to cache. The blob is keyed by
+                     * (sheet, cell_w, cell_h) and warmed at boot / by the
+                     * neighbour prefetch. */
                     fetch_attempted = true;
-                    const uint8_t *bytes = pack_cache_active_geom(
-                        lsheet, SCENE_W, SCENE_H, nullptr);
+                    const uint8_t *bytes =
+                        pack_cache_load_geom_only(lsheet, SCENE_W, SCENE_H);
+                    if (!bytes) {
+                        /* Never cached (cold first visit) → a blocking fetch
+                         * is unavoidable; pack_cache gates it on the link. */
+                        bytes = pack_cache_active_geom(lsheet, SCENE_W,
+                                                       SCENE_H, nullptr);
+                    }
                     if (bytes) {
                         swapped = scene_pack_load_bytes(bytes);
                     }
@@ -2682,6 +2689,29 @@ extern "C" void app_main(void) {
                     }
                     snprintf(travel_retry_loc, sizeof(travel_retry_loc), "%s", loc);
                     travel_retry_at_us = esp_timer_get_time() + TRAVEL_RETRY_BACKOFF_US;
+                }
+                /* Post-arrival refresh (cache-first travel): the cached
+                 * place is already on screen. Validate it against the
+                 * server now — only a genuine pack change triggers a fetch
+                 * + a second repaint. Offline / unchanged → no-op, no stall
+                 * (pack_cache_refresh_geom returns NULL without allocating).
+                 * A cold-fetched place above already stored the current
+                 * ETag, so this is just a cheap confirming HEAD for it. */
+                if (traveled_this_tick && lsheet[0]) {
+                    const uint8_t *fresh =
+                        pack_cache_refresh_geom(lsheet, SCENE_W, SCENE_H);
+                    if (fresh && scene_pack_load_bytes(fresh)) {
+                        if (scene_pack_count() == 2) {
+                            mochi_datetime dt = {};
+                            bool night = rtc_get(&dt) &&
+                                (dt.hour < 7 || dt.hour >= 19);
+                            scene_pack_set(night ? 1 : 0);
+                        }
+                        scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H);
+                        render_with_expression("neutral", true, nullptr);
+                        ESP_LOGI(TAG, "travel: refreshed %s to newer pack",
+                            lsheet);
+                    }
                 }
                 /* Record either way so a failed fetch doesn't thrash the
                  * loop every tick. On failure the backoff above forces a

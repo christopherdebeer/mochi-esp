@@ -98,6 +98,19 @@ const uint8_t *pack_cache_load_only(const char *sheet);
  * pack_cache_active_geom does the cold fetch as before. */
 bool pack_cache_prefetch_geom(const char *sheet, uint16_t cw, uint16_t ch);
 
+/*
+ * Travel refresh (design/29): validate the cached place pack against the
+ * server WITHOUT blocking a cache-first render. Returns freshly-fetched +
+ * persisted bytes ONLY when the server pack changed since we cached it (or
+ * there was no cache yet). Returns NULL — with no PSRAM allocation — when
+ * the link is down, the ETag is unchanged, or the probe/fetch fails, in
+ * which case the caller keeps showing whatever it already rendered from
+ * cache. Returned bytes are owned by pack_cache (never freed), like the
+ * other resolvers. Geometry-keyed identically to pack_cache_active_geom.
+ */
+const uint8_t *pack_cache_refresh_geom(const char *sheet,
+                                       uint16_t cw, uint16_t ch);
+
 #ifdef __cplusplus
 }
 #endif
