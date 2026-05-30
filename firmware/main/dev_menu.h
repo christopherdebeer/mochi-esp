@@ -115,8 +115,14 @@ bool tick(epaper_driver_display *epd, bool paired,
           int net_phase, int batt_pct,
           /* Pet status snapshot for MenuP1's kid-facing header.
            * Formatted by the caller (mood + happiness/fullness/energy);
-           * dev_menu just renders it verbatim. nullptr → blank. */
-          const char *pet_status);
+           * dev_menu renders its FIRST line (name + mood) as the title.
+           * nullptr → blank. */
+          const char *pet_status,
+          /* Numeric stats [0,100] for MenuP1's icon + progress-bar rows
+           * (design/30). Same decayed values the pet_status text encodes;
+           * passed numerically so the bars + percentages render without
+           * re-parsing the string. <0 → row skipped. */
+          int happy, int full, int energy);
 
 /* Current wheel mode. Mode::Live means main.cpp owns the screen. */
 Mode current(void);
@@ -154,6 +160,8 @@ enum class TouchResult : uint8_t {
     OpenModels,       /* push the ModelsModal sub-screen (in-place) */
     CycleVoiceModel,  /* (modal) cycle the voice model — handled in dev_menu */
     CycleTextModel,   /* (modal) cycle the text model — handled in dev_menu */
+    ToggleVoiceDebug, /* (modal) flip the admin debug-voice persona (design/27) — handled in dev_menu */
+    ConsolidateNow,   /* force a sleep-consolidation pass now (design/27) — main.cpp performs */
     /* Placeholders surfaced on the kid-facing MenuP1. Both currently
      * land in main.cpp as a "not implemented yet" toast — the rows
      * exist so the page has shape while the underlying data (memory

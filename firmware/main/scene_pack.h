@@ -48,6 +48,16 @@ bool scene_pack_init(void);
  * Idempotent. */
 bool scene_pack_init_embedded(void);
 
+/* Cold-boot bring-up that PREFERS the last server-synced home bundle
+ * from the LittleFS cache over the embedded baseline, falling back to
+ * embedded on a cache miss. Network-free (cache-only), so it's safe
+ * before WiFi — like scene_pack_init_embedded but offline-aware, so a
+ * device that synced a newer "scene-bundle-a" last session shows it on
+ * the very first frame instead of the factory bundle until net_worker
+ * re-syncs. The post-WiFi scene_pack_init() still ETag-refreshes.
+ * Idempotent. See design/29. */
+bool scene_pack_init_cached(void);
+
 /* Swap the active scene pack to a caller-provided MPK1 blob — e.g. a
  * freshly imagined place fetched into PSRAM (design/16). The bytes must
  * OUTLIVE the swap: pass a heap/PSRAM buffer that is never freed, not a
@@ -106,6 +116,15 @@ bool scene_pack_current_has_zones(void);
  * no zones. */
 const mpk_zone_t *scene_pack_current_zones(uint8_t *out_count);
 
+/* Per-cell pet placement (design/28). If the current scene (format=1
+ * only — the embedded format=0 home bundle has none) carries an
+ * MPK_ACTION_PET zone, fills *ox,*oy with the square pet box's top-left
+ * and *side with its size (cell-local px; foot on the zone's bottom
+ * edge, centred-x) and returns true. Returns false when there's no pet
+ * zone, so the caller uses the fixed firmware anchor (PET_DX/PET_DY).
+ * Any out-pointer may be NULL. */
+bool scene_pack_current_pet_zone(int *ox, int *oy, int *side);
+
 /* Forgiving hit-test: returns the zone whose rectangle is nearest
  * (Chebyshev distance in cell-local pixels) to (x, y), provided that
  * distance is ≤ slop_px. Direct hits return distance 0. Returns true
@@ -140,6 +159,20 @@ typedef struct {
  * The caller dispatches on out->kind. */
 bool scene_pack_action_at(int16_t x, int16_t y, int slop_px,
                           scene_pack_action_t *out);
+
+/* Max length (incl. NUL) of a nav_place target id; matches the device's
+ * location-id buffers (pet_sync s_location is 40). */
+#define SCENE_PLACE_ID_MAX 40
+
+/* Collect the distinct nav_place target place-ids referenced by ANY cell
+ * of the active pack (design/29 — eager prefetch of reachable places).
+ * Only format=1 packs carry inline nav_place zones; format=0 (the embedded
+ * home bundle) has none, so this returns 0 there. Writes up to `max`
+ * NUL-terminated ids into out_ids[] (each SCENE_PLACE_ID_MAX bytes) and
+ * returns the number collected. Does not disturb the current scene index.
+ * Duplicates are coalesced; ids longer than the buffer are skipped. */
+uint8_t scene_pack_collect_place_targets(char out_ids[][SCENE_PLACE_ID_MAX],
+                                         uint8_t max);
 
 #ifdef __cplusplus
 }

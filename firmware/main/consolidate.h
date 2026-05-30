@@ -44,6 +44,14 @@ bool consolidate_init(void);
  * the caller is expected to gate on asleep + no voice/imagine overlap. */
 bool consolidate_start(void);
 
+/* Force a pass now (design/27 dev-menu "Consolidate now"). Bypasses the
+ * local debounce and tells the server to bypass its eligibility gates
+ * (?force=1 + force:true on persist) — so it runs even when the pet
+ * isn't asleep / hasn't met the activity+engagement thresholds. Still
+ * refused while a pass is already in flight, and the server still skips
+ * if there's genuinely no material to reflect on. */
+bool consolidate_start_forced(void);
+
 /* True while a pass is in flight. */
 bool consolidate_in_flight(void);
 

@@ -55,6 +55,8 @@
 #include "voice_mic.h"
 #include "voice_aec.h"
 #include "device_diag.h"   /* /api/device/diag — survives USB disconnect */
+#include "voice_ui.h"      /* on-screen talk/think bubbles (design/27) */
+#include "model_prefs.h"   /* voice_debug → richer on-screen tool trace */
 
 #define TAG "voice_peer"
 
@@ -66,6 +68,19 @@ static atomic_int s_sess_turns;
 static atomic_int s_sess_in_tok;
 static atomic_int s_sess_out_tok;
 static atomic_int s_sess_total_tok;
+
+/* Per-session transcript accumulator (design/27): paired (user, reply)
+ * turns, so the session-end POST can ship them as `talked` events with
+ * content for consolidation to metabolise (the device previously logged
+ * only a contentless talked event). Written on the peer worker task as
+ * transcripts arrive; read on the main task AFTER voice_peer_stop (same
+ * post-stop ordering as the token stats), so no lock is needed. */
+#define TX_MAX_TURNS 12
+#define TX_STR_MAX   160
+static char s_tx_user[TX_MAX_TURNS][TX_STR_MAX];
+static char s_tx_reply[TX_MAX_TURNS][TX_STR_MAX];
+static int  s_tx_count;
+static char s_tx_pending_user[TX_STR_MAX];
 
 /* Mirror an ESP_LOGI to both serial and the voice diag buffer.
  * voice_diag is a no-op until reset() is called by start, and
@@ -742,6 +757,28 @@ static int pc_on_data(esp_peer_data_frame_t *frame, void *ctx) {
                     LOGI_DIAG("tool dispatch: %s call_id=%s args=%u B",
                         name_str, cid->valuestring,
                         (unsigned)(args_str ? strlen(args_str) : 0));
+                    /* Mirror the call to device_logs (design/27) so tool
+                     * use is visible OTA, not just in the USB voice_diag
+                     * dump. Args value omitted (free text); length only.
+                     * The matching "tool result" row (voice_tools.c)
+                     * carries ok/reason. */
+                    char tctx[96];
+                    snprintf(tctx, sizeof(tctx),
+                        "{\"tool\":\"%.48s\",\"args_len\":%u}",
+                        name_str,
+                        (unsigned)(args_str ? strlen(args_str) : 0));
+                    device_diag_event(DIAG_INFO, "voice", "tool call", tctx);
+                    /* design/27: on-screen busy cue while the call is in
+                     * flight. Debug mode shows the tool name (a live tool
+                     * trace); normal mode a quiet ellipsis. imagine_place
+                     * overrides this with "painting…" from imagine.c. */
+                    if (model_prefs_voice_debug()) {
+                        char btxt[64];
+                        snprintf(btxt, sizeof(btxt), "> %.48s", name_str);
+                        voice_ui_post(VOICE_UI_THINKING, btxt);
+                    } else {
+                        voice_ui_post(VOICE_UI_THINKING, "\xe2\x80\xa6");  /* … */
+                    }
                     voice_tools_dispatch(cid->valuestring, name_str, args_str);
                 } else {
                     LOGW_DIAG("tool .done with no known name (call_id=%s)",
@@ -772,6 +809,20 @@ static int pc_on_data(esp_peer_data_frame_t *frame, void *ctx) {
                 cJSON *t = cJSON_GetObjectItemCaseSensitive(root, "transcript");
                 if (cJSON_IsString(t) && t->valuestring) {
                     voice_diag_log("ASSISTANT: %.200s", t->valuestring);
+                    /* design/27: surface what mochi just said as a talk
+                     * bubble (final text, not streamed). Supersedes any
+                     * in-flight "thinking" bubble. */
+                    voice_ui_post(VOICE_UI_SPOKEN, t->valuestring);
+                    /* design/27: pair with the last user turn + bank it
+                     * for the session-end `talked` POST (consolidation). */
+                    if (s_tx_count < TX_MAX_TURNS) {
+                        snprintf(s_tx_user[s_tx_count], TX_STR_MAX, "%s",
+                            s_tx_pending_user);
+                        snprintf(s_tx_reply[s_tx_count], TX_STR_MAX, "%s",
+                            t->valuestring);
+                        s_tx_count++;
+                    }
+                    s_tx_pending_user[0] = 0;
                 }
             } else {
                 /* conversation.item.done — only log when role=user.
@@ -792,6 +843,10 @@ static int pc_on_data(esp_peer_data_frame_t *frame, void *ctx) {
                                     part, "transcript");
                                 if (cJSON_IsString(tr) && tr->valuestring) {
                                     voice_diag_log("USER: %.200s", tr->valuestring);
+                                    /* design/27: hold for pairing with the
+                                     * next assistant transcript. */
+                                    snprintf(s_tx_pending_user, TX_STR_MAX,
+                                        "%s", tr->valuestring);
                                     break;
                                 }
                                 cJSON *tx = cJSON_GetObjectItemCaseSensitive(
@@ -1124,6 +1179,25 @@ void voice_peer_get_session_stats(int *turns, int *in_tok,
     if (total_tok) *total_tok = atomic_load(&s_sess_total_tok);
 }
 
+void voice_peer_get_transcript_json(char *out, size_t cap) {
+    if (!out || cap == 0) return;
+    out[0] = 0;
+    cJSON *arr = cJSON_CreateArray();
+    if (!arr) return;
+    int n = s_tx_count > TX_MAX_TURNS ? TX_MAX_TURNS : s_tx_count;
+    for (int i = 0; i < n; i++) {
+        if (!s_tx_user[i][0] && !s_tx_reply[i][0]) continue;
+        cJSON *o = cJSON_CreateObject();
+        if (!o) break;
+        cJSON_AddStringToObject(o, "user", s_tx_user[i]);
+        cJSON_AddStringToObject(o, "reply", s_tx_reply[i]);
+        cJSON_AddItemToArray(arr, o);
+    }
+    char *s = cJSON_PrintUnformatted(arr);
+    cJSON_Delete(arr);
+    if (s) { snprintf(out, cap, "%s", s); cJSON_free(s); }
+}
+
 int voice_peer_start(const char *openai_key, const char *instructions,
                      const char *tools_json) {
     if (atomic_load(&s_peer.running)) {
@@ -1134,6 +1208,8 @@ int voice_peer_start(const char *openai_key, const char *instructions,
     atomic_store(&s_sess_in_tok, 0);
     atomic_store(&s_sess_out_tok, 0);
     atomic_store(&s_sess_total_tok, 0);
+    s_tx_count = 0;
+    s_tx_pending_user[0] = 0;
     if (!openai_key || !*openai_key) {
         ESP_LOGE(TAG, "no openai key");
         return -1;
@@ -1359,6 +1435,60 @@ int voice_peer_send_text(const char *text) {
         int r2 = esp_peer_send_data(s_peer.pc, &f2);
         rc = (r1 == ESP_PEER_ERR_NONE && r2 == ESP_PEER_ERR_NONE) ? 0 : -1;
         LOGI_DIAG("send_text: %d/%d ('%s')", r1, r2, text);
+    }
+    free(item_json);
+    free(resp_json);
+    return rc;
+}
+
+int voice_peer_inject_note(const char *text) {
+    if (!text || !*text) return -1;
+    if (!s_peer.dc_stream_known) {
+        LOGW_DIAG("inject_note: no dc stream");
+        return -1;
+    }
+    /* Substrate→model context push (design/27): a system-role note the
+     * model folds into its next reply — care taps ("[from your body] …")
+     * and environment changes ("[notice] …"). Mirrors the legacy web
+     * client's notifyCare/notifyEnvironment. If the model is mid-utterance
+     * we cancel it first so the note lands promptly (a barge-in), then
+     * create the item + a response so the model reacts. */
+    if ((voice_phase_t)atomic_load(&s_peer.phase) == VOICE_PHASE_SPEAKING) {
+        cJSON *cancel = cJSON_CreateObject();
+        cJSON_AddStringToObject(cancel, "type", "response.cancel");
+        char *cancel_json = cJSON_PrintUnformatted(cancel);
+        cJSON_Delete(cancel);
+        if (cancel_json) { voice_peer_send_dc_json(cancel_json); free(cancel_json); }
+    }
+
+    /* { conversation.item.create, item:{ type:message, role:system,
+     *   content:[{ type:input_text, text }] } } + { response.create } */
+    cJSON *item_root = cJSON_CreateObject();
+    cJSON_AddStringToObject(item_root, "type", "conversation.item.create");
+    cJSON *item = cJSON_CreateObject();
+    cJSON_AddItemToObject(item_root, "item", item);
+    cJSON_AddStringToObject(item, "type", "message");
+    cJSON_AddStringToObject(item, "role", "system");
+    cJSON *content = cJSON_CreateArray();
+    cJSON_AddItemToObject(item, "content", content);
+    cJSON *part = cJSON_CreateObject();
+    cJSON_AddItemToArray(content, part);
+    cJSON_AddStringToObject(part, "type", "input_text");
+    cJSON_AddStringToObject(part, "text", text);
+    char *item_json = cJSON_PrintUnformatted(item_root);
+    cJSON_Delete(item_root);
+
+    cJSON *resp_root = cJSON_CreateObject();
+    cJSON_AddStringToObject(resp_root, "type", "response.create");
+    char *resp_json = cJSON_PrintUnformatted(resp_root);
+    cJSON_Delete(resp_root);
+
+    int rc = -1;
+    if (item_json && resp_json) {
+        int r1 = voice_peer_send_dc_json(item_json);
+        int r2 = voice_peer_send_dc_json(resp_json);
+        rc = (r1 == 0 && r2 == 0) ? 0 : -1;
+        LOGI_DIAG("inject_note: %d/%d ('%.48s')", r1, r2, text);
     }
     free(item_json);
     free(resp_json);

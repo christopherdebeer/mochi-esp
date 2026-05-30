@@ -85,6 +85,14 @@ void pet_sync_touch(int64_t at_ms);
 void pet_sync_current_location(char *id_out, size_t id_cap,
                                char *sheet_out, size_t sheet_cap);
 
+/* Resolve a place id to its device sheetId from the cached places[] map
+ * (refreshed on every /api/state pull/mutate). Used by the prefetch path
+ * to warm reachable place packs without another round-trip (design/29).
+ * Returns true and fills `out` (NUL-terminated) on a hit with a non-empty
+ * sheet; false for an unknown id, an id with no sheet (e.g. "home"), or
+ * before the first pull. */
+bool pet_sync_resolve_place_sheet(const char *place_id, char *out, size_t cap);
+
 /* Seed the cached location from outside (e.g. NVS-restored last
  * place at boot). Lets the device render the right scene immediately
  * on wake from deep sleep instead of waiting for the first
@@ -117,7 +125,7 @@ bool pet_sync_consolidation_advised(void);
 void pet_sync_post_voice_session(int duration_s, const char *model,
                                  const char *voice, const char *end_reason,
                                  int turns, int in_tok, int out_tok,
-                                 int total_tok);
+                                 int total_tok, const char *transcript_json);
 
 /* Travel to a place by id (design/17): POST /api/places/:id/enter, and on
  * success optimistically set the local location + sheetId so the device's

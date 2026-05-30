@@ -18,9 +18,17 @@
 
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 bool shtc3_init(void);
 
 /* Take one measurement. Returns true and fills the outputs on
  * success. On CRC failure or I²C error returns false and outputs
  * are unchanged. Blocks for ~25 ms (wake delay + measurement). */
 bool shtc3_read(float *out_temp_c, float *out_rh_pct);
+
+#ifdef __cplusplus
+}
+#endif

@@ -35,6 +35,19 @@
 #include "cJSON.h"
 
 #include "voice_diag.h"
+#include "device_diag.h"
+#include "voice_ui.h"      /* on-screen tool-result bubble (design/27) */
+#include "model_prefs.h"
+
+/* Read-only device introspection for the debug persona (design/27). */
+#include "esp_heap_caps.h"
+#include "esp_timer.h"
+#include "power.h"
+#include "battery.h"
+#include "shtc3.h"
+#include "voice_peer.h"
+#include "voice_mic.h"
+#include "voice_aec.h"
 
 #define TAG "voice_tools"
 
@@ -156,7 +169,8 @@ static bool dispatch_to_valrun(const tool_req_t *req, tool_result_t *out) {
  * via the data channel. Refused calls and successful calls both get
  * their tool_result_t serialised here so the model sees a uniform
  * shape. */
-static void send_function_call_output(const char *call_id, const tool_result_t *result) {
+static void send_function_call_output(const char *call_id, const char *name,
+                                      const tool_result_t *result) {
     /* Build the model-facing JSON: {"ok":bool, "message"?:..., "reason"?:...}.
      * Stringified once and embedded as the .output field. */
     cJSON *model_root = cJSON_CreateObject();
@@ -193,6 +207,30 @@ static void send_function_call_output(const char *call_id, const tool_result_t *
     int r1 = voice_peer_send_dc_json(wrap_str);
     int r2 = resp_str ? voice_peer_send_dc_json(resp_str) : -1;
     LOGI_DIAG("tool result sent: ok=%d r1=%d r2=%d", result->ok, r1, r2);
+    /* Mirror the result to device_logs (design/27) — this is the row
+     * that makes refusals ("too far"/"tummy full"/asleep) visible OTA.
+     * WARN level on a refusal so it stands out in a level filter. */
+    char rctx[160];
+    snprintf(rctx, sizeof(rctx), "{\"tool\":\"%.48s\",\"ok\":%s,\"reason\":\"%.64s\"}",
+        name ? name : "?", result->ok ? "true" : "false",
+        result->reason ? result->reason : "");
+    device_diag_event(result->ok ? DIAG_INFO : DIAG_WARN,
+        "voice", "tool result", rctx);
+    /* design/27: on-screen trace. In debug mode show the result as a
+     * talk bubble (ok/✗ + reason) so tool use is watchable on-device
+     * without serial. In normal mode just clear the "…" busy cue — the
+     * model's spoken reply (if any) lands its own talk bubble. */
+    if (model_prefs_voice_debug()) {
+        char btxt[96];
+        snprintf(btxt, sizeof(btxt), "%s %.40s%s%.40s",
+            result->ok ? "ok" : "x",
+            name ? name : "?",
+            result->reason ? ": " : "",
+            result->reason ? result->reason : "");
+        voice_ui_post(VOICE_UI_SPOKEN, btxt);
+    } else {
+        voice_ui_clear();
+    }
     free(wrap_str);
     free(resp_str);
 }
@@ -222,10 +260,14 @@ static void worker_task(void *arg) {
         bool intercepted = false;
         if (strcmp(req->name, "imagine_place") == 0) {
             /* Args follow shared/voice-tools-spec.ts: { name, vibe,
-             * revising? }. We translate `revising` (a place name)
-             * into `from_place_id` later — the v0 stub doesn't
-             * care since it doesn't actually call the queue
-             * endpoint yet. */
+             * revising? }. imagine_start() runs the full on-device
+             * pipeline (queue → orchestration → gpt-image → upload →
+             * ready; see imagine.c). NOTE (design/27): `revising` (a
+             * place *name*) is currently passed as `from_place_id`,
+             * which makes a revise behave as a fresh birth styled after
+             * the old place rather than a true in-place revise via
+             * POST /api/places/:id/revise. True revise needs a device
+             * name→id resolve; tracked as remaining work in design/27. */
             imagine_req_t ireq = {0};
             cJSON *args = req->args_json ? cJSON_Parse(req->args_json) : NULL;
             if (args) {
@@ -254,6 +296,47 @@ static void worker_task(void *arg) {
             }
             intercepted = true;
         }
+        /* Read-only device-introspection tools (design/27). Handled
+         * fully on-device; the result JSON is what the (debug) persona
+         * reads back. Server only offers these in mode=debug, but
+         * intercepting unconditionally is harmless — they expose no
+         * secrets and mutate nothing. */
+        else if (strcmp(req->name, "get_power_state") == 0) {
+            char j[256];
+            power_telemetry_ctx(j, sizeof(j));
+            result.ok = true;
+            result.message = strdup(j);
+            intercepted = true;
+        } else if (strcmp(req->name, "get_device_health") == 0) {
+            uint16_t mv = 0; uint8_t pct = 0;
+            battery_read(&mv, &pct);
+            float tc = 0.0f, rh = 0.0f;
+            shtc3_read(&tc, &rh);
+            char j[224];
+            snprintf(j, sizeof(j),
+                "{\"batt_mv\":%u,\"batt_pct\":%u,\"temp_c\":%d,\"rh_pct\":%d,"
+                "\"heap_free\":%u,\"psram_free\":%u,\"up_s\":%lld}",
+                (unsigned)mv, (unsigned)pct, (int)tc, (int)rh,
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                (long long)(esp_timer_get_time() / 1000000));
+            result.ok = true;
+            result.message = strdup(j);
+            intercepted = true;
+        } else if (strcmp(req->name, "get_voice_stats") == 0) {
+            int turns = 0, in_tok = 0, out_tok = 0, total_tok = 0;
+            voice_peer_get_session_stats(&turns, &in_tok, &out_tok, &total_tok);
+            char j[192];
+            snprintf(j, sizeof(j),
+                "{\"turns\":%d,\"in_tok\":%d,\"out_tok\":%d,\"total_tok\":%d,"
+                "\"mic_peak_dbfs\":%d,\"aec\":%s}",
+                turns, in_tok, out_tok, total_tok,
+                voice_mic_last_peak_dbfs(),
+                voice_aec_is_enabled() ? "true" : "false");
+            result.ok = true;
+            result.message = strdup(j);
+            intercepted = true;
+        }
 
         bool ok = intercepted ? true : dispatch_to_valrun(req, &result);
         if (!ok && !result.reason) {
@@ -262,7 +345,7 @@ static void worker_task(void *arg) {
             result.reason = strdup("couldn't reach my body");
         }
 
-        send_function_call_output(req->call_id, &result);
+        send_function_call_output(req->call_id, req->name, &result);
 
         tool_result_clear(&result);
         tool_req_free(req);

@@ -63,6 +63,7 @@
 #include "voice/voice_peer.h"   /* voice_peer_get_session_stats (design/18 ph3b) */
 extern "C" {
 #include "voice/voice_diag.h"
+#include "voice/voice_ui.h"     /* on-screen voice talk/think bubbles (design/27) */
 }
 #include "sprite_cache.h"
 #include "ota_update.h"
@@ -157,6 +158,36 @@ static constexpr size_t PET_CELL_BYTES = (PET_CELL_W / 8) * PET_CELL_H;  /* 1152
 static constexpr int PET_DX = (MOCHI_EPD_WIDTH  - (int)PET_CELL_W) / 2;
 static constexpr int PET_DY = (MOCHI_EPD_HEIGHT - (int)PET_CELL_H) - 12;
 
+/* Pet placement (design/28). A format=1 scene cell may carry an
+ * MPK_ACTION_PET zone that places + sizes the pet per cell; honour it,
+ * else fall back to the fixed firmware anchor (PET_DX/PET_DY, 96×96).
+ * Used by both the composite and the pet tap-hit so the tappable body
+ * tracks the rendered pet. */
+static void pet_dest(int *ox, int *oy, int *side) {
+    int zx, zy, zs;
+    if (scene_pack_current_pet_zone(&zx, &zy, &zs)) {
+        *ox = zx; *oy = zy; *side = zs;
+    } else {
+        *ox = PET_DX; *oy = PET_DY; *side = (int)PET_CELL_W;
+    }
+}
+
+/* Blit the loaded pet cell into dst at its per-cell spot. Expression
+ * stays caller-driven (the pet emotes live from mood/phase — a scene
+ * pet zone's authored expr index is not used for live scenes). */
+static void composite_pet(uint8_t *dst, const uint8_t *ink, const uint8_t *mask) {
+    int ox, oy, side;
+    pet_dest(&ox, &oy, &side);
+    if (side == (int)PET_CELL_W) {
+        compositor::blit_two_plane(dst, MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
+            ink, mask, PET_CELL_W, PET_CELL_H, ox, oy);
+    } else {
+        compositor::blit_two_plane_scaled(dst, MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
+            ink, mask, PET_CELL_W, PET_CELL_H, ox, oy,
+            (size_t)side, (size_t)side);
+    }
+}
+
 static constexpr int RESTING_AFTER_TAP_MS = 5000;
 
 /* Care icons — 4 ui-v1 cells, one per zone, downsampled from 80×80
@@ -187,7 +218,7 @@ static constexpr int ICON_MARGIN = 4;
  *   BR (bottom-right) → ball   → 'excited'
  */
 static const char *CARE_ICON_KEYS[4] = { "heart", "star", "bowl", "ball" };
-#define MOCHI_UI_CELL_URL_BASE "https://mochi.val.run/devsprite/cell/ui-v1/"
+#define MOCHI_UI_CELL_URL_BASE "https://mochi.val.run/devsprite/cell/" MOCHI_UI_SHEET "/"
 
 /* Status bar — full-width slab at the top of the panel. Time on
  * left, pet name centred, battery on right. The bar is its own
@@ -521,7 +552,7 @@ static void net_worker(void *arg) {
     if (ctx->cache_ok) {
         struct { const char *sheet; const char *url; } probes[] = {
             { "pet-v1",   "https://mochi.val.run/devsprite/cell/pet-v1/neutral" },
-            { "ui-v1",    "https://mochi.val.run/devsprite/cell/ui-v1/heart"    },
+            { MOCHI_UI_SHEET, "https://mochi.val.run/devsprite/cell/" MOCHI_UI_SHEET "/heart" },
             { "scene-v1", "https://mochi.val.run/devsprite/scene-v1/day"        },
         };
         for (auto &p : probes) {
@@ -572,8 +603,8 @@ static void net_worker(void *arg) {
                     CARE_ICON_KEYS[i], suffix);
                 snprintf(mask_s, sizeof(mask_s), "%s%s_mask",
                     CARE_ICON_KEYS[i], suffix);
-                sprite_cache::store("ui-v1", ink_s,  ctx->icon_ink[i],  ICON_BYTES);
-                sprite_cache::store("ui-v1", mask_s, ctx->icon_mask[i], ICON_BYTES);
+                sprite_cache::store(MOCHI_UI_SHEET, ink_s,  ctx->icon_ink[i],  ICON_BYTES);
+                sprite_cache::store(MOCHI_UI_SHEET, mask_s, ctx->icon_mask[i], ICON_BYTES);
             }
             ESP_LOGI(TAG, "icon '%s' fetched + cached", CARE_ICON_KEYS[i]);
             s_net_render_dirty = true;
@@ -939,12 +970,15 @@ extern "C" void app_main(void) {
          * compiled (sprite_fetch / sprite_cache::load both still
          * exist) only for the unused MOCHI_SCENE_URL define and as
          * a future fallback for non-bundled scenes. */
-        /* Embedded-only — warm boot renders before WiFi is up; the
-         * full scene_pack_init() does a network probe through
-         * pack_cache_active that asserts inside lwip pre-init.
-         * net_worker calls scene_pack_init() once WiFi's online to
-         * upgrade to the server-synced pack and flag a re-render. */
-        if (scene_pack_init_embedded() &&
+        /* Cache-preferring, network-free bring-up — warm boot renders
+         * before WiFi is up, so the full scene_pack_init() (which probes
+         * the server through pack_cache_active) would assert inside lwip
+         * pre-init. scene_pack_init_cached() reads only LittleFS: it shows
+         * the last server-synced home bundle when one is cached, else the
+         * embedded baseline. net_worker calls scene_pack_init() once WiFi
+         * is online to ETag-refresh against the server + flag a re-render.
+         * design/29. */
+        if (scene_pack_init_cached() &&
             scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H)) {
             ESP_LOGI(TAG, "scene from pack idx=%u",
                 (unsigned)scene_pack_current());
@@ -1036,10 +1070,10 @@ extern "C" void app_main(void) {
             size_t got_ink = 0, got_mask = 0;
             bool from_cache =
                 cache_ok &&
-                sprite_cache::load("ui-v1", ink_suffix,
+                sprite_cache::load(MOCHI_UI_SHEET, ink_suffix,
                     icon_ink[i], ICON_BYTES, &got_ink) &&
                 got_ink == ICON_BYTES &&
-                sprite_cache::load("ui-v1", mask_suffix,
+                sprite_cache::load(MOCHI_UI_SHEET, mask_suffix,
                     icon_mask[i], ICON_BYTES, &got_mask) &&
                 got_mask == ICON_BYTES;
             if (from_cache) {
@@ -1415,10 +1449,7 @@ extern "C" void app_main(void) {
          * the top, hiding whatever the cell drew up there. */
         memcpy(composite, scene_fb, SCENE_BYTES);
 
-        compositor::blit_two_plane(composite,
-            MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
-            pet_ink, pet_mask,
-            PET_CELL_W, PET_CELL_H, PET_DX, PET_DY);
+        composite_pet(composite, pet_ink, pet_mask);
         render_chrome();
 
         /* M11.5a — thought bubble on top of chrome. Centered above
@@ -1549,10 +1580,7 @@ extern "C" void app_main(void) {
         memcpy(composite, scene_fb, SCENE_BYTES);
         memset(composite, 0xFF, 25 * STATUS_BAR_H);
         if (got_pet) {
-            compositor::blit_two_plane(composite,
-                MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
-                pet_ink, pet_mask,
-                PET_CELL_W, PET_CELL_H, PET_DX, PET_DY);
+            composite_pet(composite, pet_ink, pet_mask);
         }
 
         /* Status bar: centred string, no icons. Reuse the inline
@@ -1666,8 +1694,16 @@ extern "C" void app_main(void) {
      * read as pet taps, and a tap on the actual drawn body is no
      * longer pre-empted by a zone hiding behind those corners. */
     auto pet_silhouette_hit = [&](uint16_t x, uint16_t y) -> bool {
-        const int lx = (int)x - PET_DX;
-        const int ly = (int)y - PET_DY;
+        /* Follow the per-cell pet spot (design/28): map the panel tap into
+         * the pet box, then into 96×96 cell coords (nearest-neighbour
+         * inverse of the scaled blit) before testing the mask. */
+        int ox, oy, side;
+        pet_dest(&ox, &oy, &side);
+        const int px = (int)x - ox;
+        const int py = (int)y - oy;
+        if (px < 0 || px >= side || py < 0 || py >= side) return false;
+        const int lx = px * (int)PET_CELL_W / side;
+        const int ly = py * (int)PET_CELL_H / side;
         if (lx < 0 || lx >= (int)PET_CELL_W ||
             ly < 0 || ly >= (int)PET_CELL_H) return false;
         const size_t stride = PET_CELL_W >> 3;          /* 12 bytes/row */
@@ -1825,6 +1861,15 @@ extern "C" void app_main(void) {
                                             * re-render (e-paper flash) on each
                                             * 30 s retry. Cleared on success. */
     int64_t travel_retry_at_us     = 0;
+    /* Eager place prefetch (design/29): on each travel swap we collect the
+     * place ids reachable from the newly-loaded pack into this queue and
+     * drain it one-per-idle-tick (warming each pack's LittleFS cache) so a
+     * subsequent nav_place tap hits the fast warm path instead of a cold
+     * GET. Bounded to a handful — a cell rarely exits to more than a few
+     * places, and we only need the immediately-reachable ring. */
+    char    prefetch_ids[6][SCENE_PLACE_ID_MAX];
+    uint8_t prefetch_n = 0;   /* collected this travel */
+    uint8_t prefetch_i = 0;   /* next to drain */
     /* Backing store for the failure bubble's text. Static so the
      * file-scope s_active_thought.text pointer stays valid after we pin
      * it as a persistent, pageable passive bubble. Sized for the worst
@@ -2120,6 +2165,7 @@ extern "C" void app_main(void) {
              * AND inside the inactivity-driven idle path is fine —
              * dev_menu's fallback is the pet name. */
             char pet_status_buf[80] = {};
+            int st_happy = -1, st_full = -1, st_energy = -1;
             {
                 int64_t now_ms = now_ms_wall();
                 pet_event_t slice[12];
@@ -2127,6 +2173,9 @@ extern "C" void app_main(void) {
                 pet_t decayed = current_pet_decayed(now_ms);
                 mood_t m = project_mood(&decayed, slice, n, now_ms);
                 const char *mname = mood_to_name(m);
+                st_happy  = (int)decayed.stats.happiness;
+                st_full   = (int)decayed.stats.fullness;
+                st_energy = (int)decayed.stats.energy;
                 snprintf(pet_status_buf, sizeof(pet_status_buf),
                     "%s  %s\nhappy %u  full %u  energy %u",
                     pair.pet_name[0] ? pair.pet_name : "mochi",
@@ -2142,7 +2191,8 @@ extern "C" void app_main(void) {
                 ota_update::current_version(),
                 s_net_ip, s_net_ssid,
                 (int)s_net_phase, batt_pct_now,
-                pet_status_buf);
+                pet_status_buf,
+                st_happy, st_full, st_energy);
             if (dev_menu::active()) {
                 if (got_touch) {
                     /* dev_menu hand-rolls its hit-testing: dispatch_touch
@@ -2199,6 +2249,24 @@ extern "C" void app_main(void) {
                             epd->EPD_Init_Partial();
                             epd->EPD_DisplayPart();
                             break;
+                        case dev_menu::TouchResult::ConsolidateNow: {
+                            /* design/27: force a consolidation pass now —
+                             * bypasses the asleep + activity + cooldown
+                             * gates (server still skips if no material).
+                             * Runs in the background worker; toast just
+                             * acknowledges the tap. */
+                            const bool kicked = consolidate_start_forced();
+                            ESP_LOGI(TAG, "dev_menu → consolidate now (kicked=%d)",
+                                kicked);
+                            epd_ui::clear(epd);
+                            epd_ui::draw_text_centered(epd, 84, 1,
+                                kicked ? "Consolidating" : "Busy - try");
+                            epd_ui::draw_text_centered(epd, 104, 1,
+                                kicked ? "in background..." : "again shortly");
+                            epd->EPD_Init_Partial();
+                            epd->EPD_DisplayPart();
+                            break;
+                        }
                         case dev_menu::TouchResult::ChangeWifi:
                             ESP_LOGI(TAG, "dev_menu → change WiFi (SoftAP)");
                             nvs_creds_set_prov_on_boot(true);
@@ -2510,6 +2578,7 @@ extern "C" void app_main(void) {
             }
             char loc[40], lsheet[64];
             pet_sync_current_location(loc, sizeof(loc), lsheet, sizeof(lsheet));
+            bool traveled_this_tick = false;   /* gate the prefetch drain below */
             if (loc[0] && strcmp(loc, last_location) != 0) {
                 bool swapped = false;
                 bool fetch_attempted = false;
@@ -2569,6 +2638,14 @@ extern "C" void app_main(void) {
                         s_thought_active = false;
                         memset(&s_active_thought, 0, sizeof(s_active_thought));
                     }
+                    /* Collect the places reachable from the pack we just
+                     * loaded so the idle drain below can warm them ahead of
+                     * the next nav_place tap (design/29). Drained on later
+                     * ticks, not now — the arrival repaint already paid for
+                     * a fetch. format=0 home returns 0 (nothing to warm). */
+                    prefetch_n = scene_pack_collect_place_targets(prefetch_ids, 6);
+                    prefetch_i = 0;
+                    traveled_this_tick = true;
                 } else if (fetch_attempted) {
                     /* Couldn't reach the place. Stay on the current scene
                      * but float a thought bubble so the failure isn't a
@@ -2610,6 +2687,27 @@ extern "C" void app_main(void) {
                  * loop every tick. On failure the backoff above forces a
                  * later retry; re-tapping the nav zone forces one now. */
                 snprintf(last_location, sizeof(last_location), "%s", loc);
+            }
+
+            /* Eager prefetch drain (design/29): warm one reachable place
+             * pack per idle tick so a later nav_place tap hits the warm
+             * cache path instead of a cold GET. Skip the tick we actually
+             * traveled (its repaint already cost a fetch) and only when
+             * online with no touch pending / portal / imagine in flight —
+             * each warm is a blocking HEAD (+ a cold GET on first sight)
+             * that mustn't stall a live interaction. Once a place's ring is
+             * warm the HEAD just confirms the ETag and the queue idles
+             * until the next travel refills it. Best-effort throughout. */
+            if (!traveled_this_tick && prefetch_i < prefetch_n &&
+                s_net_phase == NetPhase::Online && !got_touch &&
+                !key_portal::active() && !imagine_in_flight()) {
+                char psheet[64];
+                const char *pid = prefetch_ids[prefetch_i++];
+                if (pet_sync_resolve_place_sheet(pid, psheet, sizeof(psheet)) &&
+                    psheet[0]) {
+                    ESP_LOGI(TAG, "prefetch warming '%s' (sheet %s)", pid, psheet);
+                    pack_cache_prefetch_geom(psheet, SCENE_W, SCENE_H);
+                }
             }
         }
 
@@ -2676,8 +2774,15 @@ extern "C" void app_main(void) {
                 voice_peer_get_session_stats(&turns, &in_tok, &out_tok, &total_tok);
                 char vmodel[48];
                 model_prefs_voice(vmodel, sizeof(vmodel));
+                /* design/27: ship the session transcript so the server
+                 * logs `talked` events with content for consolidation.
+                 * Heap buffer — the array can run a few KB; the worker
+                 * has stopped by now so the accumulator is stable. */
+                char *tx = (char *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+                if (tx) voice_peer_get_transcript_json(tx, 4096);
                 pet_sync_post_voice_session(dur_s, vmodel, "marin",
-                    "ended", turns, in_tok, out_tok, total_tok);
+                    "ended", turns, in_tok, out_tok, total_tok, tx);
+                free(tx);
             }
         }
 
@@ -2701,11 +2806,39 @@ extern "C" void app_main(void) {
          * main task. Only re-renders on transition. */
         {
             voice::Phase cur = voice::phase();
-            if (cur != last_voice_phase) {
+            const bool v_active_now = voice::is_active();
+            /* design/27: voice-driven bubbles. The worker tasks post the
+             * model's spoken transcript (talk bubble) + busy/imagine
+             * notices (thought bubble) via voice_ui; render them over the
+             * pet. Re-render on EITHER a phase change OR a new bubble so a
+             * phase flip doesn't wipe an active bubble, and vice-versa.
+             * These bubbles are informational, not tappable — we keep
+             * s_thought_active false so the touch classifier ignores the
+             * rect render_with_expression caches. */
+            static char voice_bubble[160];
+            static voice_ui_kind_t voice_bubble_kind = VOICE_UI_NONE;
+            const bool bubble_changed = v_active_now &&
+                voice_ui_take(voice_bubble, sizeof(voice_bubble),
+                              &voice_bubble_kind);
+            if (cur != last_voice_phase || bubble_changed) {
                 const char *e = phase_expr(cur);
                 if (e) {
-                    ESP_LOGI(TAG, "voice phase → %d, render %s", (int)cur, e);
-                    render_with_expression(e, false, nullptr);
+                    if (v_active_now && voice_bubble_kind != VOICE_UI_NONE &&
+                        voice_bubble[0]) {
+                        pet_thought_t t;
+                        memset(&t, 0, sizeof(t));
+                        t.action_kind = THOUGHT_ACTION_NONE;
+                        t.text = voice_bubble;
+                        t.style = (voice_bubble_kind == VOICE_UI_SPOKEN)
+                            ? THOUGHT_STYLE_SPOKEN : THOUGHT_STYLE_THOUGHT;
+                        t.persistent = true;
+                        s_thought_active = false;
+                        render_with_expression(e, false, &t);
+                    } else {
+                        ESP_LOGI(TAG, "voice phase → %d, render %s",
+                            (int)cur, e);
+                        render_with_expression(e, false, nullptr);
+                    }
                 }
                 last_voice_phase = cur;
             }
@@ -2918,6 +3051,19 @@ extern "C" void app_main(void) {
                 ? scene_act.seed_len : sizeof(place_id) - 1;
             memcpy(place_id, scene_act.seed_text, n);
             ESP_LOGI(TAG, "scene nav_place → %s", place_id);
+            /* Instant tap ack (design/29): the enter POST + travel fetch
+             * below block for up to a few seconds; without a render here
+             * the tap reads as a dead button. Pop a quick partial-refresh
+             * "traveling" bubble first; the travel block repaints the real
+             * scene a tick later (and passes no thought, clearing this). */
+            {
+                static pet_thought_t s_travel_thought;
+                memset(&s_travel_thought, 0, sizeof(s_travel_thought));
+                s_travel_thought.action_kind = THOUGHT_ACTION_NONE;
+                s_travel_thought.text        = "traveling...";
+                s_travel_thought.style       = THOUGHT_STYLE_THOUGHT;
+                render_with_expression("thinking", false, &s_travel_thought);
+            }
             pet_sync_enter_place(place_id);
             /* Force the travel block to re-render even when the user
              * tapped to go to the place they're already in. Without
@@ -3098,6 +3244,29 @@ extern "C" void app_main(void) {
             /* Keep the dev-pet fallback in sync too, so projection
              * is consistent if the server sync drops out mid-session. */
             s_dev_pet.last_interaction_at = now_ms;
+            /* design/27: if a voice session is live, tell the model the
+             * human just physically cared for the pet so it can
+             * acknowledge — the device otherwise never surfaces the tap
+             * (the legacy web client does this via notifyCare). Curated
+             * to the care kinds; tapped/curious carry no note. */
+            if (voice::is_active()) {
+                const char *verb = nullptr;
+                switch (kind) {
+                    case EVENT_FED:       verb = "fed you";         break;
+                    case EVENT_PLAYED:    verb = "played with you"; break;
+                    case EVENT_COMFORTED: verb = "comforted you";   break;
+                    case EVENT_CHEERED:   verb = "cheered you on";  break;
+                    case EVENT_HUGGED:    verb = "hugged you";      break;
+                    default:              verb = nullptr;           break;
+                }
+                if (verb) {
+                    char note[128];
+                    snprintf(note, sizeof(note),
+                        "[from your body] your human just %s. "
+                        "acknowledge it briefly in your own voice.", verb);
+                    voice::send_note(note);
+                }
+            }
         }
         {
             pet_event_t slice[12];

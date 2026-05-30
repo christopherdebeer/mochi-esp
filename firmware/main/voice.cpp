@@ -8,12 +8,14 @@
 #include "i2c_bus.h"
 #include "openai_key.h"
 #include "pair_creds.h"
+#include "model_prefs.h"
 extern "C" {
 #include "codec_init.h"
 #include "voice/openai_signaling.h"
 #include "voice/voice_peer.h"
 #include "voice/voice_https.h"
 #include "voice/voice_tools.h"
+#include "voice/voice_ui.h"
 #include "esp_peer_signaling.h"
 #include "cJSON.h"
 }
@@ -129,7 +131,11 @@ static bool fetch_session_config(const char *pet_id,
     if (!raw) return false;
 
     fetch_ctx fc = { raw, RAW_CAP, false };
-    char url[] = "https://mochi.val.run/api/voice/session";
+    /* Admin debug-voice toggle (design/27): when set, ask the server for
+     * the tool-test diagnostic persona instead of the in-character one. */
+    char url[80];
+    snprintf(url, sizeof(url), "https://mochi.val.run/api/voice/session%s",
+        model_prefs_voice_debug() ? "?mode=debug" : "");
     int rc = https_get(url, headers, persona_body, &fc);
 
     bool ok = false;
@@ -334,6 +340,7 @@ int start_session(void) {
             ESP_LOGE(TAG, "voice_peer_start rc=%d", rc);
             goto cleanup;
         }
+        voice_ui_reset();   /* clear any stale on-screen bubble (design/27) */
         s_active = true;
     }
 
@@ -359,6 +366,7 @@ void stop_session(void) {
     ESP_LOGI(TAG, "stopping voice session…");
     voice_peer_stop();
     s_active = false;
+    voice_ui_reset();   /* drop any lingering bubble (design/27) */
     ESP_LOGI(TAG, "voice session stopped");
 }
 
@@ -397,6 +405,11 @@ Phase phase(void) {
 bool send_text(const char *text) {
     if (!s_active) return false;
     return voice_peer_send_text(text) == 0;
+}
+
+bool send_note(const char *text) {
+    if (!s_active) return false;
+    return voice_peer_inject_note(text) == 0;
 }
 
 bool stop_requested(void) {

@@ -64,6 +64,19 @@ bool scene_pack_init_embedded(void) {
     return open_into_active(_binary_scenes_a_mpk_start, "embedded");
 }
 
+bool scene_pack_init_cached(void) {
+    if (s_open) return true;
+    /* Prefer the last server-synced bundle persisted in LittleFS; it's
+     * the same "scene-bundle-a.pack" blob pack_cache_active writes after
+     * a network refresh, so on an offline cold boot we show the authored
+     * home rather than the embedded factory one. open_into_active seeds
+     * s_home_bytes from whatever we pick, so scene_pack_load_home() later
+     * restores this same bundle. */
+    const uint8_t *cached = pack_cache_load_only("scene-bundle-a");
+    if (cached && open_into_active(cached, "cache")) return true;
+    return open_into_active(_binary_scenes_a_mpk_start, "embedded");
+}
+
 bool scene_pack_init(void) {
     /* "Sync at boot" path: pack_cache_active hits the network. Idempotent
      * once WiFi is up — re-running after a prior embedded init upgrades
@@ -121,6 +134,27 @@ uint16_t scene_pack_set(uint16_t idx) {
     if (!s_open || s_pack.count == 0) return 0;
     s_current = (uint16_t)(idx % s_pack.count);
     return s_current;
+}
+
+bool scene_pack_current_pet_zone(int *ox, int *oy, int *side) {
+    /* Pet zones are inline format=1 zones; format=0 packs (the embedded
+     * scenes_a home bundle) carry none, so they fall back to the fixed
+     * firmware anchor. Mirrors the splash placement in epd_ui.cpp: a
+     * square box (min of w,h), centred-x, foot on the zone's bottom edge. */
+    if (!s_open || s_pack.format != 1) return false;
+    const uint8_t zc = mpk_zone_count(&s_pack, s_current);
+    for (uint8_t z = 0; z < zc; z++) {
+        mpk_zone_v1_t zn;
+        if (!mpk_zone_get(&s_pack, s_current, z, &zn)) continue;
+        if (zn.kind != MPK_ACTION_PET) continue;
+        int sd = (zn.w < zn.h ? (int)zn.w : (int)zn.h);
+        if (sd < 1) sd = 1;
+        if (ox)   *ox   = (int)zn.x + ((int)zn.w - sd) / 2;
+        if (oy)   *oy   = (int)zn.y + ((int)zn.h - sd);
+        if (side) *side = sd;
+        return true;
+    }
+    return false;
 }
 
 uint16_t scene_pack_advance(int delta) {
@@ -273,6 +307,40 @@ static void name_to_action(const char *name, scene_pack_action_t *out) {
         out->kind = MPK_ACTION_EVENT;
         out->data = EVENT_TAPPED;
     }
+}
+
+uint8_t scene_pack_collect_place_targets(char out_ids[][SCENE_PLACE_ID_MAX],
+                                         uint8_t max) {
+    if (!s_open || !out_ids || max == 0) return 0;
+    /* nav_place zones are inline (format=1) only; the embedded format=0
+     * home bundle navigates within itself, nothing to prefetch. */
+    if (s_pack.format != 1) return 0;
+
+    uint8_t n = 0;
+    for (uint16_t cell = 0; cell < s_pack.count && n < max; cell++) {
+        const uint8_t zc = mpk_zone_count(&s_pack, cell);
+        for (uint8_t z = 0; z < zc && n < max; z++) {
+            mpk_zone_v1_t zn;
+            if (!mpk_zone_get(&s_pack, cell, z, &zn)) continue;
+            if (zn.kind != MPK_ACTION_NAV_PLACE) continue;
+            if (!zn.seed_text || zn.seed_len == 0) continue;
+            if (zn.seed_len >= SCENE_PLACE_ID_MAX) continue;  /* too long; skip */
+
+            /* seed_text is borrowed and NOT NUL-terminated. */
+            char id[SCENE_PLACE_ID_MAX];
+            memcpy(id, zn.seed_text, zn.seed_len);
+            id[zn.seed_len] = '\0';
+
+            bool dup = false;
+            for (uint8_t i = 0; i < n; i++) {
+                if (strcmp(out_ids[i], id) == 0) { dup = true; break; }
+            }
+            if (dup) continue;
+            memcpy(out_ids[n], id, (size_t)zn.seed_len + 1);
+            n++;
+        }
+    }
+    return n;
 }
 
 bool scene_pack_action_at(int16_t x, int16_t y, int slop_px,

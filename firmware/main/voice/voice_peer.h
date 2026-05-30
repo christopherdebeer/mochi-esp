@@ -22,6 +22,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -96,6 +97,18 @@ bool voice_peer_stop_requested(void);
 int voice_peer_send_text(const char *text);
 
 /*
+ * Inject a system-role note into the live session (design/27).
+ *
+ * Like voice_peer_send_text but with role "system" — a substrate→model
+ * context push (care taps "[from your body] …", environment changes
+ * "[notice] …") the model folds into its next reply. If the model is
+ * mid-utterance it issues a response.cancel first so the note lands
+ * promptly. Mirrors the legacy web client's notifyCare/notifyEnvironment.
+ * Returns 0 on success; -1 if the data channel isn't open or a send fails.
+ */
+int voice_peer_inject_note(const char *text);
+
+/*
  * Send a raw JSON string as one event over the data channel.
  *
  * Lower-level than voice_peer_send_text — caller owns the full
@@ -151,6 +164,12 @@ void voice_peer_stop(void);
  * the realtime_sessions row. Any out-pointer may be NULL. */
 void voice_peer_get_session_stats(int *turns, int *in_tok,
                                   int *out_tok, int *total_tok);
+
+/* Emit the session's paired (user, reply) transcript turns as a JSON
+ * array string — [{"user":"…","reply":"…"}, …] — into `out` (design/27).
+ * Bounded to ~12 turns × ~160 chars. Read on the main task AFTER
+ * voice_peer_stop. Empty array "[]" when nothing was transcribed. */
+void voice_peer_get_transcript_json(char *out, size_t cap);
 
 #ifdef __cplusplus
 }

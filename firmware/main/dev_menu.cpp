@@ -18,6 +18,9 @@
 #include "model_prefs.h"
 #include "ota_channel.h"
 #include "ota_update.h"
+#include "sprite_cache.h"   /* ui-icons-a cells for stat rows + tile icons (design/30) */
+#include "sprite_fetch.h"   /* lazy on-demand fetch of menu/tile icons */
+#include "compositor.h"     /* downsample native 80×80 → 48 */
 
 static const char *TAG = "dev_menu";
 
@@ -52,6 +55,111 @@ static char                 s_ssid[MOCHI_WIFI_SSID_MAX + 1] = {};
 static int                  s_net_phase    = 0;
 static int                  s_batt_pct     = 0;
 static char                 s_pet_status[80] = {};
+/* Numeric pet stats [0,100] for MenuP1's icon + bar rows; <0 = unknown. */
+static int                  s_happy = -1;
+static int                  s_full  = -1;
+static int                  s_energy = -1;
+
+/* ─── ui-v1 icon cache (design/30) ──────────────────────────────────
+ *
+ * The home chrome already fetches + caches four ui-v1 cells as 48×48
+ * 2-plane (ink+mask) blobs under sprite_cache keys
+ * "<key>_icon_48x48_{ink,mask}" (main.cpp CARE_ICON_KEYS). The dev menu
+ * reuses those for the stat rows. We lazily load each requested key once
+ * into small PSRAM buffers; a miss (offline before the first fetch) just
+ * means the row falls back to a one-letter tag. */
+static constexpr int ICON_DIM   = 48;                       /* cached size */
+static constexpr int ICON_STRIDE = (ICON_DIM + 7) / 8;      /* 6 bytes/row */
+static constexpr int ICON_BYTES  = ICON_STRIDE * ICON_DIM;  /* 288 */
+/* Native ui cell on the sheet (server delivers 80×80 2-plane); downsampled
+ * to ICON_DIM. Must match main.cpp UI_CELL_NATIVE_*. */
+static constexpr int UI_NATIVE_DIM   = 80;
+static constexpr int UI_NATIVE_BYTES = (UI_NATIVE_DIM / 8) * UI_NATIVE_DIM;  /* 800 */
+
+struct IconSlot {
+    char     key[24];
+    uint8_t *ink;
+    uint8_t *mask;
+    bool     ok;
+};
+/* Enough for the care/stat icons + every distinct menu-tile glyph. */
+static constexpr int ICON_SLOTS = 18;
+static IconSlot s_icon_cache[ICON_SLOTS] = {};
+static int      s_icon_n = 0;
+
+/* Return the cached icon for `key`, loading it from sprite_cache on first
+ * use. Returns nullptr (and the caller draws a text fallback) on a cache
+ * miss or alloc failure. Idempotent + cheap after the first hit. */
+static const IconSlot *get_icon(const char *key) {
+    for (int i = 0; i < s_icon_n; i++)
+        if (strcmp(s_icon_cache[i].key, key) == 0)
+            return s_icon_cache[i].ok ? &s_icon_cache[i] : nullptr;
+    if (s_icon_n >= ICON_SLOTS) return nullptr;
+
+    IconSlot &slot = s_icon_cache[s_icon_n++];
+    snprintf(slot.key, sizeof(slot.key), "%s", key);
+    slot.ok = false;
+    slot.ink  = (uint8_t *)heap_caps_malloc(ICON_BYTES, MALLOC_CAP_SPIRAM);
+    slot.mask = (uint8_t *)heap_caps_malloc(ICON_BYTES, MALLOC_CAP_SPIRAM);
+    if (!slot.ink || !slot.mask) return nullptr;
+
+    char ink_s[40], mask_s[40];
+    snprintf(ink_s,  sizeof(ink_s),  "%s_icon_%dx%d_ink",  key, ICON_DIM, ICON_DIM);
+    snprintf(mask_s, sizeof(mask_s), "%s_icon_%dx%d_mask", key, ICON_DIM, ICON_DIM);
+    size_t gi = 0, gm = 0;
+    if (sprite_cache::load(MOCHI_UI_SHEET, ink_s,  slot.ink,  ICON_BYTES, &gi) && gi == ICON_BYTES &&
+        sprite_cache::load(MOCHI_UI_SHEET, mask_s, slot.mask, ICON_BYTES, &gm) && gm == ICON_BYTES) {
+        slot.ok = true;
+        return &slot;
+    }
+    /* Cache miss → fetch the native 80×80 cell from the sheet, downsample to
+     * ICON_DIM, and cache it. Blocking, but only the first time a given icon
+     * is needed (when a menu page that uses it is first opened); the care/
+     * stat icons are already warmed at boot by main.cpp. Offline → the fetch
+     * fails → the caller falls back to a one-letter tag. */
+    uint8_t *ni = (uint8_t *)heap_caps_malloc(UI_NATIVE_BYTES, MALLOC_CAP_SPIRAM);
+    uint8_t *nm = (uint8_t *)heap_caps_malloc(UI_NATIVE_BYTES, MALLOC_CAP_SPIRAM);
+    if (ni && nm) {
+        char url[128];
+        snprintf(url, sizeof(url),
+            "https://mochi.val.run/devsprite/cell/" MOCHI_UI_SHEET "/%s", key);
+        uint16_t w = 0, h = 0;
+        uint32_t ms = 0;
+        if (sprite_fetch_cell(url, ni, nm, UI_NATIVE_BYTES, &w, &h, &ms) &&
+            w == UI_NATIVE_DIM && h == UI_NATIVE_DIM) {
+            memset(slot.ink,  0xFF, ICON_BYTES);
+            memset(slot.mask, 0xFF, ICON_BYTES);
+            compositor::downsample_plane(slot.ink,  ICON_DIM, ICON_DIM, ni, UI_NATIVE_DIM, UI_NATIVE_DIM);
+            compositor::downsample_plane(slot.mask, ICON_DIM, ICON_DIM, nm, UI_NATIVE_DIM, UI_NATIVE_DIM);
+            if (sprite_cache::store(MOCHI_UI_SHEET, ink_s,  slot.ink,  ICON_BYTES))
+                sprite_cache::store(MOCHI_UI_SHEET, mask_s, slot.mask, ICON_BYTES);
+            slot.ok = true;
+        }
+    }
+    heap_caps_free(ni);
+    heap_caps_free(nm);
+    return slot.ok ? &slot : nullptr;
+}
+
+/* Nearest-neighbour blit of a cached 48×48 2-plane icon into an out×out
+ * box at (x,y), drawing only its black ink (the tile/panel is white, so
+ * paper pixels need no write). Matches compositor.cpp's bit convention:
+ * MSB-first within a byte, mask bit 1 = transparent, ink bit 0 = black. */
+static void blit_icon(epaper_driver_display *epd, int x, int y, int out,
+                      const IconSlot *ic) {
+    if (!ic) return;
+    for (int oy = 0; oy < out; oy++) {
+        const int sy = oy * ICON_DIM / out;
+        for (int ox = 0; ox < out; ox++) {
+            const int sx = ox * ICON_DIM / out;
+            const int off = sy * ICON_STRIDE + (sx >> 3);
+            const uint8_t bit = (uint8_t)(1u << (7 - (sx & 7)));
+            if (ic->mask[off] & bit) continue;            /* transparent */
+            if ((ic->ink[off] & bit) == 0)                /* ink 0 = black */
+                epd->EPD_DrawColorPixel(x + ox, y + oy, DRIVER_COLOR_BLACK);
+        }
+    }
+}
 
 /* ─── Tile registry + hit-testing ──────────────────────────────────
  *
@@ -103,6 +211,7 @@ struct Tile {
     bool        toggle;
     const char *value;   /* toggle pill text; nullptr for actions */
     const char *ssid;    /* WifiSwitch payload; nullptr otherwise */
+    const char *icon;    /* ui-icons-a key for the tile glyph; nullptr = text-only */
 };
 
 static void clear_buttons(void) {
@@ -236,32 +345,27 @@ static void draw_glyphs_centered_in(epaper_driver_display *epd, int x, int w,
     draw_glyphs(epd, tx, y, scale, text, ink);
 }
 
-/* Draw a possibly-multiline ('\n'-separated) string, each line centred
- * on the panel, starting at `y`. Returns the y just below the block.
- * Used for the plain-text headers (pet status, device info) that sit
- * above the tile grid and must NOT look tappable. */
-static int draw_multiline_centered(epaper_driver_display *epd, int y,
-                                    const char *text, int line_h) {
-    char buf[96];
-    snprintf(buf, sizeof(buf), "%s", text);
-    char *line = buf;
-    while (line) {
-        char *nl = strchr(line, '\n');
-        if (nl) *nl = '\0';
-        epd_ui::draw_text_centered(epd, y, 1, line);
-        y += line_h;
-        line = nl ? nl + 1 : nullptr;
-    }
-    return y;
-}
-
 /* ─── Tiles ─────────────────────────────────────────────────────────*/
 
 static void draw_tile(epaper_driver_display *epd, int x, int y, int w, int h,
                       const Tile &t, bool flash) {
+    /* Icon action (design/30): a ui-icons-a glyph centred in the upper area
+     * with the label centred below — flat (no fill/border) so the line-art
+     * icon reads. Falls through to the legacy filled style when no icon is
+     * set or it isn't available yet (offline first paint). Toggles keep
+     * their pill (handled below). */
+    const IconSlot *ic = (t.icon && !t.toggle) ? get_icon(t.icon) : nullptr;
+    if (ic) {
+        int isz = h - 16;
+        if (isz > 44) isz = 44;
+        if (isz < 16) isz = 16;
+        blit_icon(epd, x + (w - isz) / 2, y + 3, isz, ic);
+        draw_glyphs_centered_in(epd, x, w, y + h - 11, 1, t.label, DRIVER_COLOR_BLACK);
+        return;
+    }
     if (!t.toggle) {
-        /* Action: filled black with a white centred label — reads as
-         * "press to do" and visually distinct from a toggle. */
+        /* Action without an (available) icon: filled black with a white
+         * centred label — reads as "press to do". */
         fill_rect(epd, x, y, w, h, DRIVER_COLOR_BLACK);
         draw_glyphs_centered_in(epd, x, w, y + (h - 8) / 2, 1,
                                 t.label, DRIVER_COLOR_WHITE);
@@ -324,19 +428,59 @@ static void layout_tiles(epaper_driver_display *epd, const Tile *tiles, int n,
  * it to white in render_mode) and registers its tap-rects. The panel
  * refresh is driven by render_mode after these return. */
 
-/* Page 1: kid-facing. Pet-status header (plain text) + a 2×2 grid of
- * big, safe exploratory actions (Memories, Places, Go home). */
+/* One stat row (design/30): a 16 px ui-v1 icon on the left, a filled
+ * progress bar to `value`/100 across the middle, and the numeric value on
+ * the right. Falls back to a one-letter tag when the icon cell isn't
+ * cached yet (offline before the first ui-v1 fetch). Skipped if value<0. */
+static void draw_stat_row(epaper_driver_display *epd, int y, const char *key,
+                          char fallback, int value) {
+    if (value < 0) return;
+    if (value > 100) value = 100;
+    const int icon = 16;
+    const IconSlot *ic = get_icon(key);
+    if (ic) {
+        blit_icon(epd, MARGIN, y, icon, ic);
+    } else {
+        char fb[2] = { fallback, 0 };
+        draw_glyphs(epd, MARGIN + 4, y + (icon - 8) / 2, 1, fb, DRIVER_COLOR_BLACK);
+    }
+    char vbuf[8];
+    snprintf(vbuf, sizeof(vbuf), "%d", value);
+    const int val_w = 3 * 8;                                   /* room for "100" */
+    const int bar_x = MARGIN + icon + 6;
+    const int bar_w = (MOCHI_EPD_WIDTH - MARGIN - val_w - 4) - bar_x;
+    const int bar_h = 12;
+    const int bar_y = y + (icon - bar_h) / 2;
+    draw_rect_border(epd, bar_x, bar_y, bar_w, bar_h);
+    const int fill_w = ((bar_w - 4) * value) / 100;
+    if (fill_w > 0)
+        fill_rect(epd, bar_x + 2, bar_y + 2, fill_w, bar_h - 4, DRIVER_COLOR_BLACK);
+    draw_glyphs(epd, MOCHI_EPD_WIDTH - MARGIN - (int)strlen(vbuf) * 8,
+                y + (icon - 8) / 2, 1, vbuf, DRIVER_COLOR_BLACK);
+}
+
+/* Page 1: kid-facing. Title (pet name + mood) + three icon/progress-bar
+ * stat rows (design/30) + a grid of big, safe exploratory actions. */
 static void render_menu_p1(epaper_driver_display *epd) {
-    int y = 6;
-    y = draw_multiline_centered(epd,
-        y, s_pet_status[0] ? s_pet_status : "Mochi", 11);
-    if (y < 34) y = 34;
+    /* Title = first line of the status string (name + mood); the numeric
+     * second line is now the icon rows below. */
+    char title[sizeof(s_pet_status)];
+    snprintf(title, sizeof(title), "%s", s_pet_status[0] ? s_pet_status : "Mochi");
+    char *nl = strchr(title, '\n');
+    if (nl) *nl = '\0';
+    epd_ui::draw_text_centered(epd, 6, 1, title);
+
+    int y = 22;
+    draw_stat_row(epd, y, "heart", 'H', s_happy);  y += 20;
+    draw_stat_row(epd, y, "bowl",  'F', s_full);   y += 20;
+    draw_stat_row(epd, y, "star",  'E', s_energy); y += 20;
+
     const Tile tiles[] = {
-        { "Memories", TouchResult::Memories, false, nullptr, nullptr },
-        { "Places",   TouchResult::Places,   false, nullptr, nullptr },
-        { "Go home",  TouchResult::GoHome,   false, nullptr, nullptr },
+        { "Memories", TouchResult::Memories, false, nullptr, nullptr, "memories" },
+        { "Places",   TouchResult::Places,   false, nullptr, nullptr, "places" },
+        { "Go home",  TouchResult::GoHome,   false, nullptr, nullptr, "home" },
     };
-    layout_tiles(epd, tiles, 3, y, 2);
+    layout_tiles(epd, tiles, 3, y + 4, 2);
 }
 
 /* Page 2: settings — network/device info header + a 2-col grid of the
@@ -363,9 +507,9 @@ static void render_menu_p2(epaper_driver_display *epd) {
     epd_ui::draw_text(epd, MARGIN, 42, 1, l2);
 
     const Tile tiles[] = {
-        { "Switch WiFi", TouchResult::SwitchWifi,    false, nullptr, nullptr },
-        { "OpenAI key",  TouchResult::OpenKeyPortal, false, nullptr, nullptr },
-        { "AI models",   TouchResult::OpenModels,    false, nullptr, nullptr },
+        { "Switch WiFi", TouchResult::SwitchWifi,    false, nullptr, nullptr, "wifi" },
+        { "OpenAI key",  TouchResult::OpenKeyPortal, false, nullptr, nullptr, "secret_key" },
+        { "AI models",   TouchResult::OpenModels,    false, nullptr, nullptr, "sparkle_stars" },
     };
     layout_tiles(epd, tiles, 3, 56, 2);
 }
@@ -379,13 +523,14 @@ static void render_menu_p3(epaper_driver_display *epd) {
     /* Channel pill value — buffer must outlive layout_tiles (same scope). */
     const char *chan = ota_channel_name(ota_channel_get());
     const Tile tiles[] = {
-        { "Update now",  TouchResult::UpdateNow,     false, nullptr, nullptr },
-        { "Channel",     TouchResult::ToggleChannel, true,  chan,    nullptr },
-        { "Add WiFi",    TouchResult::ChangeWifi,    false, nullptr, nullptr },
-        { "Forget WiFi", TouchResult::ForgetWifi,    false, nullptr, nullptr },
-        { "Re-pair",     TouchResult::RePair,        false, nullptr, nullptr },
+        { "Update now",  TouchResult::UpdateNow,     false, nullptr, nullptr, "update" },
+        { "Channel",     TouchResult::ToggleChannel, true,  chan,    nullptr, nullptr },
+        { "Add WiFi",    TouchResult::ChangeWifi,    false, nullptr, nullptr, "wifi" },
+        { "Forget WiFi", TouchResult::ForgetWifi,    false, nullptr, nullptr, "wifi_off" },
+        { "Re-pair",     TouchResult::RePair,        false, nullptr, nullptr, "repair" },
+        { "Consolidate", TouchResult::ConsolidateNow, false, nullptr, nullptr, "dream" },
     };
-    layout_tiles(epd, tiles, 5, 20, 2);
+    layout_tiles(epd, tiles, 6, 20, 2);
 }
 
 /* WiFi modal — pushed from "Switch WiFi" on P2. A single wide column
@@ -409,7 +554,7 @@ static void render_wifi(epaper_driver_display *epd) {
         snprintf(labels[n], sizeof(labels[n]), "%s%s",
                  is_cur ? "* " : "", c.ssid);
         snprintf(ssids[n], sizeof(ssids[n]), "%s", c.ssid);
-        tiles[n] = { labels[n], TouchResult::WifiSwitch, false, nullptr, ssids[n] };
+        tiles[n] = { labels[n], TouchResult::WifiSwitch, false, nullptr, ssids[n], nullptr };
         n++;
     }
     if (n == 0) {
@@ -429,11 +574,16 @@ static void render_models(epaper_driver_display *epd) {
     char vm[48], tm[48];
     model_prefs_voice(vm, sizeof(vm));
     model_prefs_text(tm, sizeof(tm));
+    /* design/27: admin debug-voice persona toggle. Off = the normal
+     * in-character persona; On = the server's tool-test diagnostic
+     * persona (voice.cpp appends ?mode=debug). */
+    const char *dbg = model_prefs_voice_debug() ? "on" : "off";
     const Tile tiles[] = {
-        { "Voice", TouchResult::CycleVoiceModel, true, vm, nullptr },
-        { "Text",  TouchResult::CycleTextModel,  true, tm, nullptr },
+        { "Voice", TouchResult::CycleVoiceModel,  true, vm,  nullptr, nullptr },
+        { "Text",  TouchResult::CycleTextModel,   true, tm,  nullptr, nullptr },
+        { "Debug", TouchResult::ToggleVoiceDebug, true, dbg, nullptr, nullptr },
     };
-    layout_tiles(epd, tiles, 2, 22, 1);
+    layout_tiles(epd, tiles, 3, 22, 1);
 }
 
 /* ─── render_mode ──────────────────────────────────────────────────
@@ -525,6 +675,10 @@ TouchResult dispatch_touch(int x, int y) {
             model_prefs_cycle_text();
             toggle_flash(Mode::ModelsModal, action);
             return TouchResult::None;
+        case TouchResult::ToggleVoiceDebug:
+            model_prefs_toggle_voice_debug();
+            toggle_flash(Mode::ModelsModal, action);
+            return TouchResult::None;
         case TouchResult::ToggleChannel:
             /* Flip the persisted OTA channel + nudge an immediate check
              * so opting into beta (or back) applies promptly. */
@@ -549,7 +703,8 @@ bool tick(epaper_driver_display * /*epd*/, bool /*paired*/,
           const char *pet_name, const char *version,
           const char *ip_str, const char *ssid,
           int net_phase, int batt_pct,
-          const char *pet_status) {
+          const char *pet_status,
+          int happy, int full, int energy) {
     const int64_t now_us = esp_timer_get_time();
     bool changed = false;
 
@@ -563,6 +718,7 @@ bool tick(epaper_driver_display * /*epd*/, bool /*paired*/,
     if (pet_status) snprintf(s_pet_status, sizeof(s_pet_status), "%s", pet_status);
     s_net_phase = net_phase;
     s_batt_pct  = batt_pct;
+    s_happy = happy; s_full = full; s_energy = energy;
 
     /* Consume any PWR presses the watcher latched since the last tick.
      * exchange returns the prior value and resets the flag — so a burst

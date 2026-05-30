@@ -74,6 +74,30 @@ const uint8_t *pack_cache_active_geom(const char *sheet,
 const uint8_t *pack_cache_load_geom_only(const char *sheet,
                                          uint16_t cw, uint16_t ch);
 
+/* Cache-only load for the boot path of a NON-geometry pack (the home
+ * bundle "scene-bundle-a", whose cache key is plain "<sheet>.pack" — no
+ * cw/ch suffix). Same pre-WiFi rationale as pack_cache_load_geom_only:
+ * reads LittleFS only, never touches the network, so the cold-boot home
+ * render can prefer the last server-synced bundle over the embedded
+ * baseline without inviting the lwip getaddrinfo assert. Returns the
+ * cached blob (caller-owned PSRAM, valid for life) on hit, NULL on miss.
+ * The post-WiFi scene_pack_init() still ETag-refreshes against the
+ * server. design/29. */
+const uint8_t *pack_cache_load_only(const char *sheet);
+
+/* Warm the LittleFS cache for a travel pack WITHOUT retaining it in
+ * PSRAM — used to eagerly prefetch places reachable from the loaded
+ * scene so onward travel hits the warm path (design/29). HEAD-probes
+ * the server ETag; GETs + stores the body only when it changed or the
+ * cache is empty; then frees the working buffer (unlike
+ * pack_cache_active_geom, which keeps it as the live pack). When the
+ * ETag already matches it returns immediately (cheap HEAD, no alloc,
+ * no GET). Returns true when the cache is warm afterwards (ETag hit or
+ * a fresh store), false on offline / fetch / store failure. Strictly
+ * best-effort: a false here just means the eventual
+ * pack_cache_active_geom does the cold fetch as before. */
+bool pack_cache_prefetch_geom(const char *sheet, uint16_t cw, uint16_t ch);
+
 #ifdef __cplusplus
 }
 #endif
