@@ -35,6 +35,7 @@
 #include "esp_flash.h"
 #include "esp_psram.h"
 #include "esp_system.h"
+#include "esp_sleep.h"   /* esp_sleep_get_wakeup_cause — boot/wake battery datapoint */
 #include "esp_heap_caps.h"
 
 #include "board_pins.h"
@@ -877,9 +878,29 @@ extern "C" void app_main(void) {
      * path — it was 2 s of pure logging on the critical path. */
     if (battery_init()) {
         uint16_t mv = 0; uint8_t pct = 0;
-        if (battery_read(&mv, &pct)) {
+        const bool ok = battery_read(&mv, &pct);
+        if (ok) {
             ESP_LOGI(TAG, "battery: %u mV (%u%%)", (unsigned)mv, (unsigned)pct);
         }
+        /* Boot/wake battery + wake-cause datapoint. device_diag's boot
+         * record is built before battery_init runs, so it carries no
+         * battery — log it here instead. Every deep-sleep wake reboots
+         * through this, so it's a discharge sample each ~2 h (the only
+         * battery reading that reliably reaches the server now that doze
+         * drops WiFi + deep sleep wipes the buffered heartbeats). The wake
+         * cause separates the timer self-wake from a PWR/BOOT press, which
+         * confirms the unattended ~2 h check-in actually fires. -1 = read
+         * failed. */
+        const char *wake;
+        switch (esp_sleep_get_wakeup_cause()) {
+            case ESP_SLEEP_WAKEUP_TIMER: wake = "timer"; break;
+            case ESP_SLEEP_WAKEUP_EXT1:  wake = "ext1";  break;  /* PWR/BOOT */
+            case ESP_SLEEP_WAKEUP_GPIO:  wake = "gpio";  break;
+            default:                     wake = "reset"; break;  /* poweron/sw */
+        }
+        device_diag_eventf(DIAG_INFO, "power", "wake",
+            "{\"batt_mv\":%d,\"batt_pct\":%d,\"wake\":\"%s\"}",
+            ok ? (int)mv : -1, ok ? (int)pct : -1, wake);
     }
 
     bool cache_ok = sprite_cache::init();
