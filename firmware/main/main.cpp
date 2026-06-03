@@ -898,9 +898,11 @@ extern "C" void app_main(void) {
             case ESP_SLEEP_WAKEUP_GPIO:  wake = "gpio";  break;
             default:                     wake = "reset"; break;  /* poweron/sw */
         }
-        device_diag_eventf(DIAG_INFO, "power", "wake",
+        char wbuf[80];
+        snprintf(wbuf, sizeof(wbuf),
             "{\"batt_mv\":%d,\"batt_pct\":%d,\"wake\":\"%s\"}",
             ok ? (int)mv : -1, ok ? (int)pct : -1, wake);
+        device_diag_event(DIAG_INFO, "power", "wake", wbuf);
     }
 
     bool cache_ok = sprite_cache::init();
