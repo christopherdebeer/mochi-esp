@@ -2005,6 +2005,22 @@ extern "C" void app_main(void) {
             }
         }
 
+        /* On a doze→Live wake the radio has just reconnected (WiFi was
+         * dropped on doze). Nudge a throttled OTA re-check so updates land
+         * shortly after coming back online — not only on the 6 h timer.
+         * Deep-sleep wakes reboot + re-check on their own; this covers the
+         * same-boot doze/wake cycle + always-on/USB devices that rarely
+         * reboot. note_online() rate-limits to ≤ once / ~2 h itself. */
+        {
+            static power_tier_t s_prev_ota_tier = POWER_TIER_LIVE;
+            const power_tier_t t = power_tier();
+            if (s_prev_ota_tier == POWER_TIER_DOZE && t == POWER_TIER_LIVE &&
+                s_net_phase == NetPhase::Online) {
+                ota_update::note_online();
+            }
+            s_prev_ota_tier = t;
+        }
+
         /* Critical-battery soft-power-down. LiPo cells damage
          * permanently below ~3.0 V; render a clear "Needs charge"
          * screen and commit deep-sleep before the regulator browns

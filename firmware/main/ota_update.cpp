@@ -16,6 +16,7 @@
 #include "esp_crt_bundle.h"
 #include "esp_partition.h"
 #include "esp_wifi.h"
+#include "esp_timer.h"
 
 #include "cJSON.h"
 
@@ -33,15 +34,24 @@ static const char *TAG = "ota";
 static constexpr int OTA_BOOT_WIFI_WAIT_MS = 60 * 1000;
 static constexpr int OTA_BOOT_SETTLE_MS    = 10 * 1000;
 
-/* Interval between successful checks. 24 hours matches the user's
- * "auto-check on boot + daily" choice; tightening this is mostly
- * pointless for a hobbyist device. */
-static constexpr int OTA_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+/* Periodic fallback interval between checks once online + current. Was
+ * 24h; shortened to 6h so an always-on / USB-powered device that never
+ * reboots (and so never re-runs the boot check) still picks up a release
+ * within a quarter-day. Battery devices mostly deep-sleep between wakes
+ * and re-check on each wake-reboot, so this is the worst case, not the
+ * common one. */
+static constexpr int OTA_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 /* Backoff after a failed/offline check. Far shorter than the success
  * interval so a transient miss (WiFi not up yet at boot, flaky link)
  * retries within the same session instead of waiting a full day. */
 static constexpr int OTA_RETRY_INTERVAL_MS = 15 * 60 * 1000;
+
+/* Minimum spacing between reconnect-triggered re-checks (note_online()).
+ * A doze→Live wake reconnects WiFi and nudges a check, but we don't want
+ * frequent doze/wake churn to re-poll the manifest every minute — only
+ * if it's been at least this long since the last real check. */
+static constexpr int64_t OTA_MIN_RECHECK_MS = 2 * 60 * 60 * 1000;
 
 /* Manifest payload cap. A well-formed manifest is <512 bytes — 4 KB
  * gives plenty of headroom and protects against a runaway response. */
@@ -57,6 +67,9 @@ const char *g_stable_url = nullptr;
 const char *g_beta_url   = nullptr;
 volatile bool g_reboot_ready = false;
 volatile bool g_task_started = false;
+/* esp_timer ms at the last completed (online) check. note_online()
+ * throttles reconnect-triggered re-checks against this. */
+volatile int64_t g_last_check_ms = 0;
 /* Set by ota_update::check_now() (Settings → "update now"); cuts the
  * 24 h inter-check sleep short so the next poll runs immediately. */
 volatile bool g_check_now = false;
@@ -372,8 +385,10 @@ void ota_task(void *) {
         }
 
         /* Got a manifest — a real check completed. Clear the streak so a
-         * later failure re-reports. */
+         * later failure re-reports, and stamp the time so reconnect
+         * nudges (note_online) throttle off it. */
         fail_streak = 0;
+        g_last_check_ms = esp_timer_get_time() / 1000;
 
         const char *running = ota_update::current_version();
         /* Compare by semver precedence (pre-release aware), not strcmp.
@@ -480,6 +495,22 @@ void check_now() {
      * normal first check once net_worker brings WiFi up. */
     g_check_now = true;
     ESP_LOGI(TAG, "check-now requested");
+}
+
+void note_online() {
+    /* The device just came (back) online — e.g. a doze→Live wake
+     * reconnected WiFi. Nudge a re-check, but only if it's been at least
+     * OTA_MIN_RECHECK_MS since the last real check, so frequent doze/wake
+     * reconnects don't re-poll the manifest constantly. Reuses the
+     * check_now early-wake; if WiFi isn't actually up yet when the task
+     * responds, its normal offline short-retry covers it. Deep-sleep
+     * wakes reboot + re-check on their own, so this mainly serves the
+     * same-boot doze/wake and always-on/USB cases. */
+    const int64_t now_ms = esp_timer_get_time() / 1000;
+    if (now_ms - g_last_check_ms >= OTA_MIN_RECHECK_MS) {
+        g_check_now = true;
+        ESP_LOGI(TAG, "online → OTA re-check nudged");
+    }
 }
 
 const char *current_version() {
