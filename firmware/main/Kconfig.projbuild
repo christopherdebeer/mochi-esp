@@ -12,11 +12,28 @@ config MOCHI_DOZE_TIMEOUT_S
 
 config MOCHI_DEEP_SLEEP_TIMEOUT_S
     int "Idle seconds in Doze before automatic deep sleep (0 = never)"
-    default 0
+    default 1800
     help
         Secondary timeout: continuous seconds spent dozing before the
-        device commits to deep sleep to protect the battery. 0 leaves
-        deep sleep as an explicit PWR-tap action only.
+        device commits to deep sleep. Deep sleep is the ONLY state that
+        powers the octal PSRAM off (light sleep retains RAM, so its floor
+        is multi-mA); after this timeout the device drops to ~tens of µA
+        until a timer/button wake. The e-paper holds the last frame at
+        zero power, so the pet stays glanceable while deep-asleep; a tap
+        wakes it (a ~reboot). 0 = never (deep sleep stays a PWR-tap-only
+        action, the pre-0.3.13 behaviour). design/26.
+
+config MOCHI_DEEP_SLEEP_WAKE_S
+    int "RTC timer self-wake interval for automatic deep sleep (0 = button-only)"
+    default 7200
+    help
+        When the device auto-deep-sleeps after MOCHI_DEEP_SLEEP_TIMEOUT_S
+        of idle, also arm an RTC timer to self-wake after this many
+        seconds for a periodic check-in (sync + re-render), then re-enter
+        the idle->doze->deep cycle. PWR/BOOT still wake instantly
+        regardless. 0 = no timer (wake only on a button). Only affects the
+        automatic long-idle path; the explicit PWR-tap "put it away" sleep
+        and the critical-battery shutdown are always button-only.
 
 config MOCHI_DOZE_WIFI_POWERSAVE
     bool "Use WIFI_PS_MAX_MODEM while dozing"

@@ -8,7 +8,12 @@
 static const char *TAG = "battery";
 
 /* ESP32-S3 ADC1 channel 3 = GPIO 4. The Waveshare board routes the
- * VBAT 1:2 divider here. ADC1 only — ADC2 conflicts with WiFi. */
+ * VBAT 1:2 divider's ANALOG TAP here. ADC1 only — ADC2 conflicts with
+ * WiFi. NB: this is distinct from MOCHI_VBAT_SENSE_GPIO (GPIO17) in
+ * board_pins.h, which is the divider's RAIL-ENABLE/hold pin (driven as
+ * an output + rtc_gpio_hold_en'd across deep sleep in sleep_gesture.cpp).
+ * Two different pins: GPIO4 = what the ADC samples, GPIO17 = the rail
+ * that powers the divider. (They were once mistaken for a conflict.) */
 static constexpr adc_channel_t BATT_CHAN = ADC_CHANNEL_3;
 
 /* The divider halves VBAT before the ADC sees it. With 12 dB
@@ -88,10 +93,19 @@ static uint8_t mv_to_pct(uint16_t mv) {
 bool battery_read(uint16_t *out_mv, uint8_t *out_pct) {
     if (!s_inited) return false;
 
-    int raw = 0;
-    if (adc_oneshot_read(s_adc, BATT_CHAN, &raw) != ESP_OK) {
-        return false;
+    /* Oversample. The VBAT divider + ADC carry several mV of per-sample
+     * noise, doubled back through the 1:2 divider — which aliases onto
+     * the mV/h discharge regressions used for power analysis. Averaging
+     * 16 one-shot reads knocks the noise down ~4x (sqrt(N)) so a real
+     * doze saving isn't lost in sample scatter. */
+    constexpr int OVERSAMPLE = 16;
+    int acc = 0, got = 0;
+    for (int i = 0; i < OVERSAMPLE; i++) {
+        int r = 0;
+        if (adc_oneshot_read(s_adc, BATT_CHAN, &r) == ESP_OK) { acc += r; got++; }
     }
+    if (got == 0) return false;
+    int raw = acc / got;
 
     int adc_mv = 0;
     if (s_cali) {

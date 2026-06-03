@@ -134,19 +134,28 @@ bool switch_to(const struct mochi_wifi_creds *creds,
 
 void set_radio_active(bool active) {
     if (active) {
-        /* Wake: re-associate to the retained STA config. Non-blocking —
-         * the GOT_IP event refreshes s_ip asynchronously; we don't wait. */
+        /* Wake: restart the driver (doze stopped it) and re-associate to
+         * the retained STA config. Non-blocking — the GOT_IP event
+         * refreshes s_ip asynchronously; we don't wait. */
         s_suppress_reconnect = false;
         s_retry = 0;
-        esp_err_t e = esp_wifi_connect();
+        esp_err_t e = esp_wifi_start();
+        if (e != ESP_OK) ESP_LOGD(TAG, "set_radio_active wifi_start: %s",
+            esp_err_to_name(e));
+        e = esp_wifi_connect();
         if (e != ESP_OK && e != ESP_ERR_WIFI_CONN) {
-            ESP_LOGD(TAG, "set_radio_active(1): %s", esp_err_to_name(e));
+            ESP_LOGD(TAG, "set_radio_active connect: %s", esp_err_to_name(e));
         }
     } else {
-        /* Doze: drop the link and hold off the auto-reconnect handler so
-         * the radio can stay down instead of tracking DTIM beacons. */
+        /* Doze: fully STOP the radio (not just disconnect) so the PHY and
+         * the MAC/BB power domain actually power down in light sleep.
+         * esp_wifi_disconnect only disassociates — it leaves the radio
+         * domain warm, which telemetry showed is the bulk of the WiFi
+         * floor (the disconnect-only build's "saving" was within noise).
+         * Suppress the auto-reconnect handler first so the STA_DISCONNECTED
+         * that esp_wifi_stop raises doesn't fight the stop. design/26. */
         s_suppress_reconnect = true;
-        esp_wifi_disconnect();
+        esp_wifi_stop();
     }
 }
 

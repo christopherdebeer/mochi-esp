@@ -499,6 +499,56 @@ Net: travel is instant from cache (online or offline), freshness is
 preserved via the background-style refresh, and the prefetch drain no
 longer eats a HEAD timeout per idle tick while dropped.
 
+### Root-cause investigation — the doze floor (3 adversarial agents) → v0.3.13
+
+A scoped investigation (3 parallel adversarial agents: software/wake,
+hardware/rails, measurement) adjudicated *why* 99% light-sleep residency
+still burns ~17–24 mV/h (full→dead ≈ 30 h). The reconciled verdict:
+
+- **It's the inherent light-sleep floor, not a single bug.** Dominated by
+  **octal-PSRAM self-refresh retention (~1–2 mA — RAM must be retained in
+  light sleep)**, a **WiFi radio domain that never actually powered down**
+  (`esp_wifi_disconnect` only disassociates; `ESP_PHY_MAC_BB_PD` was off and
+  `esp_wifi_stop()` was never called), and an always-on codec/peripheral
+  rail. `esp_pm` automatic light sleep removes none of these.
+- **`sleep_pct=99%` measures core-idle *intent*, not rail state** — all
+  three agents flagged it can read 99% while the rails (PSRAM/PHY) stay
+  powered, or even with ~70 brief wakes/s (the unthrottled 25/30 ms button
+  pollers) fragmenting sleep.
+- **The "~28% WiFi-drop saving" was within measurement noise** (±5–10 mV/h,
+  temperature-dominated; no temp comp, single-shot ADC, voltage-only) —
+  consistent with disconnect leaving the PHY warm.
+- **Deep sleep is the only real lever** — it powers the PSRAM off entirely
+  (→ ~tens of µA). All three agents converged on this + a bench inline
+  ammeter as the decisive disambiguating measurement.
+
+**v0.3.13 ships the agreed actions** (the floor-trims that deep sleep
+moots — sleep-gesture poll throttle, codec power-down — are deferred as
+low-value/high-risk-on-untested-HW):
+
+1. **Timer-wake deep sleep (the lever).** `MOCHI_DEEP_SLEEP_TIMEOUT_S`
+   default 0→**1800** (auto-deep-sleep after 30 min idle) + new
+   `MOCHI_DEEP_SLEEP_WAKE_S`=**7200** (2 h RTC self-wake check-in).
+   `commit_sleep(timer_wake_s)` arms `esp_sleep_enable_timer_wakeup`
+   *alongside* the existing ext1 PWR/BOOT wake — both live at once,
+   `esp_sleep_get_wakeup_cause()` disambiguates. Explicit PWR-tap +
+   critical-battery shutdown stay button-only (`timer_wake_s=0`). Wake =
+   reboot → NVS restore → idle cycle resumes; e-paper holds the frame so
+   the pet stays glanceable while deep-asleep.
+2. **WiFi done properly.** `set_radio_active(false)` now `esp_wifi_stop()`s
+   (was disconnect-only) + `CONFIG_ESP_PHY_MAC_BB_PD=y`, so the PHY/MAC-BB
+   domain actually powers down. Wake `esp_wifi_start()`+`connect()`.
+3. **Trustworthy measurement.** `battery_read` now oversamples ×16 (was
+   single-shot) to cut ADC noise ~4×; the health heartbeat honours
+   `shtc3_read`'s return and emits `temp_dc/rh = -1` on failure (was a
+   silent 0, indistinguishable from 0 °C). Also confirmed the
+   GPIO4-vs-GPIO17 "ADC pin conflict" is a non-bug: GPIO4/ch3 = the divider
+   analog tap, GPIO17 = the divider rail-hold pin (two pins, two jobs).
+
+Validation needs the bench ammeter (doze / doze+wifi-stop / deep sleep)
+at fixed temperature; absent that, the trustworthy-measurement changes let
+the next telemetry round read a real deep-sleep saving instead of noise.
+
 ## Telemetry
 
 All power telemetry flows through the existing `device_diag` →
