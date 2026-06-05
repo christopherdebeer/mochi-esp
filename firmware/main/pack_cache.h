@@ -44,6 +44,23 @@ extern "C" {
  */
 const uint8_t *pack_cache_active(const char *sheet, const uint8_t *embedded);
 
+/* On-demand refresh for a non-geom pack (the home bundle, scene-bundle-a).
+ * Non-geom sibling of pack_cache_refresh_geom: an online ETag HEAD probe
+ * to /devsprite/pack/<sheet>; on a genuine change it GETs the new pack,
+ * persists it to LittleFS (so the next boot is warm), and returns the
+ * PSRAM bytes for a live hot-swap (caller owns them — pass to
+ * scene_pack_reload_home and never free). Returns NULL when offline,
+ * unchanged, or on fetch failure.
+ *
+ * *out_synced (optional, may be NULL) reports whether the SERVER gave a
+ * definitive answer: true when a change was fetched OR the ETag was
+ * confirmed unchanged; false when offline / the HEAD or GET failed. Lets
+ * the caller record "I'm current at signature X" only when it really is,
+ * so a transient failure retries on a later tick instead of being
+ * suppressed. Drives the /api/state homeEtag-triggered refresh in
+ * main.cpp. See design/31. */
+const uint8_t *pack_cache_refresh(const char *sheet, bool *out_synced);
+
 /*
  * Same as pack_cache_active but for travel-sized place packs that the
  * server resolves with a per-cell geometry query

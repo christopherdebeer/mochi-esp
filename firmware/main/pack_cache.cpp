@@ -275,6 +275,56 @@ bool pack_cache_prefetch_geom(const char *sheet, uint16_t cw, uint16_t ch) {
     return stored;
 }
 
+const uint8_t *pack_cache_refresh(const char *sheet, bool *out_synced) {
+    if (out_synced) *out_synced = false;
+    if (!sheet || !sheet[0]) return nullptr;
+    /* Offline → keep whatever is rendered from cache; not synced, so the
+     * caller retries on a later (online) tick. */
+    if (!wifi_sta::is_up()) return nullptr;
+
+    char cache_sheet[48];
+    snprintf(cache_sheet, sizeof(cache_sheet), "%s.pack", sheet);
+    char url[96];
+    snprintf(url, sizeof(url),
+        "https://mochi.val.run/devsprite/pack/%s", sheet);
+
+    char remote[40] = {};
+    if (!sprite_fetch_head_etag(url, remote, sizeof(remote))) return nullptr;
+
+    /* Unchanged → nothing to swap, but the server WAS reached: report
+     * synced so the caller stops re-probing this signature. */
+    char local[40] = {};
+    sprite_cache::load_etag(cache_sheet, local, sizeof(local));
+    if (remote[0] && strcmp(remote, local) == 0) {
+        if (out_synced) *out_synced = true;
+        return nullptr;
+    }
+
+    /* Changed (or no cached ETag) → GET the new pack, validate, persist,
+     * and hand the bytes back for a live re-render. */
+    uint8_t *buf = (uint8_t *)heap_caps_malloc(PACK_MAX_BYTES, MALLOC_CAP_SPIRAM);
+    if (!buf) return nullptr;
+    size_t got = 0;
+    uint32_t ms = 0;
+    if (!sprite_fetch_blob(url, buf, PACK_MAX_BYTES, &got, &ms) ||
+        !looks_like_mpk1(buf, got)) {
+        ESP_LOGW(TAG, "refresh '%s' fetch invalid (%u bytes)", sheet, (unsigned)got);
+        heap_caps_free(buf);
+        return nullptr;   /* GET failed → not synced, retry later */
+    }
+    if (sprite_cache::store(cache_sheet, PACK_SUFFIX, buf, got)) {
+        sprite_cache::store_etag(cache_sheet, remote);
+    }
+    uint8_t *shrunk = (uint8_t *)heap_caps_realloc(buf, got, MALLOC_CAP_SPIRAM);
+    if (shrunk) buf = shrunk;
+    ESP_LOGI(TAG, "refresh '%s' %u bytes in %u ms (ETag %s)",
+        sheet, (unsigned)got, (unsigned)ms, remote);
+    device_diag_eventf(DIAG_INFO, "pack_cache",
+        "{\"src\":\"server\",\"why\":\"state-refresh\"}", "%s refreshed", sheet);
+    if (out_synced) *out_synced = true;
+    return buf;
+}
+
 const uint8_t *pack_cache_refresh_geom(const char *sheet,
                                        uint16_t cw, uint16_t ch) {
     if (!sheet || !sheet[0]) return nullptr;

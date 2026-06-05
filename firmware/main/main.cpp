@@ -1903,6 +1903,12 @@ extern "C" void app_main(void) {
     /* Worn-costume state (design/17): re-render the pet when it changes.
      * Empty = base species, which is the boot render. */
     char last_costume[40] = "";
+    /* Home-bundle signature we last synced to (design/31). The server
+     * surfaces the home bundle's content signature as homeEtag on every
+     * /api/state; when it changes we hot-refresh scene-bundle-a without
+     * waiting for the next boot. Empty so the first observed value is
+     * evaluated once (a cheap confirming HEAD). */
+    char last_home_etag[48] = "";
     /* Diagnostic flush cadence (design/18). */
     int64_t last_diag_flush_us = esp_timer_get_time();
     /* Voice session bracket (design/18 ph3): nonzero while a session is
@@ -2768,6 +2774,38 @@ extern "C" void app_main(void) {
                  * loop every tick. On failure the backoff above forces a
                  * later retry; re-tapping the nav zone forces one now. */
                 snprintf(last_location, sizeof(last_location), "%s", loc);
+            }
+
+            /* Home-bundle hot refresh (design/31): the server surfaces the
+             * home bundle's content signature as `homeEtag` on every
+             * /api/state. When it changes — an authored edit to
+             * scene-bundle-a — re-probe /pack and, on a real change, fetch +
+             * cache + hot-swap the bundle WITHOUT waiting for the next boot.
+             * Gated on the signature changing, so the steady state is a cheap
+             * string compare (no per-tick HEAD). Deferred while voice is live
+             * (this `if`) and skipped offline (pack_cache_refresh → NULL).
+             * While traveling only the baseline updates; the swap shows on
+             * return home. */
+            char he[48];
+            pet_sync_home_etag(he, sizeof(he));
+            if (he[0] && strcmp(he, last_home_etag) != 0 && wifi_sta::is_up()) {
+                bool synced = false;
+                const uint8_t *fresh = pack_cache_refresh("scene-bundle-a", &synced);
+                if (fresh) {
+                    bool swapped = false;
+                    if (scene_pack_reload_home(fresh, &swapped) && swapped) {
+                        scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H);
+                        render_with_expression("neutral", true, nullptr);
+                        ESP_LOGI(TAG, "home: hot-swapped to newer bundle");
+                    }
+                }
+                /* Record only when the server gave a definitive answer
+                 * (fetched or confirmed-unchanged) so a transient offline /
+                 * HEAD failure retries on a later tick rather than being
+                 * suppressed by a premature record. */
+                if (synced) {
+                    snprintf(last_home_etag, sizeof(last_home_etag), "%s", he);
+                }
             }
 
             /* Eager prefetch drain (design/29): warm one reachable place

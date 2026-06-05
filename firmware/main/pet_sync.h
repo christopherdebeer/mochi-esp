@@ -114,6 +114,13 @@ bool pet_sync_restore_snapshot_from_nvs(void);
  * set, else the embedded/pet-v1 base. See design/17. */
 void pet_sync_current_costume(char *id_out, size_t id_cap);
 
+/* Latest /api/state homeEtag — a cheap content signature of the home
+ * bundle (scene-bundle-a). main.cpp compares it across polls and hot-
+ * refreshes the bundle when it changes, so an authored edit lands without
+ * a reboot. *out is NUL-terminated; empty before the first pull or on a
+ * server that doesn't emit it. See design/31. */
+void pet_sync_home_etag(char *out, size_t cap);
+
 /* True when the latest /api/state advised a sleep-consolidation pass
  * (server-computed: asleep + activity + low engagement + cooldown).
  * main.cpp acts on it — server-orchestrated consolidation (design/19). */

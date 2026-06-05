@@ -72,6 +72,19 @@ bool scene_pack_load_bytes(const uint8_t *mpk);
  * false if init hasn't run. See design/17. */
 bool scene_pack_load_home(void);
 
+/* Hot-swap the home bundle to freshly-fetched bytes WITHOUT a reboot
+ * (design/31). Unlike scene_pack_load_bytes (a foreign place pack), this
+ * updates the home baseline (the bytes scene_pack_load_home restores) so a
+ * later return-from-travel also shows the new bundle, and keeps the
+ * format=0 bundle-meta binding so SCENES_A_ZONES still applies. The bytes
+ * must OUTLIVE the swap (a PSRAM buffer that is never freed). When the
+ * home bundle is the active pack (i.e. not currently traveling) the active
+ * pack is replaced and *out_active_swapped is set true so the caller knows
+ * to re-blit; while traveling only the baseline updates (no visible change
+ * until the pet returns home). Validates the envelope; resets the index to
+ * 0. Returns true on success. out_active_swapped may be NULL. */
+bool scene_pack_reload_home(const uint8_t *mpk, bool *out_active_swapped);
+
 /* Number of scenes in the pack. Returns 0 before init. */
 uint16_t scene_pack_count(void);
 
