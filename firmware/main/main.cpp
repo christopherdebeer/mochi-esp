@@ -1909,6 +1909,12 @@ extern "C" void app_main(void) {
      * waiting for the next boot. Empty so the first observed value is
      * evaluated once (a cheap confirming HEAD). */
     char last_home_etag[48] = "";
+    /* design/28 place-cell pinning: a tapped nav_place zone may pin a target
+     * cell in the destination bundle (carried in the zone's data byte). Stash
+     * the target place + cell on tap; apply scene_pack_set() on arrival there.
+     * -1 = no pin pending. */
+    char    pending_place[40] = "";
+    int     pending_cell      = -1;
     /* Diagnostic flush cadence (design/18). */
     int64_t last_diag_flush_us = esp_timer_get_time();
     /* Voice session bracket (design/18 ph3): nonzero while a session is
@@ -2671,9 +2677,14 @@ extern "C" void app_main(void) {
                     }
                 }
                 if (swapped) {
-                    /* Day/night for 2-cell place packs: pick the cell by
-                     * RTC hour. Meta-link resolution is design/17 phase 4. */
-                    if (scene_pack_count() == 2) {
+                    /* design/28 place-cell pinning: if the tapped nav_place
+                     * pinned a target cell in THIS destination, land on it;
+                     * else RTC day/night for 2-cell packs; else cell 0.
+                     * Meta-link resolution is design/17 phase 4. */
+                    if (pending_cell > 0 && strcmp(loc, pending_place) == 0 &&
+                        pending_cell < (int)scene_pack_count()) {
+                        scene_pack_set((uint16_t)pending_cell);
+                    } else if (scene_pack_count() == 2) {
                         mochi_datetime dt = {};
                         bool night = rtc_get(&dt) && (dt.hour < 7 || dt.hour >= 19);
                         scene_pack_set(night ? 1 : 0);
@@ -2758,7 +2769,10 @@ extern "C" void app_main(void) {
                     const uint8_t *fresh =
                         pack_cache_refresh_geom(lsheet, SCENE_W, SCENE_H);
                     if (fresh && scene_pack_load_bytes(fresh)) {
-                        if (scene_pack_count() == 2) {
+                        if (pending_cell > 0 && strcmp(loc, pending_place) == 0 &&
+                            pending_cell < (int)scene_pack_count()) {
+                            scene_pack_set((uint16_t)pending_cell);
+                        } else if (scene_pack_count() == 2) {
                             mochi_datetime dt = {};
                             bool night = rtc_get(&dt) &&
                                 (dt.hour < 7 || dt.hour >= 19);
@@ -2774,6 +2788,11 @@ extern "C" void app_main(void) {
                  * loop every tick. On failure the backoff above forces a
                  * later retry; re-tapping the nav zone forces one now. */
                 snprintf(last_location, sizeof(last_location), "%s", loc);
+                /* Consume the place-cell pin once we've reached its place so a
+                 * later unrelated travel doesn't inherit a stale target. */
+                if (pending_cell >= 0 && strcmp(loc, pending_place) == 0) {
+                    pending_cell = -1; pending_place[0] = '\0';
+                }
             }
 
             /* Home-bundle hot refresh (design/31): the server surfaces the
@@ -3186,6 +3205,11 @@ extern "C" void app_main(void) {
                 s_travel_thought.style       = THOUGHT_STYLE_THOUGHT;
                 render_with_expression("thinking", false, &s_travel_thought);
             }
+            /* Capture an optional target-cell pin (design/28): the tapped
+             * nav_place zone's data byte is the cell to land on in the
+             * destination bundle. Applied on arrival at this place. */
+            snprintf(pending_place, sizeof(pending_place), "%s", place_id);
+            pending_cell = (int)scene_act.data;
             pet_sync_enter_place(place_id);
             /* Force the travel block to re-render even when the user
              * tapped to go to the place they're already in. Without
