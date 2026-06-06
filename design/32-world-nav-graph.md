@@ -109,6 +109,59 @@ intentionally avoided — a portal to a deprecated id is a broken edge. The
 planner's `navList` is built from live `navTargets`, so future generation
 already respects this, but any hand-wiring must check the deprecated set.
 
+## All bundles rewired + a connected world (2026-06-06)
+
+The same grid-mesh pathology held in every bundle (48 nav_scene edges each,
+sparse/incoherent portals), and the *world* didn't loop: nothing routed back to
+`home` and nothing reached `treetops`. All three remaining bundles were rewired
+in place (by zone id, not regenerated), with grid-adjacent spines chosen for
+thematic continuity (so baked nav-arrow directions stay correct) and surplus
+nav zones converted to `talk_seed` on the depicted object:
+
+| bundle (place)            | nav_scene | portals (cell → place)                         |
+|---------------------------|-----------|------------------------------------------------|
+| `scene-bundle-a` (home)   | 30        | 06→forest, 12→forest, 15→village, 09→village   |
+| `scene-bundle-b` (village)| 36        | 00→home, 04→forest                             |
+| `scene-bundle-c` (treetops)| 38       | 00→forest, 15→forest                           |
+| `the-forest-a` (forest)   | 38        | 07→village, 12→treetops, 15→home               |
+
+The resulting **world graph is connected and fully reciprocal** — every place
+reaches every other and every link has a return:
+
+```
+home ⇄ forest ⇄ village
+         ⇅
+      treetops
+home ⇄ village        (home↔village direct, too)
+```
+
+Verified across all four: 16 cells each, **0 stranded cells** (every cell has
+≥1 exit), **0 one-way/unreciprocated nav edges**.
+
+## Embedded home re-baked as a format=1 pack (firmware)
+
+`scene-bundle-a` is the **embedded** home (`firmware/main/assets/scenes_a.mpk`,
+the offline cold-boot fallback — design/28/31). The old embedded binary was a
+**format=0** SPRITE·FORGE export whose zones came from the hand-authored
+`SCENES_A_ZONES` table in `scenes_a_meta.h` (only 4 cells zoned, name-based
+actions) — it did not carry the redesigned nav at all.
+
+Re-baked it from substrate so the offline fallback matches the served pack:
+
+```
+curl -s https://mochi.val.run/devsprite/pack/scene-bundle-a \
+  -o firmware/main/assets/scenes_a.mpk     # 164 KB, MPK1, x-mpk-format:1, 16 cells
+```
+
+This is now a **format=1** pack with zones + nav (incl. the portals) inline.
+`scene_pack.c` already gates on `s_pack.format == 1` everywhere, so the embedded
+bundle hit-tests its inline zones and the `SCENES_A_ZONES` meta table is bypassed
+(retained only as a legacy fallback + because the symbols are referenced;
+`SCENES_A_COUNT` still 16, matching the binary). `firmware/version.txt` bumped
+**0.3.19 → 0.3.20** so the embedded-asset change ships via OTA. (Online devices
+≥0.3.18 already hot-refresh home from `/pack` per design/31; this bake updates
+the *offline* path + the factory image.)
+
 ## Possible follow-ups
 
 - Model `kind:2` relative-nav as intra-sheet cell edges for a per-cell view.
