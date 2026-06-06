@@ -161,7 +161,11 @@ not-yet-found), so authoring and play state are both visible.
    cleanup. Verified end-to-end against the live val.
 3. **Firmware behaviour**: tap-to-collect (NVS set, toast, sync), backpack
    screen, expression beat. Version bump.
-4. **Content**: COLLECT zones on the 5 live bundles (the signature set) +
-   `home → spaceship` observatory portal; re-bake `scenes_a.mpk`; bump encoder
-   pin; rebuild.
+4. **Content** — **done**: 5 COLLECT zones authored on the depicted objects
+   (forest dreamcatcher, village clay bowls, treetops bell cluster, home flower
+   bed, spaceship starfield porthole) + the `home → spaceship` observatory
+   portal (sprite_11 planet_port). Encoder pin bumped @509→@516 (kind 8); all 5
+   packs build (verified the label table carries the keepsake ids + place);
+   `scenes_a.mpk` re-baked; firmware rebuilt at **0.3.22** (decoder present,
+   tap behaviour still inert until step 3).
 5. **Memory/growth**: diary/fact on collect; consolidate + imagine hooks.
