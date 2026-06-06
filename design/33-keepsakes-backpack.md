@@ -127,6 +127,27 @@ Layers that must agree (bump the encoder pin in lockstep — design/15):
 graph views): the pet's collected keepsakes + the full registry (greyed =
 not-yet-found), so authoring and play state are both visible.
 
+## World + content prep (2026-06-06)
+
+- **Spaceship promoted into the world.** A studio-authored spaceship habitat
+  (scratch-authored as `test-bundle-a`) was duplicated to a clean id
+  **`scene-spaceship-a`** (all stores: user template, source/derived PNGs,
+  etags, keying, zones, scene_plan), registered as world place **`spaceship`**,
+  backfilled into every pet, and `test-bundle-a` deleted. Its nav was rewired
+  to a reciprocal spine (30 edges, 0 one-way) with a single `cell_15 → home`
+  return (the shuttle nose bay). The matching `home → spaceship` portal (home
+  cell 11, the spaceship **observatory**) lands in step 4's bake. Notably the
+  new planner prompts (design/32) already had it emitting threshold portals
+  instead of a uniform mesh.
+- **Five keepsakes** now (added `spaceship-star` "a glass star", found in the
+  spaceship observation nook). One signature keepsake per world place.
+- **Icon sheet `keepsake-icons-a`** created (design/30 pipeline, 80×80 `ui`
+  cells), one cell per keepsake keyed by id (hyphens → underscores via the
+  template normaliser, so `forest-charm` → cell `forest_charm`, etc.). Open it
+  in the studio **Icons** panel, set titles, and generate with a BYO key;
+  render-time maps `keepsake.icon` → the underscored cell key. Backpack falls
+  back to the name until generated.
+
 ## Build order
 
 1. **Wire-format foundation** — **done**: firmware `mochi_pack.h` kind 8 +
@@ -140,6 +161,7 @@ not-yet-found), so authoring and play state are both visible.
    cleanup. Verified end-to-end against the live val.
 3. **Firmware behaviour**: tap-to-collect (NVS set, toast, sync), backpack
    screen, expression beat. Version bump.
-4. **Content**: COLLECT zones on the 4 live bundles (the signature set);
-   re-bake `scenes_a.mpk`; bump encoder pin; rebuild.
+4. **Content**: COLLECT zones on the 5 live bundles (the signature set) +
+   `home → spaceship` observatory portal; re-bake `scenes_a.mpk`; bump encoder
+   pin; rebuild.
 5. **Memory/growth**: diary/fact on collect; consolidate + imagine hooks.
