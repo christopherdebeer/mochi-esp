@@ -130,6 +130,17 @@ remains *only* as the web renderer's legacy home template
 it means migrating the web home to a bundle-aware template — a separate
 follow-up (ties into design/28 "home as a fetched growable place").
 
+### Legacy/orphan plans purged from the graph
+
+The same review surfaced four non-world `scene_plans` rows cluttering the graph
+(no `places` row, no registry entry, no inbound links): `scene-kitchen-eink-v1`
+(a legacy hub with 16 broken `→ scene-garden-v1` portals), `scene-kitchen-eink-v2`
+(legacy 4-cell kitchen), and `test-bundle-a` were **deleted**; `spash-bundle-a`
+(the boot-splash source for `splash.mpk`) was kept. After cleanup the graph holds
+only the live world (`scene-bundle-a/b/c`, `the-forest-a`) + splash, and **every
+`nav_place` target is a valid place id** (`home`/`forest`/`village`/`treetops`) —
+no orphan nodes, no broken sheet-id edges remain.
+
 ## All bundles rewired + a connected world (2026-06-06)
 
 The same grid-mesh pathology held in every bundle (48 nav_scene edges each,
