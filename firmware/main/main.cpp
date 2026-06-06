@@ -78,6 +78,7 @@ extern "C" {
 #include "event_log.h"
 #include "time_sync.h"
 #include "scene_pack.h"
+#include "keepsakes.h"
 #include "pet_pack.h"
 #include "imagine.h"
 #include "consolidate.h"
@@ -3230,6 +3231,34 @@ extern "C" void app_main(void) {
                 travel_retry_at_us = esp_timer_get_time();
                 travel_warned_loc[0] = '\0';
             }
+            continue;
+        }
+
+        /* collect zones (design/33): pocket a keepsake. Offline-first —
+         * record in NVS immediately + ack with a bubble, then best-effort
+         * sync to the server (the NVS set is the device's source of truth).
+         * seed_text is the keepsake id (borrowed, not NUL-terminated). */
+        if (scene_hit && scene_act.kind == MPK_ACTION_COLLECT &&
+            scene_act.seed_text && scene_act.seed_len > 0) {
+            char ks_id[40] = {0};
+            size_t n = scene_act.seed_len < sizeof(ks_id) - 1
+                ? scene_act.seed_len : sizeof(ks_id) - 1;
+            memcpy(ks_id, scene_act.seed_text, n);
+            const int  ki    = keepsakes_index(ks_id);
+            const bool fresh = (ki >= 0) && keepsakes_add(ki);
+            const char *nm   = (ki >= 0) ? keepsakes_name(ki) : NULL;
+            static char s_ks_buf[64];
+            if (ki < 0)      snprintf(s_ks_buf, sizeof(s_ks_buf), "hmm, nothing here");
+            else if (fresh)  snprintf(s_ks_buf, sizeof(s_ks_buf), "kept the %s!", nm);
+            else             snprintf(s_ks_buf, sizeof(s_ks_buf), "my %s, still safe", nm);
+            static pet_thought_t s_ks_thought;
+            memset(&s_ks_thought, 0, sizeof(s_ks_thought));
+            s_ks_thought.action_kind = THOUGHT_ACTION_NONE;
+            s_ks_thought.text        = s_ks_buf;
+            s_ks_thought.style       = THOUGHT_STYLE_THOUGHT;
+            render_with_expression(fresh ? "excited" : "curious", false, &s_ks_thought);
+            ESP_LOGI(TAG, "keepsake tap %s (idx=%d fresh=%d)", ks_id, ki, (int)fresh);
+            if (ki >= 0) pet_sync_collect_keepsake(ks_id);  /* best-effort mirror */
             continue;
         }
 

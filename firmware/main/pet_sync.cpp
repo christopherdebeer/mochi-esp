@@ -530,6 +530,31 @@ bool pet_sync_enter_place(const char *place_id) {
     return true;
 }
 
+bool pet_sync_collect_keepsake(const char *id) {
+    if (!id || !id[0]) return false;
+    struct mochi_pair_creds creds;
+    if (!pair_creds_load(&creds) || !creds.pet_id[0]) return false;
+
+    char hdr_pet[96];
+    snprintf(hdr_pet, sizeof(hdr_pet), "X-Pet-Id: %s", creds.pet_id);
+    char hdr_ct[] = "Content-Type: application/json";
+    char *headers[] = { hdr_pet, hdr_ct, NULL };
+    char url[] = "https://mochi.val.run/api/keepsake/collect";
+    char body[96];
+    int blen = snprintf(body, sizeof(body), "{\"id\":\"%s\"}", id);
+    if (blen <= 0 || (size_t)blen >= sizeof(body)) return false;
+
+    body_capture_t cap = {NULL, 0};
+    int rc = https_post(url, headers, body, capture_body, &cap);
+    free(cap.body);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "keepsake collect %s rc=%d", id, rc);
+        return false;
+    }
+    ESP_LOGI(TAG, "keepsake collect %s ok", id);
+    return true;
+}
+
 /* ─── push ────────────────────────────────────────────────────── */
 
 static bool do_mutate_post(event_kind_t kind, int64_t at_ms) {

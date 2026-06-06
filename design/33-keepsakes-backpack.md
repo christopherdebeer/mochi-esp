@@ -159,8 +159,14 @@ not-yet-found), so authoring and play state are both visible.
    `POST /api/keepsake/collect` (idempotent, `firstTime`, unknown-id 400);
    `keepsakes` ids on `/api/state`; `GET /devsprite/backpack` view; pet-delete
    cleanup. Verified end-to-end against the live val.
-3. **Firmware behaviour**: tap-to-collect (NVS set, toast, sync), backpack
-   screen, expression beat. Version bump.
+3. **Firmware behaviour** — **collect core done** (0.3.23): `keepsakes.c/.h`
+   (NVS u32 bitmask by table index + id→name table mirroring the registry);
+   `main.cpp` dispatches `MPK_ACTION_COLLECT` taps → `keepsakes_add` (offline,
+   idempotent) + a bubble ("kept the copper bell!" / "my copper bell, still
+   safe") + delight expression + best-effort `pet_sync_collect_keepsake` POST.
+   Build-validated. **Remaining**: on-device backpack *screen* (a dev_menu
+   mode listing collected keepsakes) + optional `/api/state.keepsakes` →
+   `keepsakes_merge_mask` server→device sync.
 4. **Content** — **done**: 5 COLLECT zones authored on the depicted objects
    (forest dreamcatcher, village clay bowls, treetops bell cluster, home flower
    bed, spaceship starfield porthole) + the `home → spaceship` observatory

@@ -141,6 +141,12 @@ void pet_sync_post_voice_session(int duration_s, const char *model,
  * nav_place zone. */
 bool pet_sync_enter_place(const char *place_id);
 
+/* Record a pocketed keepsake on the server (design/33). POSTs
+ * /api/keepsake/collect {"id":"<keepsake>"} with the pet header. The device's
+ * NVS set (keepsakes.c) is the offline source of truth; this is best-effort
+ * mirror for the web backpack + memory trail. Returns true on a 2xx. */
+bool pet_sync_collect_keepsake(const char *id);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
