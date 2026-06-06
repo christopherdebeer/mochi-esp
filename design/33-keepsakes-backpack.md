@@ -174,4 +174,13 @@ not-yet-found), so authoring and play state are both visible.
    packs build (verified the label table carries the keepsake ids + place);
    `scenes_a.mpk` re-baked; firmware rebuilt at **0.3.22** (decoder present,
    tap behaviour still inert until step 3).
-5. **Memory/growth**: diary/fact on collect; consolidate + imagine hooks.
+5. **Memory/growth** — **voice surfacing done**: collect already logs a
+   memory event (step 2); now the device voice persona surfaces the pet's
+   collected keepsakes. `shared/persona.ts buildSystemPrompt` gained a
+   `keepsakes` block ("YOUR KEEPSAKES … bring one up fondly … never list"),
+   rendered in both the awake and sleeping prompts (so it dreams about them
+   too); `backend/voice-instructions.ts` fetches the pet's collection and
+   passes it. Verified live (the pet's prompt now carries "a copper bell — …").
+   **Remaining (deferred polish)**: an `imagine` hook (a keepsake seeds a
+   dreamed place — has BYO-key cost, so opt-in) and the `/api/state.keepsakes`
+   → firmware `keepsakes_merge_mask` server→device sync.
