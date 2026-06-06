@@ -21,9 +21,14 @@ static int s_retry = 0;
 static constexpr int MAX_RETRY = 8;
 static char s_ip[16] = {};
 static bool s_inited = false;
+/* Set while a disconnect is intentional (doze radio-down, design/26):
+ * the disconnect handler must not fight it with an auto-reconnect.
+ * Cleared by set_radio_active(true), which re-associates on wake. */
+static volatile bool s_suppress_reconnect = false;
 
 static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data) {
     if (id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_suppress_reconnect) return;   /* deliberate doze drop */
         if (s_retry < MAX_RETRY) {
             s_retry++;
             ESP_LOGW(TAG, "disconnect; retry %d/%d", s_retry, MAX_RETRY);
@@ -125,6 +130,38 @@ bool switch_to(const struct mochi_wifi_creds *creds,
     sta_stack_up();
     ESP_LOGI(TAG, "runtime switch → '%s'", creds->ssid);
     return try_one(creds, ip_str, ip_len, 15000);
+}
+
+void set_radio_active(bool active) {
+    if (active) {
+        /* Wake: restart the driver (doze stopped it) and re-associate to
+         * the retained STA config. Non-blocking — the GOT_IP event
+         * refreshes s_ip asynchronously; we don't wait. */
+        s_suppress_reconnect = false;
+        s_retry = 0;
+        esp_err_t e = esp_wifi_start();
+        if (e != ESP_OK) ESP_LOGD(TAG, "set_radio_active wifi_start: %s",
+            esp_err_to_name(e));
+        e = esp_wifi_connect();
+        if (e != ESP_OK && e != ESP_ERR_WIFI_CONN) {
+            ESP_LOGD(TAG, "set_radio_active connect: %s", esp_err_to_name(e));
+        }
+    } else {
+        /* Doze: fully STOP the radio (not just disconnect) so the PHY and
+         * the MAC/BB power domain actually power down in light sleep.
+         * esp_wifi_disconnect only disassociates — it leaves the radio
+         * domain warm, which telemetry showed is the bulk of the WiFi
+         * floor (the disconnect-only build's "saving" was within noise).
+         * Suppress the auto-reconnect handler first so the STA_DISCONNECTED
+         * that esp_wifi_stop raises doesn't fight the stop. design/26. */
+        s_suppress_reconnect = true;
+        esp_wifi_stop();
+    }
+}
+
+bool is_up(void) {
+    wifi_ap_record_t ap;
+    return esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
 }
 
 bool connect_any(char *ip_str, size_t ip_len,

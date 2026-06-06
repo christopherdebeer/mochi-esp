@@ -57,12 +57,14 @@ static epaper_driver_display *s_epd = nullptr;
 static bool pwr_pressed()  { return gpio_get_level(MOCHI_PWR_BUTTON_GPIO) == 0; }
 static bool boot_pressed() { return gpio_get_level(MOCHI_BOOT_BUTTON_GPIO) == 0; }
 
-[[noreturn]] void commit_sleep(void) {
+[[noreturn]] void commit_sleep(uint32_t timer_wake_s) {
     /*
-     * Disable any default wake sources, then enable just the two
-     * buttons via ext1 (any pin in the mask going low). PWR is
-     * what we expect; BOOT is included so the device is also
-     * recoverable through the BOOT path if PWR ever fails.
+     * Disable any default wake sources, then enable the two buttons via
+     * ext1 (any pin in the mask going low). PWR is what we expect; BOOT
+     * is included so the device is also recoverable through the BOOT
+     * path if PWR ever fails. When timer_wake_s > 0 we ALSO arm an RTC
+     * timer wake — both sources are live simultaneously and
+     * esp_sleep_get_wakeup_cause() on the next boot says which fired.
      *
      * Holding the VBAT_PWR rail (GPIO 17) across deep sleep keeps
      * the battery divider in a defined state — without rtc_gpio_
@@ -74,9 +76,17 @@ static bool boot_pressed() { return gpio_get_level(MOCHI_BOOT_BUTTON_GPIO) == 0;
         (1ULL << MOCHI_BOOT_BUTTON_GPIO);
     ESP_ERROR_CHECK(
         esp_sleep_enable_ext1_wakeup_io(mask, ESP_EXT1_WAKEUP_ANY_LOW));
+    if (timer_wake_s > 0) {
+        esp_sleep_enable_timer_wakeup((uint64_t)timer_wake_s * 1000000ULL);
+    }
     ESP_ERROR_CHECK(rtc_gpio_hold_en((gpio_num_t)MOCHI_VBAT_SENSE_GPIO));
 
-    ESP_LOGI(TAG, "deep sleep — wake on PWR or BOOT (any low)");
+    if (timer_wake_s > 0) {
+        ESP_LOGI(TAG, "deep sleep — wake on PWR/BOOT or timer (%us)",
+            (unsigned)timer_wake_s);
+    } else {
+        ESP_LOGI(TAG, "deep sleep — wake on PWR or BOOT (any low)");
+    }
     esp_deep_sleep_start();
     /* Unreachable. esp_deep_sleep_start does not return. */
     while (true) { vTaskDelay(portMAX_DELAY); }

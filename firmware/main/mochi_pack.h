@@ -201,6 +201,7 @@ typedef enum {
      * Both are non-interactive (skipped by tap routing). */
     MPK_ACTION_TEXT         = 6,  /* data = type|colour bitfield: bits0-3 type (0 title, 1 status), bit4 light-glyphs */
     MPK_ACTION_PET          = 7,  /* data = expression index (see studio PET_EXPRESSIONS; 13 = lonely); rect sizes + places the pet */
+    MPK_ACTION_COLLECT      = 8,  /* seed_text/seed_len = keepsake id; data reserved for icon idx (design/33) */
 } mpk_action_kind_t;
 
 /* MPK_ACTION_TEXT data accessors. */
@@ -254,10 +255,11 @@ static inline bool mpk_zone_get(const mpk_t *p, uint16_t i, uint8_t z,
     const uint16_t label_idx = mpk__u16(zp + 10);
     out->kind = (mpk_action_kind_t)kind;
     out->data = (kind == MPK_ACTION_NAV_RELATIVE) ? (int16_t)(int8_t)data : (int16_t)data;
-    /* talk_seed and nav_place both carry a variable-length string in the
-     * pack-global label table: the seed text and the target place id
-     * respectively. Resolve it for both. */
-    if (kind == MPK_ACTION_TALK_SEED || kind == MPK_ACTION_NAV_PLACE) {
+    /* talk_seed, nav_place, and collect each carry a variable-length string
+     * in the pack-global label table: the seed text, the target place id, and
+     * the keepsake id respectively. Resolve it for all three. */
+    if (kind == MPK_ACTION_TALK_SEED || kind == MPK_ACTION_NAV_PLACE ||
+        kind == MPK_ACTION_COLLECT) {
         out->seed_text = mpk__seed(p, label_idx, &out->seed_len);
     } else {
         out->seed_text = NULL;

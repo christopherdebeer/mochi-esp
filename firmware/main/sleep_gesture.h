@@ -56,10 +56,16 @@ bool requested(void);
  * of the sleeping pet cell. */
 void mark_handled(void);
 
-/* Enter deep sleep with PWR/BOOT as wake sources. Does NOT
- * return. Caller is responsible for having rendered whatever
- * they want visible during sleep. */
-[[noreturn]] void commit_sleep(void);
+/* Enter deep sleep with PWR/BOOT as wake sources. Does NOT return.
+ * Caller is responsible for having rendered whatever they want visible
+ * during sleep.
+ *
+ * timer_wake_s: 0 (default) = button-only — the explicit "put it away"
+ * PWR-tap and the critical-battery shutdown use this (don't self-wake a
+ * dead cell, don't wake something the user deliberately put to sleep).
+ * >0 = ALSO arm an RTC timer self-wake after that many seconds, for the
+ * automatic long-idle deep sleep to check in periodically (design/26). */
+[[noreturn]] void commit_sleep(uint32_t timer_wake_s = 0);
 
 /* Returns true once when a PWR double-tap is observed. Cleared on
  * read. Used by the dev_menu wheel as the trigger to enter Settings;

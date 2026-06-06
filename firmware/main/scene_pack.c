@@ -104,6 +104,34 @@ bool scene_pack_load_home(void) {
     return true;
 }
 
+bool scene_pack_reload_home(const uint8_t *mpk, bool *out_active_swapped) {
+    if (out_active_swapped) *out_active_swapped = false;
+    if (!mpk) return false;
+    mpk_t pack;
+    int rc = mpk_open(mpk, &pack);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "scene_pack_reload_home: mpk_open rc=%d", rc);
+        return false;
+    }
+    /* Refresh the home baseline regardless of where we are, so a later
+     * scene_pack_load_home() (return from travel) restores the NEW bundle. */
+    s_home_bytes = mpk;
+    if (s_is_bundle) {
+        /* The active pack IS the home bundle → swap it live. */
+        s_pack      = pack;
+        s_open      = true;
+        s_current   = 0;
+        if (out_active_swapped) *out_active_swapped = true;
+        ESP_LOGI(TAG, "scene_pack: home bundle hot-swapped (%u cells)",
+            (unsigned)pack.count);
+    } else {
+        /* Traveling: only the baseline updates; the swap becomes visible
+         * when the pet returns home. */
+        ESP_LOGI(TAG, "scene_pack: home baseline refreshed (deferred — traveling)");
+    }
+    return true;
+}
+
 bool scene_pack_load_bytes(const uint8_t *mpk) {
     if (!mpk) return false;
     mpk_t pack;

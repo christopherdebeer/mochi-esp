@@ -59,6 +59,7 @@ idf_component_register(
         "time_sync.c"
         "pet_sync.cpp"
         "scene_pack.c"
+        "keepsakes.c"
         "pet_pack.c"
         "imagine.c"
         "consolidate.c"

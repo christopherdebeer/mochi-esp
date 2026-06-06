@@ -65,6 +65,13 @@ static char s_costume_id[40];
  * engagement + cooldown elapsed; see backend/consolidate.ts). main.cpp
  * acts on it — server-orchestrated consolidation (design/19). s_mtx. */
 static bool s_consolidation_advised;
+/* Latest /api/state's homeEtag: a cheap content signature of the home
+ * bundle (scene-bundle-a) the server recomputes per response. main.cpp
+ * watches it for changes and, on a change, hot-refreshes the bundle via
+ * pack_cache_refresh + scene_pack_reload_home — so an authored edit lands
+ * without waiting for the next boot. "" before the first pull. s_mtx.
+ * See design/31. */
+static char s_home_etag[48];
 
 /* Push queue + worker. */
 typedef struct {
@@ -106,7 +113,8 @@ static bool parse_state_response(const char *body, int len,
                                  char *out_loc, size_t loc_cap,
                                  char *out_loc_sheet, size_t sheet_cap,
                                  char *out_costume, size_t costume_cap,
-                                 bool *out_advised) {
+                                 bool *out_advised,
+                                 char *out_home_etag, size_t home_etag_cap) {
     cJSON *root = cJSON_ParseWithLength(body, (size_t)len);
     if (!root) {
         ESP_LOGW(TAG, "json parse failed");
@@ -244,6 +252,16 @@ static bool parse_state_response(const char *body, int len,
         *out_advised = cJSON_IsObject(adv);
     }
 
+    /* homeEtag: cheap content signature of the home bundle (scene-bundle-a).
+     * Root-level string; absent on older servers → empty (no refresh). */
+    if (out_home_etag && home_etag_cap) {
+        out_home_etag[0] = '\0';
+        cJSON *he = cJSON_GetObjectItemCaseSensitive(root, "homeEtag");
+        if (cJSON_IsString(he) && he->valuestring) {
+            snprintf(out_home_etag, home_etag_cap, "%s", he->valuestring);
+        }
+    }
+
     cJSON_Delete(root);
     return true;
 }
@@ -287,12 +305,13 @@ static bool do_state_pull(pet_t *out_pet,
         return false;
     }
 
-    char loc[40] = {0}, sheet[64] = {0}, cost[40] = {0};
+    char loc[40] = {0}, sheet[64] = {0}, cost[40] = {0}, he[48] = {0};
     bool advised = false;
     bool ok = parse_state_response(cap_state.body, cap_state.len,
                                    out_pet, out_events, cap, out_count,
                                    loc, sizeof(loc), sheet, sizeof(sheet),
-                                   cost, sizeof(cost), &advised);
+                                   cost, sizeof(cost), &advised,
+                                   he, sizeof(he));
     free(cap_state.body);
     if (ok) {
         if (!s_mtx) s_mtx = xSemaphoreCreateMutex();
@@ -301,6 +320,7 @@ static bool do_state_pull(pet_t *out_pet,
         snprintf(s_location_sheet, sizeof(s_location_sheet), "%s", sheet);
         snprintf(s_costume_id, sizeof(s_costume_id), "%s", cost);
         s_consolidation_advised = advised;
+        snprintf(s_home_etag, sizeof(s_home_etag), "%s", he);
         xSemaphoreGive(s_mtx);
     }
     return ok;
@@ -403,6 +423,14 @@ void pet_sync_current_costume(char *id_out, size_t id_cap) {
     xSemaphoreGive(s_mtx);
 }
 
+void pet_sync_home_etag(char *out, size_t cap) {
+    if (out && cap) out[0] = '\0';
+    if (!s_mtx || !out || !cap) return;
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    snprintf(out, cap, "%s", s_home_etag);
+    xSemaphoreGive(s_mtx);
+}
+
 bool pet_sync_consolidation_advised(void) {
     if (!s_mtx) return false;
     xSemaphoreTake(s_mtx, portMAX_DELAY);
@@ -502,6 +530,31 @@ bool pet_sync_enter_place(const char *place_id) {
     return true;
 }
 
+bool pet_sync_collect_keepsake(const char *id) {
+    if (!id || !id[0]) return false;
+    struct mochi_pair_creds creds;
+    if (!pair_creds_load(&creds) || !creds.pet_id[0]) return false;
+
+    char hdr_pet[96];
+    snprintf(hdr_pet, sizeof(hdr_pet), "X-Pet-Id: %s", creds.pet_id);
+    char hdr_ct[] = "Content-Type: application/json";
+    char *headers[] = { hdr_pet, hdr_ct, NULL };
+    char url[] = "https://mochi.val.run/api/keepsake/collect";
+    char body[96];
+    int blen = snprintf(body, sizeof(body), "{\"id\":\"%s\"}", id);
+    if (blen <= 0 || (size_t)blen >= sizeof(body)) return false;
+
+    body_capture_t cap = {NULL, 0};
+    int rc = https_post(url, headers, body, capture_body, &cap);
+    free(cap.body);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "keepsake collect %s rc=%d", id, rc);
+        return false;
+    }
+    ESP_LOGI(TAG, "keepsake collect %s ok", id);
+    return true;
+}
+
 /* ─── push ────────────────────────────────────────────────────── */
 
 static bool do_mutate_post(event_kind_t kind, int64_t at_ms) {
@@ -537,12 +590,13 @@ static bool do_mutate_post(event_kind_t kind, int64_t at_ms) {
     pet_t tmp;
     pet_event_t evs[12];
     size_t n = 0;
-    char loc[40] = {0}, sheet[64] = {0}, cost[40] = {0};
+    char loc[40] = {0}, sheet[64] = {0}, cost[40] = {0}, he[48] = {0};
     bool advised = false;
     bool ok = parse_state_response(cap_mut.body, cap_mut.len, &tmp,
                                    evs, sizeof(evs)/sizeof(evs[0]), &n,
                                    loc, sizeof(loc), sheet, sizeof(sheet),
-                                   cost, sizeof(cost), &advised);
+                                   cost, sizeof(cost), &advised,
+                                   he, sizeof(he));
     free(cap_mut.body);
     if (!ok) return false;
 
@@ -554,6 +608,7 @@ static bool do_mutate_post(event_kind_t kind, int64_t at_ms) {
     snprintf(s_location_sheet, sizeof(s_location_sheet), "%s", sheet);
     snprintf(s_costume_id, sizeof(s_costume_id), "%s", cost);
     s_consolidation_advised = advised;
+    snprintf(s_home_etag, sizeof(s_home_etag), "%s", he);
     persist_snapshot_locked();
     xSemaphoreGive(s_mtx);
     (void)at_ms;  /* server stamps its own at; we don't need ours */

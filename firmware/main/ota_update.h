@@ -71,4 +71,12 @@ const char *current_version();
  * on that task. No-op if the task hasn't started (device offline). */
 void check_now();
 
+/* Nudge a re-check because the device just came (back) online (e.g. a
+ * doze→Live wake reconnected WiFi). Internally throttled to at most once
+ * per ~2 h since the last real check, so it's safe to call on every
+ * reconnect. Like check_now() but rate-limited; no-op before the first
+ * check has run. Closes the gap where an always-on / long-dozing device
+ * would otherwise only re-check on the periodic timer. */
+void note_online();
+
 }  // namespace ota_update

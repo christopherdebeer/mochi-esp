@@ -114,6 +114,13 @@ bool pet_sync_restore_snapshot_from_nvs(void);
  * set, else the embedded/pet-v1 base. See design/17. */
 void pet_sync_current_costume(char *id_out, size_t id_cap);
 
+/* Latest /api/state homeEtag — a cheap content signature of the home
+ * bundle (scene-bundle-a). main.cpp compares it across polls and hot-
+ * refreshes the bundle when it changes, so an authored edit lands without
+ * a reboot. *out is NUL-terminated; empty before the first pull or on a
+ * server that doesn't emit it. See design/31. */
+void pet_sync_home_etag(char *out, size_t cap);
+
 /* True when the latest /api/state advised a sleep-consolidation pass
  * (server-computed: asleep + activity + low engagement + cooldown).
  * main.cpp acts on it — server-orchestrated consolidation (design/19). */
@@ -133,6 +140,12 @@ void pet_sync_post_voice_session(int duration_s, const char *model,
  * successful enter. The device→substrate travel write behind a tapped
  * nav_place zone. */
 bool pet_sync_enter_place(const char *place_id);
+
+/* Record a pocketed keepsake on the server (design/33). POSTs
+ * /api/keepsake/collect {"id":"<keepsake>"} with the pet header. The device's
+ * NVS set (keepsakes.c) is the offline source of truth; this is best-effort
+ * mirror for the web backpack + memory trail. Returns true on a 2xx. */
+bool pet_sync_collect_keepsake(const char *id);
 
 #ifdef __cplusplus
 }  /* extern "C" */

@@ -35,6 +35,7 @@
 #include "esp_flash.h"
 #include "esp_psram.h"
 #include "esp_system.h"
+#include "esp_sleep.h"   /* esp_sleep_get_wakeup_cause — boot/wake battery datapoint */
 #include "esp_heap_caps.h"
 
 #include "board_pins.h"
@@ -77,6 +78,7 @@ extern "C" {
 #include "event_log.h"
 #include "time_sync.h"
 #include "scene_pack.h"
+#include "keepsakes.h"
 #include "pet_pack.h"
 #include "imagine.h"
 #include "consolidate.h"
@@ -877,9 +879,31 @@ extern "C" void app_main(void) {
      * path — it was 2 s of pure logging on the critical path. */
     if (battery_init()) {
         uint16_t mv = 0; uint8_t pct = 0;
-        if (battery_read(&mv, &pct)) {
+        const bool ok = battery_read(&mv, &pct);
+        if (ok) {
             ESP_LOGI(TAG, "battery: %u mV (%u%%)", (unsigned)mv, (unsigned)pct);
         }
+        /* Boot/wake battery + wake-cause datapoint. device_diag's boot
+         * record is built before battery_init runs, so it carries no
+         * battery — log it here instead. Every deep-sleep wake reboots
+         * through this, so it's a discharge sample each ~2 h (the only
+         * battery reading that reliably reaches the server now that doze
+         * drops WiFi + deep sleep wipes the buffered heartbeats). The wake
+         * cause separates the timer self-wake from a PWR/BOOT press, which
+         * confirms the unattended ~2 h check-in actually fires. -1 = read
+         * failed. */
+        const char *wake;
+        switch (esp_sleep_get_wakeup_cause()) {
+            case ESP_SLEEP_WAKEUP_TIMER: wake = "timer"; break;
+            case ESP_SLEEP_WAKEUP_EXT1:  wake = "ext1";  break;  /* PWR/BOOT */
+            case ESP_SLEEP_WAKEUP_GPIO:  wake = "gpio";  break;
+            default:                     wake = "reset"; break;  /* poweron/sw */
+        }
+        char wbuf[80];
+        snprintf(wbuf, sizeof(wbuf),
+            "{\"batt_mv\":%d,\"batt_pct\":%d,\"wake\":\"%s\"}",
+            ok ? (int)mv : -1, ok ? (int)pct : -1, wake);
+        device_diag_event(DIAG_INFO, "power", "wake", wbuf);
     }
 
     bool cache_ok = sprite_cache::init();
@@ -1880,6 +1904,18 @@ extern "C" void app_main(void) {
     /* Worn-costume state (design/17): re-render the pet when it changes.
      * Empty = base species, which is the boot render. */
     char last_costume[40] = "";
+    /* Home-bundle signature we last synced to (design/31). The server
+     * surfaces the home bundle's content signature as homeEtag on every
+     * /api/state; when it changes we hot-refresh scene-bundle-a without
+     * waiting for the next boot. Empty so the first observed value is
+     * evaluated once (a cheap confirming HEAD). */
+    char last_home_etag[48] = "";
+    /* design/28 place-cell pinning: a tapped nav_place zone may pin a target
+     * cell in the destination bundle (carried in the zone's data byte). Stash
+     * the target place + cell on tap; apply scene_pack_set() on arrival there.
+     * -1 = no pin pending. */
+    char    pending_place[40] = "";
+    int     pending_cell      = -1;
     /* Diagnostic flush cadence (design/18). */
     int64_t last_diag_flush_us = esp_timer_get_time();
     /* Voice session bracket (design/18 ph3): nonzero while a session is
@@ -1985,12 +2021,40 @@ extern "C" void app_main(void) {
                 key_portal::active();
             power_update(pnow, inhibited, s_net_phase == NetPhase::Online);
             if (power_should_deep_sleep()) {
-                ESP_LOGI(TAG, "doze idle budget exceeded → deep sleep");
-                device_diag_event(DIAG_INFO, "power", "deep", nullptr);
+                /* Long-idle → deep sleep: the ONLY state that powers the
+                 * octal PSRAM off (light sleep can't — it retains RAM), so
+                 * the multi-mA doze floor collapses to ~tens of µA. Unlike
+                 * the explicit PWR-tap sleep, arm a TIMER self-wake so the
+                 * pet checks in (sync + re-render) every few hours; PWR/BOOT
+                 * still wake it instantly. Wake = full reboot → NVS restore
+                 * → the normal idle→doze→deep cycle resumes. */
+                #ifndef CONFIG_MOCHI_DEEP_SLEEP_WAKE_S
+                #define CONFIG_MOCHI_DEEP_SLEEP_WAKE_S 7200
+                #endif
+                ESP_LOGI(TAG, "doze idle budget exceeded → deep sleep (timer %us)",
+                    (unsigned)CONFIG_MOCHI_DEEP_SLEEP_WAKE_S);
+                device_diag_eventf(DIAG_INFO, "power", nullptr,
+                    "deep (timer-wake %us)", (unsigned)CONFIG_MOCHI_DEEP_SLEEP_WAKE_S);
                 device_diag_flush();
                 render_asleep("Asleep - PWR to wake");
-                sleep_gesture::commit_sleep();  /* does not return */
+                sleep_gesture::commit_sleep(CONFIG_MOCHI_DEEP_SLEEP_WAKE_S);  /* no return */
             }
+        }
+
+        /* On a doze→Live wake the radio has just reconnected (WiFi was
+         * dropped on doze). Nudge a throttled OTA re-check so updates land
+         * shortly after coming back online — not only on the 6 h timer.
+         * Deep-sleep wakes reboot + re-check on their own; this covers the
+         * same-boot doze/wake cycle + always-on/USB devices that rarely
+         * reboot. note_online() rate-limits to ≤ once / ~2 h itself. */
+        {
+            static power_tier_t s_prev_ota_tier = POWER_TIER_LIVE;
+            const power_tier_t t = power_tier();
+            if (s_prev_ota_tier == POWER_TIER_DOZE && t == POWER_TIER_LIVE &&
+                s_net_phase == NetPhase::Online) {
+                ota_update::note_online();
+            }
+            s_prev_ota_tier = t;
         }
 
         /* Critical-battery soft-power-down. LiPo cells damage
@@ -2585,17 +2649,24 @@ extern "C" void app_main(void) {
                 if (strcmp(loc, "home") == 0) {
                     swapped = scene_pack_load_home();
                 } else if (lsheet[0]) {
-                    /* Travel place packs go through pack_cache so they
-                     * survive reboot/sleep. v0.1.7 fetched directly
-                     * into a RAM-only travel_pack buffer; on a flaky
-                     * network or after a deepsleep wake the device
-                     * couldn't restore the last place at all. With
-                     * pack_cache_active_geom, the body is written to
-                     * LittleFS keyed by (sheet, cell_w, cell_h) and
-                     * served by ETag on subsequent boots. */
+                    /* Cache-first travel (design/29): render the place from
+                     * its LittleFS cache INSTANTLY — no ETag probe on the
+                     * render path. The post-arrival refresh below picks up a
+                     * server change without making travel wait, and the
+                     * offline case (common right after a doze wake with WiFi
+                     * dropped) no longer eats the 8 s HEAD timeout before
+                     * falling back to cache. The blob is keyed by
+                     * (sheet, cell_w, cell_h) and warmed at boot / by the
+                     * neighbour prefetch. */
                     fetch_attempted = true;
-                    const uint8_t *bytes = pack_cache_active_geom(
-                        lsheet, SCENE_W, SCENE_H, nullptr);
+                    const uint8_t *bytes =
+                        pack_cache_load_geom_only(lsheet, SCENE_W, SCENE_H);
+                    if (!bytes) {
+                        /* Never cached (cold first visit) → a blocking fetch
+                         * is unavoidable; pack_cache gates it on the link. */
+                        bytes = pack_cache_active_geom(lsheet, SCENE_W,
+                                                       SCENE_H, nullptr);
+                    }
                     if (bytes) {
                         swapped = scene_pack_load_bytes(bytes);
                     }
@@ -2607,9 +2678,14 @@ extern "C" void app_main(void) {
                     }
                 }
                 if (swapped) {
-                    /* Day/night for 2-cell place packs: pick the cell by
-                     * RTC hour. Meta-link resolution is design/17 phase 4. */
-                    if (scene_pack_count() == 2) {
+                    /* design/28 place-cell pinning: if the tapped nav_place
+                     * pinned a target cell in THIS destination, land on it;
+                     * else RTC day/night for 2-cell packs; else cell 0.
+                     * Meta-link resolution is design/17 phase 4. */
+                    if (pending_cell > 0 && strcmp(loc, pending_place) == 0 &&
+                        pending_cell < (int)scene_pack_count()) {
+                        scene_pack_set((uint16_t)pending_cell);
+                    } else if (scene_pack_count() == 2) {
                         mochi_datetime dt = {};
                         bool night = rtc_get(&dt) && (dt.hour < 7 || dt.hour >= 19);
                         scene_pack_set(night ? 1 : 0);
@@ -2683,10 +2759,73 @@ extern "C" void app_main(void) {
                     snprintf(travel_retry_loc, sizeof(travel_retry_loc), "%s", loc);
                     travel_retry_at_us = esp_timer_get_time() + TRAVEL_RETRY_BACKOFF_US;
                 }
+                /* Post-arrival refresh (cache-first travel): the cached
+                 * place is already on screen. Validate it against the
+                 * server now — only a genuine pack change triggers a fetch
+                 * + a second repaint. Offline / unchanged → no-op, no stall
+                 * (pack_cache_refresh_geom returns NULL without allocating).
+                 * A cold-fetched place above already stored the current
+                 * ETag, so this is just a cheap confirming HEAD for it. */
+                if (traveled_this_tick && lsheet[0]) {
+                    const uint8_t *fresh =
+                        pack_cache_refresh_geom(lsheet, SCENE_W, SCENE_H);
+                    if (fresh && scene_pack_load_bytes(fresh)) {
+                        if (pending_cell > 0 && strcmp(loc, pending_place) == 0 &&
+                            pending_cell < (int)scene_pack_count()) {
+                            scene_pack_set((uint16_t)pending_cell);
+                        } else if (scene_pack_count() == 2) {
+                            mochi_datetime dt = {};
+                            bool night = rtc_get(&dt) &&
+                                (dt.hour < 7 || dt.hour >= 19);
+                            scene_pack_set(night ? 1 : 0);
+                        }
+                        scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H);
+                        render_with_expression("neutral", true, nullptr);
+                        ESP_LOGI(TAG, "travel: refreshed %s to newer pack",
+                            lsheet);
+                    }
+                }
                 /* Record either way so a failed fetch doesn't thrash the
                  * loop every tick. On failure the backoff above forces a
                  * later retry; re-tapping the nav zone forces one now. */
                 snprintf(last_location, sizeof(last_location), "%s", loc);
+                /* Consume the place-cell pin once we've reached its place so a
+                 * later unrelated travel doesn't inherit a stale target. */
+                if (pending_cell >= 0 && strcmp(loc, pending_place) == 0) {
+                    pending_cell = -1; pending_place[0] = '\0';
+                }
+            }
+
+            /* Home-bundle hot refresh (design/31): the server surfaces the
+             * home bundle's content signature as `homeEtag` on every
+             * /api/state. When it changes — an authored edit to
+             * scene-bundle-a — re-probe /pack and, on a real change, fetch +
+             * cache + hot-swap the bundle WITHOUT waiting for the next boot.
+             * Gated on the signature changing, so the steady state is a cheap
+             * string compare (no per-tick HEAD). Deferred while voice is live
+             * (this `if`) and skipped offline (pack_cache_refresh → NULL).
+             * While traveling only the baseline updates; the swap shows on
+             * return home. */
+            char he[48];
+            pet_sync_home_etag(he, sizeof(he));
+            if (he[0] && strcmp(he, last_home_etag) != 0 && wifi_sta::is_up()) {
+                bool synced = false;
+                const uint8_t *fresh = pack_cache_refresh("scene-bundle-a", &synced);
+                if (fresh) {
+                    bool swapped = false;
+                    if (scene_pack_reload_home(fresh, &swapped) && swapped) {
+                        scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H);
+                        render_with_expression("neutral", true, nullptr);
+                        ESP_LOGI(TAG, "home: hot-swapped to newer bundle");
+                    }
+                }
+                /* Record only when the server gave a definitive answer
+                 * (fetched or confirmed-unchanged) so a transient offline /
+                 * HEAD failure retries on a later tick rather than being
+                 * suppressed by a premature record. */
+                if (synced) {
+                    snprintf(last_home_etag, sizeof(last_home_etag), "%s", he);
+                }
             }
 
             /* Eager prefetch drain (design/29): warm one reachable place
@@ -2734,7 +2873,10 @@ extern "C" void app_main(void) {
                 uint16_t mv = 0; uint8_t pct = 0;
                 battery_read(&mv, &pct);
                 float t = 0.0f, rh = 0.0f;
-                shtc3_read(&t, &rh);
+                /* Honour the read's return: emit -1 sentinels on failure
+                 * so a failed SHTC3 read (the long-standing temp_dc=0 in
+                 * telemetry) is distinguishable from a genuine 0 °C. */
+                const bool th_ok = shtc3_read(&t, &rh);
                 char ctx[200];
                 snprintf(ctx, sizeof(ctx),
                     "{\"heap\":%u,\"heap_min\":%u,\"psram\":%u,\"batt_mv\":%u,"
@@ -2743,7 +2885,7 @@ extern "C" void app_main(void) {
                     (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                     (unsigned)mv, (unsigned)pct,
-                    (int)(t * 10.0f), (int)rh,
+                    th_ok ? (int)(t * 10.0f) : -1, th_ok ? (int)rh : -1,
                     (long long)(now_us / 1000000));
                 device_diag_event(DIAG_INFO, "health", "snapshot", ctx);
                 if (pct > 0 && pct < 15) {
@@ -3064,6 +3206,11 @@ extern "C" void app_main(void) {
                 s_travel_thought.style       = THOUGHT_STYLE_THOUGHT;
                 render_with_expression("thinking", false, &s_travel_thought);
             }
+            /* Capture an optional target-cell pin (design/28): the tapped
+             * nav_place zone's data byte is the cell to land on in the
+             * destination bundle. Applied on arrival at this place. */
+            snprintf(pending_place, sizeof(pending_place), "%s", place_id);
+            pending_cell = (int)scene_act.data;
             pet_sync_enter_place(place_id);
             /* Force the travel block to re-render even when the user
              * tapped to go to the place they're already in. Without
@@ -3084,6 +3231,34 @@ extern "C" void app_main(void) {
                 travel_retry_at_us = esp_timer_get_time();
                 travel_warned_loc[0] = '\0';
             }
+            continue;
+        }
+
+        /* collect zones (design/33): pocket a keepsake. Offline-first —
+         * record in NVS immediately + ack with a bubble, then best-effort
+         * sync to the server (the NVS set is the device's source of truth).
+         * seed_text is the keepsake id (borrowed, not NUL-terminated). */
+        if (scene_hit && scene_act.kind == MPK_ACTION_COLLECT &&
+            scene_act.seed_text && scene_act.seed_len > 0) {
+            char ks_id[40] = {0};
+            size_t n = scene_act.seed_len < sizeof(ks_id) - 1
+                ? scene_act.seed_len : sizeof(ks_id) - 1;
+            memcpy(ks_id, scene_act.seed_text, n);
+            const int  ki    = keepsakes_index(ks_id);
+            const bool fresh = (ki >= 0) && keepsakes_add(ki);
+            const char *nm   = (ki >= 0) ? keepsakes_name(ki) : NULL;
+            static char s_ks_buf[64];
+            if (ki < 0)      snprintf(s_ks_buf, sizeof(s_ks_buf), "hmm, nothing here");
+            else if (fresh)  snprintf(s_ks_buf, sizeof(s_ks_buf), "kept the %s!", nm);
+            else             snprintf(s_ks_buf, sizeof(s_ks_buf), "my %s, still safe", nm);
+            static pet_thought_t s_ks_thought;
+            memset(&s_ks_thought, 0, sizeof(s_ks_thought));
+            s_ks_thought.action_kind = THOUGHT_ACTION_NONE;
+            s_ks_thought.text        = s_ks_buf;
+            s_ks_thought.style       = THOUGHT_STYLE_THOUGHT;
+            render_with_expression(fresh ? "excited" : "curious", false, &s_ks_thought);
+            ESP_LOGI(TAG, "keepsake tap %s (idx=%d fresh=%d)", ks_id, ki, (int)fresh);
+            if (ki >= 0) pet_sync_collect_keepsake(ks_id);  /* best-effort mirror */
             continue;
         }
 
