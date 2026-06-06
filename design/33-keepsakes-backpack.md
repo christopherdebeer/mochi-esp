@@ -44,11 +44,19 @@ A **keepsake definition** (global registry, studio/substrate-authored):
 - `icon?` — optional 1-bit icon cell (design/30 icon-sheet pipeline); the
   backpack falls back to the name when absent.
 
-A **collected keepsake** (per pet) lives in `pet.knowledge.keepsakes[]`:
+A **collected keepsake** (per pet) is stored in a dedicated `keepsakes` table
+(one row per pet+keepsake — collection STATE only; the definitions stay in
+`shared/keepsakes.ts`):
 
 ```
-{ id, foundAt /* ms */, foundPlace, foundCell }
+keepsakes(pet_id, id, found_at, found_place, found_cell)  PK (pet_id, id)
 ```
+
+A dedicated table (vs. nesting in `pet.knowledge`) keeps collection isolated,
+idempotent (composite PK), and trivially queryable for `/api/state` + the
+backpack. First-time collects also write a memory **event** (`via:"keepsakes"`)
+so there's a discovery trail immediately; richer voice-context surfacing +
+consolidate/imagine weaving is the step-5 hook.
 
 Signature set (one hero keepsake per place, grounded in painted objects):
 
@@ -121,12 +129,15 @@ not-yet-found), so authoring and play state are both visible.
 
 ## Build order
 
-1. **Wire-format foundation** (this pass): firmware `mochi_pack.h` kind 8 +
+1. **Wire-format foundation** — **done**: firmware `mochi_pack.h` kind 8 +
    seed resolve; shared `normaliseDeviceAction`; encoder `mpk.ts`; server
-   projection. A COLLECT zone can be authored, packed, decoded — firmware
-   treats an unknown-by-behaviour COLLECT as inert until step 3.
-2. **Substrate**: keepsake registry + `POST /api/keepsake/collect` +
-   `/api/state` collected ids + `/devsprite/backpack` view.
+   projection. A COLLECT zone can be authored, packed, decoded; firmware
+   treats it as inert until step 3.
+2. **Substrate** — **done**: `shared/keepsakes.ts` registry; `keepsakes` table
+   (db.ts schema v2); `backend/keepsakes.ts` (recordKeepsake/listKeepsakes);
+   `POST /api/keepsake/collect` (idempotent, `firstTime`, unknown-id 400);
+   `keepsakes` ids on `/api/state`; `GET /devsprite/backpack` view; pet-delete
+   cleanup. Verified end-to-end against the live val.
 3. **Firmware behaviour**: tap-to-collect (NVS set, toast, sync), backpack
    screen, expression beat. Version bump.
 4. **Content**: COLLECT zones on the 4 live bundles (the signature set);
