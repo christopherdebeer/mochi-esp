@@ -80,6 +80,9 @@ enum class Mode : uint8_t {
     /* ModelsModal is pushed from the "AI models" button on MenuP2 —
      * cycle the voice + text model selections (model_prefs). */
     ModelsModal,
+    /* Backpack lists the keepsakes this device has collected (design/33),
+     * pushed from the "Backpack" tile on MenuP1; PWR×1 exits to Live. */
+    Backpack,
     _Count,
 };
 
@@ -162,6 +165,7 @@ enum class TouchResult : uint8_t {
     CycleTextModel,   /* (modal) cycle the text model — handled in dev_menu */
     ToggleVoiceDebug, /* (modal) flip the admin debug-voice persona (design/27) — handled in dev_menu */
     ConsolidateNow,   /* force a sleep-consolidation pass now (design/27) — main.cpp performs */
+    OpenBackpack,     /* push the Backpack sub-screen (design/33) — handled in dev_menu */
     /* Placeholders surfaced on the kid-facing MenuP1. Both currently
      * land in main.cpp as a "not implemented yet" toast — the rows
      * exist so the page has shape while the underlying data (memory

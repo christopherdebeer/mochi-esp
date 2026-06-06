@@ -21,6 +21,7 @@
 #include "sprite_cache.h"   /* ui-icons-a cells for stat rows + tile icons (design/30) */
 #include "sprite_fetch.h"   /* lazy on-demand fetch of menu/tile icons */
 #include "compositor.h"     /* downsample native 80×80 → 48 */
+#include "keepsakes.h"      /* backpack screen — collected keepsakes (design/33) */
 
 static const char *TAG = "dev_menu";
 
@@ -270,6 +271,7 @@ static Mode advance(Mode m) {
         case Mode::MenuP3:      return Mode::MenuP1;
         case Mode::WifiModal:   return Mode::MenuP2;
         case Mode::ModelsModal: return Mode::MenuP2;
+        case Mode::Backpack:    return Mode::MenuP1;
         default:                return Mode::Live;
     }
 }
@@ -476,11 +478,12 @@ static void render_menu_p1(epaper_driver_display *epd) {
     draw_stat_row(epd, y, "star",  'E', s_energy); y += 20;
 
     const Tile tiles[] = {
-        { "Memories", TouchResult::Memories, false, nullptr, nullptr, "memories" },
-        { "Places",   TouchResult::Places,   false, nullptr, nullptr, "places" },
-        { "Go home",  TouchResult::GoHome,   false, nullptr, nullptr, "home" },
+        { "Memories", TouchResult::Memories,     false, nullptr, nullptr, "memories" },
+        { "Places",   TouchResult::Places,       false, nullptr, nullptr, "places" },
+        { "Backpack", TouchResult::OpenBackpack, false, nullptr, nullptr, "star" },
+        { "Go home",  TouchResult::GoHome,       false, nullptr, nullptr, "home" },
     };
-    layout_tiles(epd, tiles, 3, y + 4, 2);
+    layout_tiles(epd, tiles, 4, y + 4, 2);
 }
 
 /* Page 2: settings — network/device info header + a 2-col grid of the
@@ -593,6 +596,29 @@ static void render_models(epaper_driver_display *epd) {
  * changes; an in-place update (toggle flash/settle) uses a faster
  * partial refresh against the base image the last full render set.
  * `flash` marks one toggle tile's pill inverted for the ack frame. */
+/* Backpack: the keepsakes this device has pocketed (design/33). Read-only
+ * list — collected ones show their name, the rest stay a mystery. PWR exits.
+ * Reads the offline NVS set via keepsakes.c, so it works with no network. */
+static void render_backpack(epaper_driver_display *epd) {
+    char title[40];
+    snprintf(title, sizeof(title), "BACKPACK  %d/%d  (PWR exits)",
+             keepsakes_count_collected(), keepsakes_total());
+    epd_ui::draw_text_centered(epd, 4, 1, title);
+
+    const int total = keepsakes_total();
+    int y = 24;
+    for (int i = 0; i < total; i++) {
+        char row[40];
+        if (keepsakes_have(i)) snprintf(row, sizeof(row), "* %s", keepsakes_name(i));
+        else                   snprintf(row, sizeof(row), "- ? ? ?");
+        epd_ui::draw_text(epd, MARGIN + 4, y, 1, row);
+        y += 18;
+    }
+    if (keepsakes_count_collected() == 0) {
+        epd_ui::draw_text_centered(epd, y + 8, 1, "explore to find keepsakes");
+    }
+}
+
 static void render_mode(Mode m, bool full, TouchResult flash) {
     if (!s_epd || m == Mode::Live) return;
     s_flash = flash;
@@ -604,6 +630,7 @@ static void render_mode(Mode m, bool full, TouchResult flash) {
         case Mode::MenuP3:      render_menu_p3(s_epd); break;
         case Mode::WifiModal:   render_wifi(s_epd);    break;
         case Mode::ModelsModal: render_models(s_epd);  break;
+        case Mode::Backpack:    render_backpack(s_epd); break;
         default: s_flash = TouchResult::None; return;
     }
     s_flash = TouchResult::None;
@@ -664,6 +691,11 @@ TouchResult dispatch_touch(int x, int y) {
             return TouchResult::None;
         case TouchResult::OpenModels:
             s_mode = Mode::ModelsModal;
+            s_entered_mode_us = now;
+            render_mode(s_mode, /*full=*/true, TouchResult::None);
+            return TouchResult::None;
+        case TouchResult::OpenBackpack:
+            s_mode = Mode::Backpack;
             s_entered_mode_us = now;
             render_mode(s_mode, /*full=*/true, TouchResult::None);
             return TouchResult::None;
