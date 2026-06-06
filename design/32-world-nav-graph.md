@@ -109,6 +109,27 @@ intentionally avoided — a portal to a deprecated id is a broken edge. The
 planner's `navList` is built from live `navTargets`, so future generation
 already respects this, but any hand-wiring must check the deprecated set.
 
+## `home` unified on scene-bundle-a; legacy scene-v1 dropped (2026-06-06)
+
+Reviewing the graph surfaced a nav_place `home` edge resolving to **`scene-v1`**
+— the legacy 2-cell home sheet (no `scene_plans` row, an orphan node). Root
+cause: `places.ts` `CANONICAL_SEEDS` derived `home → scene-v1` from
+`shared/locations.ts`, and `worldPlaces()`'s "a bundle can't shadow a seed" rule
+let that seed win over the registered bundle `home → scene-bundle-a`. So the
+graph resolver (`resolveTarget` reads the `places` table), the nav picker, the
+planner's `navTargets`, and `/enter` all pointed `home` at the orphan. The
+**device was unaffected** — firmware special-cases go-home to the embedded
+bundle (`main.cpp`: `strcmp(loc,"home")==0 → scene_pack_load_home()`), never
+fetching `scene-v1`.
+
+Fix (substrate-only, low risk): `CANONICAL_SEEDS` now maps `home → scene-bundle-a`
+and the 11 existing `places.home` rows were `UPDATE`d to match. Verified: 0 rows
+reference `scene-v1`; `home` resolves to `scene-bundle-a` everywhere. `scene-v1`
+remains *only* as the web renderer's legacy home template
+(`shared/locations.ts` `LOCATIONS.home.sheet` → `resolveScene`); fully retiring
+it means migrating the web home to a bundle-aware template — a separate
+follow-up (ties into design/28 "home as a fetched growable place").
+
 ## All bundles rewired + a connected world (2026-06-06)
 
 The same grid-mesh pathology held in every bundle (48 nav_scene edges each,
