@@ -47,6 +47,7 @@
 #include "wifi_sta.h"
 #include "sprite_fetch.h"
 #include "pack_cache.h"
+#include "fetch_worker.h"
 #include "touch.h"
 #include "rtc.h"
 #include "shtc3.h"
@@ -1448,28 +1449,37 @@ extern "C" void app_main(void) {
         }
 
         if (!cell_source) {
-            char url[224];
-            snprintf(url, sizeof(url),
-                "https://mochi.val.run/devsprite/cell/%s/%s", pet_sheet, expr);
-            uint16_t w = 0, h = 0;
-            if (!sprite_fetch_cell(url, pet_ink, pet_mask, PET_CELL_BYTES,
-                                   &w, &h, &ms)) {
-                ESP_LOGW(TAG, "pet cell fetch failed for '%s' (sheet %s)",
+            /* Pack + cache miss. Never fetch inline — sprite_fetch_cell
+             * can hold the loop (touch, PWR, render) for ~10 s on a slow
+             * network (design/25 C2). Hand the fetch to the worker (it
+             * lands in sprite_cache and raises the render-dirty flag, so
+             * a follow-up resting render shows the real cell) and render
+             * a fallback NOW so the tap always visibly acts (C6):
+             *
+             *   costumed miss → the BASE sheet's same expression. The
+             *     pet momentarily undresses rather than freezing; the
+             *     costume cell pops in when the worker lands it.
+             *   base miss     → the embedded pack's "neutral".
+             */
+            fetch_worker_fetch_cell(pet_sheet, expr,
+                                    PET_CELL_W, PET_CELL_H);
+            uint16_t fw = 0, fh = 0;
+            if (pet_pack_load(expr, pet_ink, pet_mask,
+                              PET_CELL_BYTES, &fw, &fh) &&
+                fw == PET_CELL_W && fh == PET_CELL_H) {
+                cell_source = "fallback-base";
+            } else if (strcmp(expr, "neutral") != 0 &&
+                       pet_pack_load("neutral", pet_ink, pet_mask,
+                                     PET_CELL_BYTES, &fw, &fh) &&
+                       fw == PET_CELL_W && fh == PET_CELL_H) {
+                cell_source = "fallback-neutral";
+            } else {
+                /* No pack at all (catastrophic) — keep the old contract:
+                 * report failure, let the caller decide. */
+                ESP_LOGW(TAG, "pet cell '%s' (sheet %s) miss with no fallback",
                     expr, pet_sheet);
-                device_diag_eventf(DIAG_WARN, "render", NULL,
-                    "cell fetch fail %s/%s", pet_sheet, expr);
                 return false;
             }
-            if (w != PET_CELL_W || h != PET_CELL_H) {
-                ESP_LOGW(TAG, "unexpected cell dims %ux%u (want %ux%u)",
-                    w, h, (unsigned)PET_CELL_W, (unsigned)PET_CELL_H);
-                return false;
-            }
-            if (cache_ok) {
-                sprite_cache::store(pet_sheet, ink_suffix,  pet_ink,  PET_CELL_BYTES);
-                sprite_cache::store(pet_sheet, mask_suffix, pet_mask, PET_CELL_BYTES);
-            }
-            cell_source = "fetch";
         }
 
         /* Scene fills the full 200×200 panel — same stride as
@@ -1802,6 +1812,12 @@ extern "C" void app_main(void) {
      * workers retry quietly until net_worker brings WiFi up. */
     pet_sync_start();
 
+    /* Fetch worker (design/35): the single background owner of every
+     * network round-trip the main loop used to make inline — travel
+     * enter/pack, the prefetch ring, cache-miss pet cells, keepsake
+     * mirrors. Like pet_sync's workers, it idles until handed work. */
+    fetch_worker_init();
+
     /* Wake-from-deepsleep → record EVENT_WOKE locally now (event_log
      * is on-flash and survives a panic), but DEFER the pet_sync_enqueue
      * until WiFi is up. The push worker dequeues immediately on enqueue
@@ -1864,7 +1880,7 @@ extern "C" void app_main(void) {
              * re-fetch the same pack we already loaded above from
              * the LittleFS cache during boot init. Without aligning,
              * (loc=forest) != (last_location=home) → travel block
-             * fires → another pack_cache_active_geom call → another
+             * fires → another cache load → another
              * blit + EPD full refresh = visible flicker.
              *
              * If the server has since flipped the pet to a different
@@ -1907,6 +1923,30 @@ extern "C" void app_main(void) {
      * snprintf can't truncate (-Werror=format-truncation). */
     static char travel_fail_msg[96] = "";
     constexpr int64_t TRAVEL_RETRY_BACKOFF_US = 30LL * 1000 * 1000;  /* 30 s */
+    /* Sheet currently being cold-fetched by the fetch worker (design/35).
+     * While set, the travel block doesn't re-enqueue or show the failure
+     * bubble — the worker's FETCH_RESULT_TRAVEL_PACK settles it. */
+    char travel_pack_pending[64] = "";
+    /* Float the persistent "can't get to the X" bubble. Factored out
+     * because three paths raise it now: a failed worker pack fetch, a
+     * failed /enter POST (which used to fail silently — design/25 C6),
+     * and the legacy queue-full fallback. */
+    auto travel_fail_show = [&](const char *floc) {
+        snprintf(travel_fail_msg, sizeof(travel_fail_msg),
+            "can't get to the %s, try again later", floc);
+        /* Pin as a persistent passive bubble so the kid can page through
+         * a longer message — the touch handler's Zone::Thought path bumps
+         * the page on tap and dismisses on the last — rather than seeing
+         * it truncated. Cleared on a later successful travel. */
+        memset(&s_active_thought, 0, sizeof(s_active_thought));
+        s_active_thought.action_kind = THOUGHT_ACTION_NONE;
+        s_active_thought.text         = travel_fail_msg;
+        s_active_thought.style        = THOUGHT_STYLE_THOUGHT;
+        s_active_thought.persistent   = true;
+        s_active_thought.page         = 0;
+        s_thought_active = true;
+        render_with_expression("neutral", true, &s_active_thought);
+    };
     /* Worn-costume state (design/17): re-render the pet when it changes.
      * Empty = base species, which is the boot render. */
     char last_costume[40] = "";
@@ -2556,9 +2596,11 @@ extern "C" void app_main(void) {
             continue;  /* dialog owns input + screen until handled */
         }
 
-        /* net_worker produced fresh state / cache / icons → re-render
-         * the resting pet so the new artwork + snapshot show. */
-        if (s_net_render_dirty && !voice::is_active()) {
+        /* net_worker produced fresh state / cache / icons — or the fetch
+         * worker landed a previously-missing pet cell in sprite_cache —
+         * → re-render the resting pet so the new artwork + snapshot show. */
+        if (!voice::is_active() &&
+            (s_net_render_dirty || fetch_worker_take_cell_dirty())) {
             s_net_render_dirty = false;
             const char *resting = render_resting();
             snprintf(last_resting_expr, sizeof(last_resting_expr), "%s",
@@ -2637,6 +2679,80 @@ extern "C" void app_main(void) {
          * full refresh + a blocking fetch on the render thread); picked up
          * the tick after the session ends. */
         if (!voice::is_active()) {
+            /* Fetch-worker results (design/35). Drained before the travel
+             * evaluation below so an enter/pack completion takes effect
+             * this same tick. */
+            fetch_result_t fres;
+            while (fetch_worker_take_result(&fres)) {
+                switch (fres.kind) {
+                case FETCH_RESULT_ENTER:
+                    if (fres.ok) {
+                        /* Location is updated (pet_sync_enter_place's
+                         * optimistic write) — clear last_location so the
+                         * travel block re-evaluates, which also covers
+                         * the tapped-the-place-I'm-already-in re-blit. */
+                        last_location[0] = '\0';
+                    } else {
+                        /* The old inline enter failed silently; now the
+                         * kid hears about it. No backoff — re-tapping the
+                         * door retries immediately. */
+                        ESP_LOGW(TAG, "travel: enter '%s' failed",
+                            fres.place_id);
+                        device_diag_eventf(DIAG_WARN, "travel", NULL,
+                            "enter fail %s", fres.place_id);
+                        travel_fail_show(fres.place_id);
+                    }
+                    break;
+                case FETCH_RESULT_TRAVEL_PACK:
+                    if (strcmp(travel_pack_pending, fres.sheet) == 0) {
+                        travel_pack_pending[0] = '\0';
+                    }
+                    if (fres.ok) {
+                        /* Pack is in LittleFS now — re-evaluate travel;
+                         * the cache-only load below hits and swaps. */
+                        last_location[0] = '\0';
+                    } else if (strcmp(fres.place_id, travel_warned_loc) != 0) {
+                        travel_fail_show(fres.place_id);
+                        snprintf(travel_warned_loc, sizeof(travel_warned_loc),
+                            "%s", fres.place_id);
+                        snprintf(travel_retry_loc, sizeof(travel_retry_loc),
+                            "%s", fres.place_id);
+                        travel_retry_at_us =
+                            esp_timer_get_time() + TRAVEL_RETRY_BACKOFF_US;
+                    } else {
+                        /* Repeat failure on the 30 s retry — re-arm the
+                         * backoff quietly, no re-flash. */
+                        snprintf(travel_retry_loc, sizeof(travel_retry_loc),
+                            "%s", fres.place_id);
+                        travel_retry_at_us =
+                            esp_timer_get_time() + TRAVEL_RETRY_BACKOFF_US;
+                    }
+                    break;
+                case FETCH_RESULT_REFRESH_PACK: {
+                    /* Post-arrival confirm found a newer pack and stored
+                     * it. Hot-swap from cache if we're still showing that
+                     * sheet, preserving the current cell. */
+                    char cl[40], cs[64];
+                    pet_sync_current_location(cl, sizeof(cl), cs, sizeof(cs));
+                    if (strcmp(cs, fres.sheet) == 0) {
+                        const uint8_t *fresh = pack_cache_load_geom_only(
+                            fres.sheet, SCENE_W, SCENE_H);
+                        uint16_t cur = scene_pack_current();
+                        if (fresh && scene_pack_load_bytes(fresh)) {
+                            if (cur < scene_pack_count()) {
+                                scene_pack_set(cur);
+                            }
+                            scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H);
+                            render_with_expression("neutral", false, nullptr);
+                            ESP_LOGI(TAG, "travel: refreshed %s to newer pack",
+                                fres.sheet);
+                        }
+                    }
+                    break;
+                }
+                }
+            }
+
             /* Backoff retry of a previously-failed travel fetch: when the
              * deadline elapses, force re-evaluation by clearing
              * last_location so the fetch below runs again if the location
@@ -2669,20 +2785,32 @@ extern "C" void app_main(void) {
                     fetch_attempted = true;
                     const uint8_t *bytes =
                         pack_cache_load_geom_only(lsheet, SCENE_W, SCENE_H);
-                    if (!bytes) {
-                        /* Never cached (cold first visit) → a blocking fetch
-                         * is unavoidable; pack_cache gates it on the link. */
-                        bytes = pack_cache_active_geom(lsheet, SCENE_W,
-                                                       SCENE_H, nullptr);
-                    }
                     if (bytes) {
                         swapped = scene_pack_load_bytes(bytes);
                     }
                     if (!swapped) {
-                        ESP_LOGW(TAG, "travel: pack unavailable for %s",
-                            lsheet);
-                        device_diag_eventf(DIAG_WARN, "travel", NULL,
-                            "pack unavailable %s", lsheet);
+                        /* Never cached (cold first visit). The blocking
+                         * GET used to run right here, freezing input for
+                         * the whole fetch (design/25 C1); it now runs on
+                         * the fetch worker, which warms LittleFS and
+                         * posts a result — ok re-runs this block against
+                         * the warm cache, fail floats the bubble. While
+                         * pending, stay quietly on the current scene. */
+                        if (strcmp(travel_pack_pending, lsheet) == 0) {
+                            fetch_attempted = false;   /* worker already on it */
+                        } else if (fetch_worker_fetch_travel_pack(
+                                       loc, lsheet, SCENE_W, SCENE_H)) {
+                            snprintf(travel_pack_pending,
+                                sizeof(travel_pack_pending), "%s", lsheet);
+                            ESP_LOGI(TAG, "travel: cold pack '%s' → fetch worker",
+                                lsheet);
+                            fetch_attempted = false;
+                        } else {
+                            ESP_LOGW(TAG, "travel: pack unavailable for %s",
+                                lsheet);
+                            device_diag_eventf(DIAG_WARN, "travel", NULL,
+                                "pack unavailable %s", lsheet);
+                        }
                     }
                 }
                 if (swapped) {
@@ -2739,67 +2867,32 @@ extern "C" void app_main(void) {
                     prefetch_i = 0;
                     traveled_this_tick = true;
                 } else if (fetch_attempted) {
-                    /* Couldn't reach the place. Stay on the current scene
-                     * but float a thought bubble so the failure isn't a
-                     * silent no-op, and arm a backoff retry. A 404 means
-                     * the place pack isn't built/ready yet ("...yet"); any
-                     * other status (0 = timeout/transport, 5xx, or a 200
-                     * that failed to parse) is "something's wrong". Only
-                     * (re-)paint the bubble the first time we fail to reach
-                     * a given place — the periodic retry shouldn't flash the
-                     * panel every 30 s while we're stuck there. */
+                    /* Couldn't even hand the fetch off (queue full — the
+                     * worker path owns the normal cold case now, and its
+                     * result handler above owns that failure bubble).
+                     * Stay on the current scene, float the bubble so the
+                     * failure isn't a silent no-op, and arm the backoff
+                     * retry. Only (re-)paint the first time we fail to
+                     * reach a given place — the periodic retry shouldn't
+                     * flash the panel every 30 s while we're stuck. */
                     if (strcmp(loc, travel_warned_loc) != 0) {
-                        /* pack_cache_active_geom hides HTTP status from
-                         * us so we can't differentiate 404-not-ready
-                         * from "something's wrong" anymore. The cache
-                         * layer logs its own device_diag entries with
-                         * structured detail; the bubble keeps a single
-                         * generic message. */
-                        snprintf(travel_fail_msg, sizeof(travel_fail_msg),
-                            "can't get to the %s, try again later", loc);
-                        /* Pin as a persistent passive bubble so the kid can
-                         * page through a longer message — the touch handler's
-                         * Zone::Thought path bumps the page on tap and
-                         * dismisses on the last — rather than seeing it
-                         * truncated. Cleared on a later successful travel. */
-                        memset(&s_active_thought, 0, sizeof(s_active_thought));
-                        s_active_thought.action_kind = THOUGHT_ACTION_NONE;
-                        s_active_thought.text         = travel_fail_msg;
-                        s_active_thought.style        = THOUGHT_STYLE_THOUGHT;
-                        s_active_thought.persistent   = true;
-                        s_active_thought.page         = 0;
-                        s_thought_active = true;
-                        render_with_expression("neutral", true, &s_active_thought);
+                        travel_fail_show(loc);
                         snprintf(travel_warned_loc, sizeof(travel_warned_loc), "%s", loc);
                     }
                     snprintf(travel_retry_loc, sizeof(travel_retry_loc), "%s", loc);
                     travel_retry_at_us = esp_timer_get_time() + TRAVEL_RETRY_BACKOFF_US;
                 }
                 /* Post-arrival refresh (cache-first travel): the cached
-                 * place is already on screen. Validate it against the
-                 * server now — only a genuine pack change triggers a fetch
-                 * + a second repaint. Offline / unchanged → no-op, no stall
-                 * (pack_cache_refresh_geom returns NULL without allocating).
-                 * A cold-fetched place above already stored the current
-                 * ETag, so this is just a cheap confirming HEAD for it. */
+                 * place is already on screen. Confirm it against the
+                 * server on the fetch worker — the inline version's HEAD
+                 * probe could still stall the loop on a slow link. Only a
+                 * genuine pack change comes back (as a
+                 * FETCH_RESULT_REFRESH_PACK handled above, which reloads
+                 * from cache + repaints in place); unchanged / offline are
+                 * silent. A cold-fetched place above already stored the
+                 * current ETag, so for it this is a cheap confirming HEAD. */
                 if (traveled_this_tick && lsheet[0]) {
-                    const uint8_t *fresh =
-                        pack_cache_refresh_geom(lsheet, SCENE_W, SCENE_H);
-                    if (fresh && scene_pack_load_bytes(fresh)) {
-                        if (pending_cell > 0 && strcmp(loc, pending_place) == 0 &&
-                            pending_cell < (int)scene_pack_count()) {
-                            scene_pack_set((uint16_t)pending_cell);
-                        } else if (scene_pack_count() == 2) {
-                            mochi_datetime dt = {};
-                            bool night = rtc_get(&dt) &&
-                                (dt.hour < 7 || dt.hour >= 19);
-                            scene_pack_set(night ? 1 : 0);
-                        }
-                        scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H);
-                        render_with_expression("neutral", true, nullptr);
-                        ESP_LOGI(TAG, "travel: refreshed %s to newer pack",
-                            lsheet);
-                    }
+                    fetch_worker_refresh_pack(lsheet, SCENE_W, SCENE_H);
                 }
                 /* Record either way so a failed fetch doesn't thrash the
                  * loop every tick. On failure the backoff above forces a
@@ -2846,13 +2939,13 @@ extern "C" void app_main(void) {
 
             /* Eager prefetch drain (design/29): warm one reachable place
              * pack per idle tick so a later nav_place tap hits the warm
-             * cache path instead of a cold GET. Skip the tick we actually
-             * traveled (its repaint already cost a fetch) and only when
-             * online with no touch pending / portal / imagine in flight —
-             * each warm is a blocking HEAD (+ a cold GET on first sight)
-             * that mustn't stall a live interaction. Once a place's ring is
-             * warm the HEAD just confirms the ETag and the queue idles
-             * until the next travel refills it. Best-effort throughout. */
+             * cache path instead of a cold GET. The warm itself runs on
+             * the fetch worker now (design/35) so it can't stall the loop;
+             * the idle gating remains as pacing — one enqueue per quiet
+             * tick keeps the worker's single TLS slot free for live
+             * travel/cell requests. Once a place's ring is warm the HEAD
+             * just confirms the ETag and the queue idles until the next
+             * travel refills it. Best-effort throughout. */
             if (!traveled_this_tick && prefetch_i < prefetch_n &&
                 s_net_phase == NetPhase::Online && !got_touch &&
                 !key_portal::active() && !imagine_in_flight()) {
@@ -2861,7 +2954,7 @@ extern "C" void app_main(void) {
                 if (pet_sync_resolve_place_sheet(pid, psheet, sizeof(psheet)) &&
                     psheet[0]) {
                     ESP_LOGI(TAG, "prefetch warming '%s' (sheet %s)", pid, psheet);
-                    pack_cache_prefetch_geom(psheet, SCENE_W, SCENE_H);
+                    fetch_worker_warm_pack(psheet, SCENE_W, SCENE_H);
                 }
             }
         }
@@ -3242,16 +3335,20 @@ extern "C" void app_main(void) {
              * destination bundle. Applied on arrival at this place. */
             snprintf(pending_place, sizeof(pending_place), "%s", place_id);
             pending_cell = (int)scene_act.data;
-            pet_sync_enter_place(place_id);
-            /* Force the travel block to re-render even when the user
-             * tapped to go to the place they're already in. Without
-             * this, a deepsleep-restored last_location pre-set to (e.g.)
-             * "forest" makes a deliberate forest-tap a no-op: enter_place
-             * succeeds, location matches, travel block sees no diff,
-             * nothing redraws. Clearing last_location lets the travel
-             * block re-blit the current scene on the next tick — same
-             * behaviour as a genuine cross-place move. */
-            last_location[0] = '\0';
+            /* The /enter POST runs on the fetch worker (design/35) — it
+             * used to block right here for the TLS round-trip, up to
+             * ~8 s on a doze wake with the radio still down. On the
+             * worker's ok result the loop clears last_location so the
+             * travel block re-renders — including the tapped-the-place-
+             * I'm-already-in case (deepsleep-restored last_location),
+             * which needs the forced re-blit to not read as a dead
+             * button. On failure the result handler floats the travel-
+             * fail bubble (the old inline path failed silently). */
+            if (!fetch_worker_enter_place(place_id)) {
+                /* Queue full (never in practice) — legacy inline path. */
+                pet_sync_enter_place(place_id);
+                last_location[0] = '\0';
+            }
             /* If this re-taps the place we just failed to reach, drop the
              * backoff so the travel block retries on the next tick rather
              * than waiting out the timer (re-tapping a failed nav zone
@@ -3289,7 +3386,9 @@ extern "C" void app_main(void) {
             s_ks_thought.style       = THOUGHT_STYLE_THOUGHT;
             render_with_expression(fresh ? "excited" : "curious", false, &s_ks_thought);
             ESP_LOGI(TAG, "keepsake tap %s (idx=%d fresh=%d)", ks_id, ki, (int)fresh);
-            if (ki >= 0) pet_sync_collect_keepsake(ks_id);  /* best-effort mirror */
+            /* Best-effort mirror POST, off-loop (design/35) — NVS already
+             * holds the keepsake, so the tap stays instant either way. */
+            if (ki >= 0) fetch_worker_collect_keepsake(ks_id);
             continue;
         }
 

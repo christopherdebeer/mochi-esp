@@ -115,6 +115,15 @@ const uint8_t *pack_cache_load_only(const char *sheet);
  * pack_cache_active_geom does the cold fetch as before. */
 bool pack_cache_prefetch_geom(const char *sheet, uint16_t cw, uint16_t ch);
 
+/* Same as pack_cache_prefetch_geom, plus *out_changed = true only when a
+ * fresh body was actually fetched + stored (false on the already-warm
+ * ETag-match skip). Lets the fetch worker's post-arrival refresh tell
+ * "confirmed current" (no repaint) from "newer pack landed" (caller
+ * reloads from cache + repaints) without handing fetched bytes across
+ * tasks. See design/35. */
+bool pack_cache_prefetch_geom_ex(const char *sheet, uint16_t cw, uint16_t ch,
+                                 bool *out_changed);
+
 /*
  * Travel refresh (design/29): validate the cached place pack against the
  * server WITHOUT blocking a cache-first render. Returns freshly-fetched +

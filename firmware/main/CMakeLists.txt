@@ -47,6 +47,7 @@ idf_component_register(
         "power.cpp"
         "sprite_cache.cpp"
         "pack_cache.cpp"
+        "fetch_worker.cpp"
         "device_diag.c"
         "ota_update.cpp"
         "ota_channel.c"

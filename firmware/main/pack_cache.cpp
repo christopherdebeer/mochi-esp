@@ -210,6 +210,12 @@ const uint8_t *pack_cache_load_only(const char *sheet) {
 }
 
 bool pack_cache_prefetch_geom(const char *sheet, uint16_t cw, uint16_t ch) {
+    return pack_cache_prefetch_geom_ex(sheet, cw, ch, nullptr);
+}
+
+bool pack_cache_prefetch_geom_ex(const char *sheet, uint16_t cw, uint16_t ch,
+                                 bool *out_changed) {
+    if (out_changed) *out_changed = false;
     if (!sheet || !sheet[0]) return false;
     /* Same (sheet, cw, ch) cache key + URL as pack_cache_active_geom so
      * a prefetch warms exactly the blob the later travel load reads. */
@@ -264,6 +270,7 @@ bool pack_cache_prefetch_geom(const char *sheet, uint16_t cw, uint16_t ch) {
     bool stored = sprite_cache::store(cache_sheet, PACK_SUFFIX, buf, got);
     if (stored) {
         sprite_cache::store_etag(cache_sheet, remote);
+        if (out_changed) *out_changed = true;
         ESP_LOGI(TAG, "prefetched '%s' %u bytes in %u ms (ETag %s)",
             sheet, (unsigned)got, (unsigned)ms, remote);
         device_diag_eventf(DIAG_INFO, "pack_cache",
