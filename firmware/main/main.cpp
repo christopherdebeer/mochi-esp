@@ -127,6 +127,12 @@ static constexpr size_t SCENE_BYTES = (SCENE_W / 8) * SCENE_H;  /* 5000 */
  * every Nth to clear the ghosting partial accumulates. Tune against the
  * panel's ghosting tolerance — 1 = always full (pre-design/17 behaviour). */
 #define SCENE_NAV_FULL_EVERY 4
+/* One counter for BOTH whole-scene swap paths (in-place nav taps and
+ * cross-place travel) so ghosting bookkeeping is shared: whichever
+ * path lands the 4th swap pays the cleaning full refresh. Travel used
+ * to full-refresh every time (design/25 C4) — a ~1 s blank-flash on
+ * each "go to X" even when the pack was already warm. */
+static uint32_t s_scene_swap_n = 0;
 #define MOCHI_PET_CELL_URL_BASE "https://mochi.val.run/devsprite/cell/pet-v1/"
 
 /* OTA — manifests are uploaded as release assets by the GitHub Actions
@@ -2598,11 +2604,13 @@ extern "C" void app_main(void) {
             }
             /* Travel responsiveness (design/17): a move_to_location said
              * during the session only changed pets.location server-side.
-             * Pull once now so the travel block below renders the new
-             * place this tick, instead of waiting for the next tap or the
-             * 5-min resync. */
-            pet_t ps; pet_event_t pe[4]; size_t pn = 0;
-            pet_sync_pull_now(&ps, pe, 4, &pn);
+             * Ask the sync worker to pull now so the travel block renders
+             * the new place a tick or two later, instead of waiting for
+             * the 5-min resync. Off-loop (design/25 C3): the pull used to
+             * run synchronously right here, freezing touch/PWR/render for
+             * up to ~15 s at the exact moment the kid turns back to the
+             * panel after a conversation. */
+            pet_sync_request_pull();
         }
 
         /* Sleep consolidation (design/19, server-orchestrated). When
@@ -2691,7 +2699,15 @@ extern "C" void app_main(void) {
                         scene_pack_set(night ? 1 : 0);
                     }
                     scene_pack_blit_current(scene_fb, SCENE_W, SCENE_H);
-                    render_with_expression("neutral", true, nullptr);
+                    /* Hybrid refresh, same policy + counter as in-place
+                     * scene nav (design/25 C4): partial keeps arrival
+                     * fast — the warm-cache travel path now lands in a
+                     * blink — and every SCENE_NAV_FULL_EVERYth swap pays
+                     * the full-refresh cleaning pass for the ghosting
+                     * partials accumulate. */
+                    bool full_swap =
+                        (++s_scene_swap_n % SCENE_NAV_FULL_EVERY) == 0;
+                    render_with_expression("neutral", full_swap, nullptr);
                     ESP_LOGI(TAG, "traveled → %s", loc);
                     device_diag_eventf(DIAG_INFO, "travel", NULL,
                         "to %s (%s)", loc,
@@ -2919,9 +2935,13 @@ extern "C" void app_main(void) {
                 /* design/27: ship the session transcript so the server
                  * logs `talked` events with content for consolidation.
                  * Heap buffer — the array can run a few KB; the worker
-                 * has stopped by now so the accumulator is stable. */
-                char *tx = (char *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
-                if (tx) voice_peer_get_transcript_json(tx, 4096);
+                 * has stopped by now so the accumulator is stable. Sized
+                 * for the accumulator's worst case (12 turns × 2×159
+                 * chars + JSON escaping overhead ran past the old 4 KB
+                 * on long conversations, dropping the whole transcript). */
+                constexpr size_t TX_JSON_CAP = 12 * 1024;
+                char *tx = (char *)heap_caps_malloc(TX_JSON_CAP, MALLOC_CAP_SPIRAM);
+                if (tx) voice_peer_get_transcript_json(tx, TX_JSON_CAP);
                 pet_sync_post_voice_session(dur_s, vmodel, "marin",
                     "ended", turns, in_tok, out_tok, total_tok, tx);
                 free(tx);
@@ -3167,11 +3187,10 @@ extern "C" void app_main(void) {
          * see SCENE_NAV_FULL_EVERY. */
         if (scene_hit && (scene_act.kind == MPK_ACTION_NAV_RELATIVE ||
                           scene_act.kind == MPK_ACTION_NAV_SCENE)) {
-            static uint32_t s_nav_n = 0;
             uint16_t to = (scene_act.kind == MPK_ACTION_NAV_RELATIVE)
                 ? scene_pack_advance(scene_act.data)
                 : scene_pack_set((uint16_t)scene_act.data);
-            bool full = (++s_nav_n % SCENE_NAV_FULL_EVERY) == 0;
+            bool full = (++s_scene_swap_n % SCENE_NAV_FULL_EVERY) == 0;
             ESP_LOGI(TAG, "scene nav %s → idx=%u (%s)",
                 scene_act.kind == MPK_ACTION_NAV_RELATIVE ? "rel" : "abs",
                 (unsigned)to, full ? "full" : "partial");
@@ -3196,13 +3215,25 @@ extern "C" void app_main(void) {
             /* Instant tap ack (design/29): the enter POST + travel fetch
              * below block for up to a few seconds; without a render here
              * the tap reads as a dead button. Pop a quick partial-refresh
-             * "traveling" bubble first; the travel block repaints the real
-             * scene a tick later (and passes no thought, clearing this). */
+             * departure bubble first; the travel block repaints the real
+             * scene a tick later (and passes no thought, clearing this).
+             * The bubble names the destination — "off to the forest..."
+             * — so the ack reads as mochi setting out, not the device
+             * spinning. Same kid-readable place-id register the travel-
+             * fail bubble already uses ("can't get to the %s"). */
             {
                 static pet_thought_t s_travel_thought;
+                static char s_travel_msg[64];
+                if (strcmp(place_id, "home") == 0) {
+                    snprintf(s_travel_msg, sizeof(s_travel_msg),
+                        "heading home...");
+                } else {
+                    snprintf(s_travel_msg, sizeof(s_travel_msg),
+                        "off to the %s...", place_id);
+                }
                 memset(&s_travel_thought, 0, sizeof(s_travel_thought));
                 s_travel_thought.action_kind = THOUGHT_ACTION_NONE;
-                s_travel_thought.text        = "traveling...";
+                s_travel_thought.text        = s_travel_msg;
                 s_travel_thought.style       = THOUGHT_STYLE_THOUGHT;
                 render_with_expression("thinking", false, &s_travel_thought);
             }

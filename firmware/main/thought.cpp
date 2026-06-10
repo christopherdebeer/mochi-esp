@@ -28,8 +28,13 @@
  * same number; if they drift, device and web will disagree on
  * what counts as "really needs sleep." */
 static const uint8_t SLEEPY_ENERGY_FLOOR = 10;
-/* Reserved for M2 (hungry need):
- *   static const uint8_t HUNGRY_FULLNESS_THRESHOLD = 35; */
+/* M2 (hungry need): fullness below this while awake surfaces a HUNGRY
+ * thought whose tap feeds. Matches the web side's critical-need
+ * threshold (`shared/thoughts.ts`: fullness < 35 → fed) — unlike
+ * SLEEPY, hunger keeps the web number because feeding is the loop the
+ * kid owns; a pet that's quietly starving with no invitation reads as
+ * neglect the kid wasn't told about. */
+static const uint8_t HUNGRY_FULLNESS_THRESHOLD = 35;
 
 /* ─── Bubble geometry ──────────────────────────────────────────────
  *
@@ -492,6 +497,18 @@ extern "C" bool thought_generate(const pet_t *pet, int64_t /*now_ms*/,
         return true;
     }
 
+    /* HUNGRY — fullness below the threshold, awake. Tapping = feed.
+     * Ranked above SLEEPY to mirror the web chain's critical-need
+     * order; substrate bumps fullness on the mutate and the bubble
+     * stops regenerating once the stat clears the threshold. */
+    if (pet->stats.fullness < HUNGRY_FULLNESS_THRESHOLD) {
+        out->action_kind   = THOUGHT_ACTION_CARE_EVENT;
+        out->action_event  = EVENT_FED;
+        out->text          = "hungry...\ntap feed";
+        out->expires_at_ms = 0;
+        return true;
+    }
+
     /* SLEEPY — energy at or below the floor, awake. Tapping = put
      * mochi to sleep. The visible action on the device is symmetric
      * with the web side's care_direct{kind:"slept"} path: substrate
@@ -505,7 +522,7 @@ extern "C" bool thought_generate(const pet_t *pet, int64_t /*now_ms*/,
         return true;
     }
 
-    /* M2 chain extends here (hungry → fed, lonely → talk_seed). */
+    /* M3 chain extends here (lonely → talk_seed). */
     return false;
 }
 

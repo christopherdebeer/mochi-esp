@@ -11,9 +11,9 @@
  * See design/12-thought-bubble.md for the full subsystem rationale,
  * layout constants, and the M2/M3 extension plan.
  *
- * M1 (this header) ships SLEEPY only; the action union is structured
- * so M2/M3 (hungry, lonely, talk-seed, navigate) can land without an
- * ABI break.
+ * M1 shipped SLEEPY; M2 added HUNGRY (tap = feed). The action union
+ * is structured so M3 (lonely, talk-seed, navigate) can land without
+ * an ABI break.
  */
 
 #pragma once
@@ -88,11 +88,12 @@ typedef struct {
  * fills *out when a thought applies, false otherwise. Pure: no
  * allocation, no I/O, deterministic in (pet, now_ms).
  *
- * M1 chain — SLEEPY only:
- *   - pet.asleep                          → no thought
- *   - pet.stats.energy < SLEEPY_THRESHOLD → SLEEPY (CARE_EVENT: SLEPT)
+ * Chain (first match wins):
+ *   - pet.asleep                              → WAKE   (CARE_EVENT: WOKE)
+ *   - pet.stats.fullness < HUNGRY_THRESHOLD   → HUNGRY (CARE_EVENT: FED)
+ *   - pet.stats.energy  <= SLEEPY_FLOOR       → SLEEPY (CARE_EVENT: SLEPT)
  *
- * Future milestones append rules; first match wins. See
+ * Future milestones append rules. See
  * design/12-thought-bubble.md §generation. */
 bool thought_generate(const pet_t *pet, int64_t now_ms,
                       pet_thought_t *out);

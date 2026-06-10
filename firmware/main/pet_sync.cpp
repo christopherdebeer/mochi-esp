@@ -618,6 +618,19 @@ static bool do_mutate_post(event_kind_t kind, int64_t at_ms) {
     return true;
 }
 
+/* Worker-side pull that commits the result. pet_sync_pull_now already
+ * updates + persists the authoritative snapshot; routing the worker's
+ * pulls through it (rather than bare do_state_pull, which only refreshes
+ * location/costume/places) means a resync also picks up server-side
+ * stat changes — web-app care between device mutates used to be
+ * silently dropped here. */
+static bool worker_pull(void) {
+    pet_t tmp;
+    pet_event_t evs[12];
+    size_t n = 0;
+    return pet_sync_pull_now(&tmp, evs, sizeof(evs)/sizeof(evs[0]), &n);
+}
+
 static void push_worker(void *) {
     push_msg_t msg;
     int64_t last_resync_us = esp_timer_get_time();
@@ -626,7 +639,15 @@ static void push_worker(void *) {
          * the timeout fires and we do a periodic /api/state pull. */
         if (xQueueReceive(s_queue, &msg,
                 pdMS_TO_TICKS(RESYNC_INTERVAL_MS)) == pdTRUE) {
-            do_mutate_post(msg.kind, msg.at_ms);
+            if (msg.kind == EVENT_NONE) {
+                /* Sentinel from pet_sync_request_pull — an on-demand
+                 * state pull, run here so the main loop never blocks
+                 * on the GET (design/25 C3). */
+                ESP_LOGI(TAG, "on-demand resync");
+                worker_pull();
+            } else {
+                do_mutate_post(msg.kind, msg.at_ms);
+            }
             last_resync_us = esp_timer_get_time();
         } else {
             /* Idle resync — catches server-side drift the device
@@ -635,11 +656,7 @@ static void push_worker(void *) {
             if (now_us - last_resync_us
                     >= (int64_t)RESYNC_INTERVAL_MS * 1000) {
                 ESP_LOGI(TAG, "periodic resync");
-                pet_t tmp;
-                pet_event_t evs[12];
-                size_t n = 0;
-                if (do_state_pull(&tmp, evs,
-                        sizeof(evs)/sizeof(evs[0]), &n)) {
+                if (worker_pull()) {
                     last_resync_us = now_us;
                 }
             }
@@ -670,6 +687,12 @@ void pet_sync_start(void) {
 bool pet_sync_enqueue(event_kind_t kind, int64_t at_ms) {
     if (!s_started || !s_queue) return false;
     push_msg_t msg = { kind, at_ms };
+    return xQueueSend(s_queue, &msg, 0) == pdTRUE;
+}
+
+bool pet_sync_request_pull(void) {
+    if (!s_started || !s_queue) return false;
+    push_msg_t msg = { EVENT_NONE, 0 };
     return xQueueSend(s_queue, &msg, 0) == pdTRUE;
 }
 
@@ -753,6 +776,7 @@ int pet_sync_push_now(void) {
     int pushed = 0;
     push_msg_t msg;
     while (xQueueReceive(s_queue, &msg, 0) == pdTRUE) {
+        if (msg.kind == EVENT_NONE) continue;   /* pull sentinel — moot pre-sleep */
         if (do_mutate_post(msg.kind, msg.at_ms)) pushed++;
     }
     ESP_LOGI(TAG, "push_now drained %d", pushed);

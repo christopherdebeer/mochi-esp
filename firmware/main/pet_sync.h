@@ -56,6 +56,14 @@ void pet_sync_start(void);
  * pending-push buffer so the worker knows what to send. */
 bool pet_sync_enqueue(event_kind_t kind, int64_t at_ms);
 
+/* Ask the push worker to run a full /api/state pull ASAP, off the
+ * calling task. Non-blocking — the snapshot/location/costume update
+ * lands a moment later exactly as pet_sync_pull_now would have left
+ * it (committed + NVS-persisted). Use this from the main loop where
+ * a synchronous pull would freeze touch handling (design/25 C3 —
+ * e.g. the post-voice location refresh). Returns true if queued. */
+bool pet_sync_request_pull(void);
+
 /* Synchronously drain the queue on the calling task. Used right
  * before deep sleep / soft power-down so a queued mutate (e.g. the
  * EVENT_SLEPT we enqueued microseconds earlier) gets a best-effort
