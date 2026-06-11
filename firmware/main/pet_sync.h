@@ -56,6 +56,14 @@ void pet_sync_start(void);
  * pending-push buffer so the worker knows what to send. */
 bool pet_sync_enqueue(event_kind_t kind, int64_t at_ms);
 
+/* Ask the push worker to run a full /api/state pull ASAP, off the
+ * calling task. Non-blocking — the snapshot/location/costume update
+ * lands a moment later exactly as pet_sync_pull_now would have left
+ * it (committed + NVS-persisted). Use this from the main loop where
+ * a synchronous pull would freeze touch handling (design/25 C3 —
+ * e.g. the post-voice location refresh). Returns true if queued. */
+bool pet_sync_request_pull(void);
+
 /* Synchronously drain the queue on the calling task. Used right
  * before deep sleep / soft power-down so a queued mutate (e.g. the
  * EVENT_SLEPT we enqueued microseconds earlier) gets a best-effort
@@ -114,6 +122,13 @@ bool pet_sync_restore_snapshot_from_nvs(void);
  * set, else the embedded/pet-v1 base. See design/17. */
 void pet_sync_current_costume(char *id_out, size_t id_cap);
 
+/* Latest /api/state homeEtag — a cheap content signature of the home
+ * bundle (scene-bundle-a). main.cpp compares it across polls and hot-
+ * refreshes the bundle when it changes, so an authored edit lands without
+ * a reboot. *out is NUL-terminated; empty before the first pull or on a
+ * server that doesn't emit it. See design/31. */
+void pet_sync_home_etag(char *out, size_t cap);
+
 /* True when the latest /api/state advised a sleep-consolidation pass
  * (server-computed: asleep + activity + low engagement + cooldown).
  * main.cpp acts on it — server-orchestrated consolidation (design/19). */
@@ -133,6 +148,12 @@ void pet_sync_post_voice_session(int duration_s, const char *model,
  * successful enter. The device→substrate travel write behind a tapped
  * nav_place zone. */
 bool pet_sync_enter_place(const char *place_id);
+
+/* Record a pocketed keepsake on the server (design/33). POSTs
+ * /api/keepsake/collect {"id":"<keepsake>"} with the pet header. The device's
+ * NVS set (keepsakes.c) is the offline source of truth; this is best-effort
+ * mirror for the web backpack + memory trail. Returns true on a 2xx. */
+bool pet_sync_collect_keepsake(const char *id);
 
 #ifdef __cplusplus
 }  /* extern "C" */

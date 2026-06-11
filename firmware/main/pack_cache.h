@@ -44,6 +44,23 @@ extern "C" {
  */
 const uint8_t *pack_cache_active(const char *sheet, const uint8_t *embedded);
 
+/* On-demand refresh for a non-geom pack (the home bundle, scene-bundle-a).
+ * Non-geom sibling of pack_cache_refresh_geom: an online ETag HEAD probe
+ * to /devsprite/pack/<sheet>; on a genuine change it GETs the new pack,
+ * persists it to LittleFS (so the next boot is warm), and returns the
+ * PSRAM bytes for a live hot-swap (caller owns them — pass to
+ * scene_pack_reload_home and never free). Returns NULL when offline,
+ * unchanged, or on fetch failure.
+ *
+ * *out_synced (optional, may be NULL) reports whether the SERVER gave a
+ * definitive answer: true when a change was fetched OR the ETag was
+ * confirmed unchanged; false when offline / the HEAD or GET failed. Lets
+ * the caller record "I'm current at signature X" only when it really is,
+ * so a transient failure retries on a later tick instead of being
+ * suppressed. Drives the /api/state homeEtag-triggered refresh in
+ * main.cpp. See design/31. */
+const uint8_t *pack_cache_refresh(const char *sheet, bool *out_synced);
+
 /*
  * Same as pack_cache_active but for travel-sized place packs that the
  * server resolves with a per-cell geometry query
@@ -97,6 +114,28 @@ const uint8_t *pack_cache_load_only(const char *sheet);
  * best-effort: a false here just means the eventual
  * pack_cache_active_geom does the cold fetch as before. */
 bool pack_cache_prefetch_geom(const char *sheet, uint16_t cw, uint16_t ch);
+
+/* Same as pack_cache_prefetch_geom, plus *out_changed = true only when a
+ * fresh body was actually fetched + stored (false on the already-warm
+ * ETag-match skip). Lets the fetch worker's post-arrival refresh tell
+ * "confirmed current" (no repaint) from "newer pack landed" (caller
+ * reloads from cache + repaints) without handing fetched bytes across
+ * tasks. See design/35. */
+bool pack_cache_prefetch_geom_ex(const char *sheet, uint16_t cw, uint16_t ch,
+                                 bool *out_changed);
+
+/*
+ * Travel refresh (design/29): validate the cached place pack against the
+ * server WITHOUT blocking a cache-first render. Returns freshly-fetched +
+ * persisted bytes ONLY when the server pack changed since we cached it (or
+ * there was no cache yet). Returns NULL — with no PSRAM allocation — when
+ * the link is down, the ETag is unchanged, or the probe/fetch fails, in
+ * which case the caller keeps showing whatever it already rendered from
+ * cache. Returned bytes are owned by pack_cache (never freed), like the
+ * other resolvers. Geometry-keyed identically to pack_cache_active_geom.
+ */
+const uint8_t *pack_cache_refresh_geom(const char *sheet,
+                                       uint16_t cw, uint16_t ch);
 
 #ifdef __cplusplus
 }

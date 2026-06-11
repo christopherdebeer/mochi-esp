@@ -1195,7 +1195,18 @@ void voice_peer_get_transcript_json(char *out, size_t cap) {
     }
     char *s = cJSON_PrintUnformatted(arr);
     cJSON_Delete(arr);
-    if (s) { snprintf(out, cap, "%s", s); cJSON_free(s); }
+    if (s) {
+        /* All-or-nothing: a truncated array is invalid JSON, and it gets
+         * spliced verbatim into the voice-session POST body — better to
+         * drop the transcript than corrupt the whole telemetry row. */
+        int need = snprintf(out, cap, "%s", s);
+        if (need >= 0 && (size_t)need >= cap) {
+            ESP_LOGW(TAG, "transcript json %d B exceeds cap %u — dropped",
+                need, (unsigned)cap);
+            out[0] = 0;
+        }
+        cJSON_free(s);
+    }
 }
 
 int voice_peer_start(const char *openai_key, const char *instructions,

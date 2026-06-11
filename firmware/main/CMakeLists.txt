@@ -27,6 +27,7 @@ idf_component_register(
     SRCS
         "main.cpp"
         "font8x8.cpp"
+        "fb1bpp.cpp"
         "epd_ui.cpp"
         "nvs_creds.cpp"
         "wifi_prov.cpp"
@@ -47,6 +48,7 @@ idf_component_register(
         "power.cpp"
         "sprite_cache.cpp"
         "pack_cache.cpp"
+        "fetch_worker.cpp"
         "device_diag.c"
         "ota_update.cpp"
         "ota_channel.c"
@@ -59,6 +61,7 @@ idf_component_register(
         "time_sync.c"
         "pet_sync.cpp"
         "scene_pack.c"
+        "keepsakes.c"
         "pet_pack.c"
         "imagine.c"
         "consolidate.c"

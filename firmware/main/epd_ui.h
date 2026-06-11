@@ -17,12 +17,9 @@ namespace epd_ui {
 void clear(epaper_driver_display *epd);
 
 /* Render `text` starting at top-left pixel (x, y) at the given
- * scale (1 = 8x8, 2 = 16x16, etc.). Stops at the first NUL or when
- * the next glyph would clip the right edge.
- *
- * Note: this writes via EPD_DrawColorPixel — the slow path. Fine
- * for static screens (provisioning, status). NOT acceptable for
- * animation; see project memory on the per-pixel ceiling. */
+ * scale (1 = 8x8, 2 = 16x16, etc.). Opaque black-on-white, clipped
+ * at the panel edges. Thin wrapper over the shared fb1bpp core
+ * (design/36) writing into the driver's framebuffer. */
 void draw_text(epaper_driver_display *epd, int x, int y, int scale,
                const char *text);
 
@@ -65,5 +62,14 @@ void render_pair_failed(epaper_driver_display *epd);
 void render_key_portal(epaper_driver_display *epd,
                        const char *ip_str,
                        const char *url);
+
+/* Transient feedback toast (design/36): a compact bordered card
+ * centred on the panel, stamped OVER whatever the driver buffer
+ * currently holds (the menu/pet frame stays visible around it) and
+ * pushed with a partial refresh. line2 may be NULL/empty for a
+ * one-liner. The card is feedback only — it has no hit rect; the
+ * caller owns any linger, touch-drain, and repaint that follow. */
+void toast(epaper_driver_display *epd,
+           const char *line1, const char *line2);
 
 }  /* namespace epd_ui */

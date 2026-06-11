@@ -50,6 +50,22 @@ CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 # live in main/Kconfig.projbuild.
 CONFIG_MOCHI_LIGHT_SLEEP=y
 
+# Let the WiFi MAC/baseband power domain power down during light sleep
+# (not just modem-sleep the radio). Without this the radio domain stays
+# warm whenever WiFi is up in doze — telemetry/agent analysis (design/26)
+# found this is the bulk of the residual WiFi floor, and why the
+# disconnect-only WiFi-drop saved within-noise. Pairs with esp_wifi_stop
+# on doze entry (wifi_sta::set_radio_active).
+CONFIG_ESP_PHY_MAC_BB_PD=y
+
+# Power tiers (design/26). Auto-deep-sleep after 30 min idle (the only
+# state that powers octal PSRAM off → ~tens of µA) with a 2 h RTC
+# self-wake check-in. Pinned here (not just Kconfig defaults) so a fresh
+# build is deterministic regardless of any pre-existing generated
+# sdkconfig. main/Kconfig.projbuild documents the knobs.
+CONFIG_MOCHI_DEEP_SLEEP_TIMEOUT_S=1800
+CONFIG_MOCHI_DEEP_SLEEP_WAKE_S=7200
+
 # Compiler optimisation: -Og while we're in bring-up so backtraces are
 # meaningful. Flip to -O2 once peripherals are stable.
 CONFIG_COMPILER_OPTIMIZATION_DEBUG=y

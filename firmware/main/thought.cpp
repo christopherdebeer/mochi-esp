@@ -13,7 +13,7 @@
  */
 
 #include "thought.h"
-#include "font8x8.h"
+#include "fb1bpp.h"
 #include "mood.h"
 
 #include <string.h>
@@ -28,8 +28,13 @@
  * same number; if they drift, device and web will disagree on
  * what counts as "really needs sleep." */
 static const uint8_t SLEEPY_ENERGY_FLOOR = 10;
-/* Reserved for M2 (hungry need):
- *   static const uint8_t HUNGRY_FULLNESS_THRESHOLD = 35; */
+/* M2 (hungry need): fullness below this while awake surfaces a HUNGRY
+ * thought whose tap feeds. Matches the web side's critical-need
+ * threshold (`shared/thoughts.ts`: fullness < 35 → fed) — unlike
+ * SLEEPY, hunger keeps the web number because feeding is the loop the
+ * kid owns; a pet that's quietly starving with no invitation reads as
+ * neglect the kid wasn't told about. */
+static const uint8_t HUNGRY_FULLNESS_THRESHOLD = 35;
 
 /* ─── Bubble geometry ──────────────────────────────────────────────
  *
@@ -307,31 +312,15 @@ static void blit_icon_8x8(uint8_t *dst, size_t dst_w, size_t dst_h,
     }
 }
 
-/* Centered scale-1 glyph blit. Mirrors the inline pattern in
- * main.cpp's render_chrome — bit 0 of each row is the leftmost
- * column, set bits draw black, unset bits leave the framebuffer
+/* Centered scale-1 glyph blit — transparent black via the shared
+ * fb1bpp core (design/36); unset glyph bits leave the framebuffer
  * pixel alone. */
 static void blit_text_centered(uint8_t *dst, size_t dst_w, size_t dst_h,
                                const char *text, int x_center, int y_top) {
     if (!text || !*text) return;
-    const size_t stride = (dst_w + 7) >> 3;
-    const int len = (int)strlen(text);
-    int x = x_center - (len * 8) / 2;
-    for (int i = 0; i < len; i++) {
-        const uint8_t *g = font8x8_glyph(text[i]);
-        const int ox = x + i * 8;
-        for (int row = 0; row < 8; row++) {
-            const uint8_t bits = g[row];
-            for (int col = 0; col < 8; col++) {
-                if (!((bits >> col) & 1)) continue;
-                const int px = ox + col;
-                const int py = y_top + row;
-                if (px < 0 || py < 0 ||
-                    px >= (int)dst_w || py >= (int)dst_h) continue;
-                pixel_black(dst, stride, px, py);
-            }
-        }
-    }
+    const int x = x_center - fb1bpp::text_width(text, 1) / 2;
+    fb1bpp::text(dst, (int)dst_w, (int)dst_h, x, y_top, 1, text,
+                 /*black=*/true, /*opaque=*/false);
 }
 
 /* Word-wrap + vertically-centre a paged slice of a single string
@@ -492,6 +481,18 @@ extern "C" bool thought_generate(const pet_t *pet, int64_t /*now_ms*/,
         return true;
     }
 
+    /* HUNGRY — fullness below the threshold, awake. Tapping = feed.
+     * Ranked above SLEEPY to mirror the web chain's critical-need
+     * order; substrate bumps fullness on the mutate and the bubble
+     * stops regenerating once the stat clears the threshold. */
+    if (pet->stats.fullness < HUNGRY_FULLNESS_THRESHOLD) {
+        out->action_kind   = THOUGHT_ACTION_CARE_EVENT;
+        out->action_event  = EVENT_FED;
+        out->text          = "hungry...\ntap feed";
+        out->expires_at_ms = 0;
+        return true;
+    }
+
     /* SLEEPY — energy at or below the floor, awake. Tapping = put
      * mochi to sleep. The visible action on the device is symmetric
      * with the web side's care_direct{kind:"slept"} path: substrate
@@ -505,7 +506,7 @@ extern "C" bool thought_generate(const pet_t *pet, int64_t /*now_ms*/,
         return true;
     }
 
-    /* M2 chain extends here (hungry → fed, lonely → talk_seed). */
+    /* M3 chain extends here (lonely → talk_seed). */
     return false;
 }
 

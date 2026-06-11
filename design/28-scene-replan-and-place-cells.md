@@ -1,8 +1,11 @@
 # 28 — Scene re-plan from art, place-cells, and home as a growable world
 
-Status: vision re-plan **shipped** (studio); place-cell pinning + home-as-
-growable-place are **proposed** (this note). See design/19 (world-building),
-design/17 (travel), design/27 (voice tool observability).
+Status: vision re-plan **shipped** (studio); **edge-level place-cell pinning
+shipped** (0.3.19 — a nav_place zone carries a target cell in its data byte,
+device `scene_pack_set()`s it on arrival; studio exposes a `→cell` field, the
+encoder packs it, the world-graph draws the edge to the pinned cell); home-as-
+growable-place still **proposed**. See design/19 (world-building), design/17
+(travel), design/27 (voice tool observability).
 
 ## Context — what scene authoring does today
 

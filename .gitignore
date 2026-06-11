@@ -8,9 +8,6 @@ firmware/sdkconfig.old
 # README.md for what's vendored vs managed.
 firmware/managed_components/
 
-# ── val.town local state ──
-.vt/
-
 # ── Editor / OS ──
 .DS_Store
 .vscode/
@@ -18,6 +15,3 @@ firmware/managed_components/
 .claude/
 *.swp
 *~
-
-# ── Node / Deno (val.town side) ──
-node_modules/

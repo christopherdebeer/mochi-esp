@@ -12,6 +12,7 @@
 #include "device_diag.h"
 #include "board_pins.h"
 #include "touch.h"
+#include "wifi_sta.h"
 
 #if CONFIG_MOCHI_LIGHT_SLEEP
 #include "esp_pm.h"
@@ -44,6 +45,11 @@
 #else
 #define PWR_WIFI_PS 0
 #endif
+#if defined(CONFIG_MOCHI_DOZE_WIFI_DROP)
+#define PWR_WIFI_DROP 1
+#else
+#define PWR_WIFI_DROP 0
+#endif
 
 static const char *TAG = "power";
 
@@ -67,15 +73,18 @@ static uint32_t     s_doze_entries     = 0;
 static bool         s_net_online       = false;
 static bool         s_deep_sleep_req   = false;
 static bool         s_inited           = false;
+static bool         s_wifi_dropped     = false;  /* link dropped for doze */
 /* Actual-sleep telemetry: sampled each snapshot to report the % of
  * wall time core 0 spent idle (≈ light sleep) since the previous
  * snapshot — the ground truth the tier counter can't give. */
 static uint32_t     s_prev_idle_ct     = 0;
 static int64_t      s_prev_idle_wall   = 0;
 
+#if !PWR_WIFI_DROP
 /* Switch WiFi modem-sleep depth. Only meaningful once WiFi is up; the
  * call is a harmless no-op error otherwise, but we gate on s_net_online
- * to avoid log noise. Restoring to MIN_MODEM matches the IDF default. */
+ * to avoid log noise. Restoring to MIN_MODEM matches the IDF default.
+ * Unused when PWR_WIFI_DROP supersedes it (we drop the link instead). */
 static void wifi_powersave(bool deep) {
 #if PWR_WIFI_PS
     if (!s_net_online) return;
@@ -85,6 +94,28 @@ static void wifi_powersave(bool deep) {
     }
 #else
     (void)deep;
+#endif
+}
+#endif
+
+/* WiFi policy on a tier edge. Drop (design/26 Option 1) takes precedence
+ * over modem-sleep when configured: a dropped link can't also do PS. We
+ * only drop when actually online (mirrors the PS guard) and only
+ * reconnect what we dropped, so a never-connected device stays untouched
+ * and the boot-time net_worker connect is never sabotaged. */
+static void wifi_tier(bool entering_doze) {
+#if PWR_WIFI_DROP
+    if (entering_doze) {
+        if (s_net_online) {
+            wifi_sta::set_radio_active(false);
+            s_wifi_dropped = true;
+        }
+    } else if (s_wifi_dropped) {
+        wifi_sta::set_radio_active(true);
+        s_wifi_dropped = false;
+    }
+#else
+    wifi_powersave(entering_doze);
 #endif
 }
 
@@ -103,12 +134,12 @@ static void apply_tier(power_tier_t want, int64_t now_us) {
 
     if (want == POWER_TIER_DOZE) {
         s_doze_entries++;
-        wifi_powersave(true);
+        wifi_tier(true);
         touch::set_low_power(true);   /* stop the 10 Hz poll waking the SoC */
         device_diag_event(DIAG_INFO, "power", "doze", ctx);
         ESP_LOGI(TAG, "→ doze (live %lld ms)", (long long)prev_ms);
     } else {
-        wifi_powersave(false);
+        wifi_tier(false);
         touch::set_low_power(false);
         s_deep_sleep_req = false;
         device_diag_event(DIAG_INFO, "power", "wake", ctx);
@@ -150,11 +181,11 @@ void power_init(void) {
     esp_sleep_enable_gpio_wakeup();
 #endif
 
-    char ctx[176];
+    char ctx[192];
     snprintf(ctx, sizeof(ctx),
-        "{\"sleep_en\":%d,\"wifi_ps\":%d,\"doze_s\":%d,\"deep_s\":%d,"
-        "\"cpu_max\":%d,\"cpu_min\":%d}",
-        PWR_SLEEP_EN, PWR_WIFI_PS,
+        "{\"sleep_en\":%d,\"wifi_ps\":%d,\"wifi_drop\":%d,\"doze_s\":%d,"
+        "\"deep_s\":%d,\"cpu_max\":%d,\"cpu_min\":%d}",
+        PWR_SLEEP_EN, PWR_WIFI_PS, PWR_WIFI_DROP,
         (int)CONFIG_MOCHI_DOZE_TIMEOUT_S, (int)CONFIG_MOCHI_DEEP_SLEEP_TIMEOUT_S,
         (int)CONFIG_MOCHI_PM_CPU_MAX_MHZ, (int)CONFIG_MOCHI_PM_CPU_MIN_MHZ);
     device_diag_event(DIAG_INFO, "power", "init", ctx);

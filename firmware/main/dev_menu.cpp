@@ -13,7 +13,7 @@
 
 #include "board_pins.h"
 #include "epd_ui.h"
-#include "font8x8.h"
+#include "fb1bpp.h"
 #include "nvs_creds.h"
 #include "model_prefs.h"
 #include "ota_channel.h"
@@ -21,6 +21,7 @@
 #include "sprite_cache.h"   /* ui-icons-a cells for stat rows + tile icons (design/30) */
 #include "sprite_fetch.h"   /* lazy on-demand fetch of menu/tile icons */
 #include "compositor.h"     /* downsample native 80×80 → 48 */
+#include "keepsakes.h"      /* backpack screen — collected keepsakes (design/33) */
 
 static const char *TAG = "dev_menu";
 
@@ -270,6 +271,7 @@ static Mode advance(Mode m) {
         case Mode::MenuP3:      return Mode::MenuP1;
         case Mode::WifiModal:   return Mode::MenuP2;
         case Mode::ModelsModal: return Mode::MenuP2;
+        case Mode::Backpack:    return Mode::MenuP1;
         default:                return Mode::Live;
     }
 }
@@ -287,62 +289,38 @@ static const char *phase_label(int phase) {
 
 /* ─── Low-level draw helpers ────────────────────────────────────────
  *
- * These write straight into the e-paper driver's internal buffer via
- * EPD_DrawColorPixel (the slow per-pixel path — fine for a static menu
- * frame, not for animation). epd_ui::draw_text is opaque (paints a
- * white background under glyphs), so for white-on-black tile labels we
- * roll our own transparent glyph blit that only sets the ink pixels. */
+ * Thin wrappers over the shared fb1bpp core (design/36) writing into
+ * the driver's framebuffer. Kept as local names so the per-screen
+ * renderers below read unchanged; the `ink` colour parameter maps to
+ * fb1bpp's black flag. Glyphs draw transparent (ink bits only) so
+ * tile fills show through the gaps. */
 
 static void fill_rect(epaper_driver_display *epd, int x, int y, int w, int h,
                       uint8_t color) {
-    for (int dy = 0; dy < h; dy++)
-        for (int dx = 0; dx < w; dx++)
-            epd->EPD_DrawColorPixel(x + dx, y + dy, color);
+    fb1bpp::fill_rect(epd->EPD_Buffer(), MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
+                      x, y, w, h, color == DRIVER_COLOR_BLACK);
 }
 
 static void draw_rect_border(epaper_driver_display *epd, int x, int y,
                              int w, int h) {
-    for (int dx = 0; dx < w; dx++) {
-        epd->EPD_DrawColorPixel(x + dx, y, DRIVER_COLOR_BLACK);
-        epd->EPD_DrawColorPixel(x + dx, y + h - 1, DRIVER_COLOR_BLACK);
-    }
-    for (int dy = 0; dy < h; dy++) {
-        epd->EPD_DrawColorPixel(x, y + dy, DRIVER_COLOR_BLACK);
-        epd->EPD_DrawColorPixel(x + w - 1, y + dy, DRIVER_COLOR_BLACK);
-    }
+    fb1bpp::border(epd->EPD_Buffer(), MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
+                   x, y, w, h, 1);
 }
 
-/* Transparent glyph blit: only the set (ink) bits are drawn, in
- * `ink`; cleared bits are left as-is (so the tile fill shows through).
- * Clips at the right panel edge. */
 static void draw_glyphs(epaper_driver_display *epd, int x, int y, int scale,
                         const char *text, uint8_t ink) {
-    int cur = x;
-    for (const char *p = text; *p; p++) {
-        if (cur + 8 * scale > MOCHI_EPD_WIDTH) break;
-        const uint8_t *g = font8x8_glyph(*p);
-        for (int row = 0; row < 8; row++) {
-            const uint8_t bits = g[row];
-            for (int col = 0; col < 8; col++) {
-                if (!((bits >> col) & 1)) continue;
-                for (int dy = 0; dy < scale; dy++)
-                    for (int dx = 0; dx < scale; dx++)
-                        epd->EPD_DrawColorPixel(cur + col * scale + dx,
-                                                y + row * scale + dy, ink);
-            }
-        }
-        cur += 8 * scale;
-    }
+    fb1bpp::text(epd->EPD_Buffer(), MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
+                 x, y, scale, text, ink == DRIVER_COLOR_BLACK,
+                 /*opaque=*/false);
 }
 
 /* Centre `text` horizontally within [x, x+w) at vertical pixel y. */
 static void draw_glyphs_centered_in(epaper_driver_display *epd, int x, int w,
                                     int y, int scale, const char *text,
                                     uint8_t ink) {
-    const int tw = (int)strlen(text) * 8 * scale;
-    int tx = x + (w - tw) / 2;
-    if (tx < x + 1) tx = x + 1;
-    draw_glyphs(epd, tx, y, scale, text, ink);
+    fb1bpp::text_centered_in(epd->EPD_Buffer(), MOCHI_EPD_WIDTH,
+                             MOCHI_EPD_HEIGHT, x, w, y, scale, text,
+                             ink == DRIVER_COLOR_BLACK, /*opaque=*/false);
 }
 
 /* ─── Tiles ─────────────────────────────────────────────────────────*/
@@ -476,11 +454,12 @@ static void render_menu_p1(epaper_driver_display *epd) {
     draw_stat_row(epd, y, "star",  'E', s_energy); y += 20;
 
     const Tile tiles[] = {
-        { "Memories", TouchResult::Memories, false, nullptr, nullptr, "memories" },
-        { "Places",   TouchResult::Places,   false, nullptr, nullptr, "places" },
-        { "Go home",  TouchResult::GoHome,   false, nullptr, nullptr, "home" },
+        { "Memories", TouchResult::Memories,     false, nullptr, nullptr, "memories" },
+        { "Places",   TouchResult::Places,       false, nullptr, nullptr, "places" },
+        { "Backpack", TouchResult::OpenBackpack, false, nullptr, nullptr, "star" },
+        { "Go home",  TouchResult::GoHome,       false, nullptr, nullptr, "home" },
     };
-    layout_tiles(epd, tiles, 3, y + 4, 2);
+    layout_tiles(epd, tiles, 4, y + 4, 2);
 }
 
 /* Page 2: settings — network/device info header + a 2-col grid of the
@@ -593,6 +572,29 @@ static void render_models(epaper_driver_display *epd) {
  * changes; an in-place update (toggle flash/settle) uses a faster
  * partial refresh against the base image the last full render set.
  * `flash` marks one toggle tile's pill inverted for the ack frame. */
+/* Backpack: the keepsakes this device has pocketed (design/33). Read-only
+ * list — collected ones show their name, the rest stay a mystery. PWR exits.
+ * Reads the offline NVS set via keepsakes.c, so it works with no network. */
+static void render_backpack(epaper_driver_display *epd) {
+    char title[40];
+    snprintf(title, sizeof(title), "BACKPACK  %d/%d  (PWR exits)",
+             keepsakes_count_collected(), keepsakes_total());
+    epd_ui::draw_text_centered(epd, 4, 1, title);
+
+    const int total = keepsakes_total();
+    int y = 24;
+    for (int i = 0; i < total; i++) {
+        char row[40];
+        if (keepsakes_have(i)) snprintf(row, sizeof(row), "* %s", keepsakes_name(i));
+        else                   snprintf(row, sizeof(row), "- ? ? ?");
+        epd_ui::draw_text(epd, MARGIN + 4, y, 1, row);
+        y += 18;
+    }
+    if (keepsakes_count_collected() == 0) {
+        epd_ui::draw_text_centered(epd, y + 8, 1, "explore to find keepsakes");
+    }
+}
+
 static void render_mode(Mode m, bool full, TouchResult flash) {
     if (!s_epd || m == Mode::Live) return;
     s_flash = flash;
@@ -604,6 +606,7 @@ static void render_mode(Mode m, bool full, TouchResult flash) {
         case Mode::MenuP3:      render_menu_p3(s_epd); break;
         case Mode::WifiModal:   render_wifi(s_epd);    break;
         case Mode::ModelsModal: render_models(s_epd);  break;
+        case Mode::Backpack:    render_backpack(s_epd); break;
         default: s_flash = TouchResult::None; return;
     }
     s_flash = TouchResult::None;
@@ -664,6 +667,11 @@ TouchResult dispatch_touch(int x, int y) {
             return TouchResult::None;
         case TouchResult::OpenModels:
             s_mode = Mode::ModelsModal;
+            s_entered_mode_us = now;
+            render_mode(s_mode, /*full=*/true, TouchResult::None);
+            return TouchResult::None;
+        case TouchResult::OpenBackpack:
+            s_mode = Mode::Backpack;
             s_entered_mode_us = now;
             render_mode(s_mode, /*full=*/true, TouchResult::None);
             return TouchResult::None;

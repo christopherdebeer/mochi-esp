@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "board_pins.h"
+#include "fb1bpp.h"
 #include "font8x8.h"
 
 extern "C" {
@@ -31,45 +32,20 @@ void clear(epaper_driver_display *epd) {
     epd->EPD_Clear();
 }
 
-static void blit_glyph(epaper_driver_display *epd, char c,
-                       int ox, int oy, int scale) {
-    const uint8_t *g = font8x8_glyph(c);
-    for (int row = 0; row < 8; row++) {
-        uint8_t bits = g[row];
-        for (int col = 0; col < 8; col++) {
-            bool on = (bits >> col) & 1;
-            for (int dy = 0; dy < scale; dy++) {
-                for (int dx = 0; dx < scale; dx++) {
-                    int x = ox + col * scale + dx;
-                    int y = oy + row * scale + dy;
-                    if (x < 0 || y < 0 || x >= W || y >= H) continue;
-                    epd->EPD_DrawColorPixel(x, y,
-                        on ? DRIVER_COLOR_BLACK : DRIVER_COLOR_WHITE);
-                }
-            }
-        }
-    }
-}
+/* All text/shape drawing goes through the shared fb1bpp core
+ * (design/36) straight into the driver's framebuffer — same packed
+ * 1-bit layout EPD_LoadBuffer documents. */
 
 void draw_text(epaper_driver_display *epd, int x, int y, int scale,
                const char *text) {
-    int gw = 8 * scale;
-    int cur = x;
-    for (const char *p = text; *p; p++) {
-        if (cur + gw > W) break;
-        blit_glyph(epd, *p, cur, y, scale);
-        cur += gw;
-    }
+    fb1bpp::text(epd->EPD_Buffer(), W, H, x, y, scale, text,
+                 /*black=*/true, /*opaque=*/true);
 }
 
 void draw_text_centered(epaper_driver_display *epd, int y, int scale,
                         const char *text) {
-    int len = static_cast<int>(strlen(text));
-    int gw = 8 * scale;
-    int total = len * gw;
-    int x = (W - total) / 2;
-    if (x < 0) x = 0;
-    draw_text(epd, x, y, scale, text);
+    fb1bpp::text_centered(epd->EPD_Buffer(), W, H, y, scale, text,
+                          /*black=*/true, /*opaque=*/true);
 }
 
 /*
@@ -116,33 +92,12 @@ static constexpr int PET_EXPR_COUNT =
     (int)(sizeof(PET_EXPR_NAMES) / sizeof(PET_EXPR_NAMES[0]));
 #endif
 
-/* Stamp on-bits only, in the requested colour. Off-bits leave the
- * existing framebuffer pixel alone — so the splash artwork shows through
- * the gaps between glyphs (when no background is filled). */
-static void blit_glyph_overlay(epaper_driver_display *epd, char c,
-                               int ox, int oy, int scale,
-                               COLOR_IMAGE colour) {
-    const uint8_t *g = font8x8_glyph(c);
-    for (int row = 0; row < 8; row++) {
-        uint8_t bits = g[row];
-        for (int col = 0; col < 8; col++) {
-            if (!((bits >> col) & 1)) continue;
-            for (int dy = 0; dy < scale; dy++) {
-                for (int dx = 0; dx < scale; dx++) {
-                    int x = ox + col * scale + dx;
-                    int y = oy + row * scale + dy;
-                    if (x < 0 || y < 0 || x >= W || y >= H) continue;
-                    epd->EPD_DrawColorPixel(x, y, colour);
-                }
-            }
-        }
-    }
-}
-
 /* Fit `text` into (x,y,w,h): the largest integer glyph scale that fits,
  * centred. `light` → white glyphs (legible on dark art), else black.
  * `fill_bg` paints the rect the opposite colour first so the text reads on
- * any background — used for the default (no-zone) placement. design/20. */
+ * any background — used for the default (no-zone) placement. design/20.
+ * Glyphs are drawn transparent (on-bits only) so the splash artwork
+ * shows through the gaps when no background is filled. */
 static void draw_text_in_rect(epaper_driver_display *epd, int x, int y,
                               int w, int h, const char *text,
                               bool light, bool fill_bg) {
@@ -150,30 +105,16 @@ static void draw_text_in_rect(epaper_driver_display *epd, int x, int y,
     const int len = (int)strlen(text);
     int scale = 1;
     while (len * 8 * (scale + 1) <= w && 8 * (scale + 1) <= h) scale++;
-    const int textW = len * 8 * scale;
     const int textH = 8 * scale;
-    int tx = x + (w - textW) / 2;
     int ty = y + (h - textH) / 2;
-    if (tx < x) tx = x;
     if (ty < y) ty = y;
 
-    const COLOR_IMAGE fg = light ? DRIVER_COLOR_WHITE : DRIVER_COLOR_BLACK;
+    uint8_t *fb = epd->EPD_Buffer();
     if (fill_bg) {
-        const COLOR_IMAGE bg = light ? DRIVER_COLOR_BLACK : DRIVER_COLOR_WHITE;
-        for (int yy = y; yy < y + h; yy++) {
-            if (yy < 0 || yy >= H) continue;
-            for (int xx = x; xx < x + w; xx++) {
-                if (xx < 0 || xx >= W) continue;
-                epd->EPD_DrawColorPixel(xx, yy, bg);
-            }
-        }
+        fb1bpp::fill_rect(fb, W, H, x, y, w, h, /*black=*/light);
     }
-    int cur = tx;
-    for (const char *p = text; *p; p++) {
-        if (cur + 8 * scale > W) break;
-        blit_glyph_overlay(epd, *p, cur, ty, scale, fg);
-        cur += 8 * scale;
-    }
+    fb1bpp::text_centered_in(fb, W, H, x, w, ty, scale, text,
+                             /*black=*/!light, /*opaque=*/false);
 }
 
 void render_boot_splash(epaper_driver_display *epd, const char *title,
@@ -303,12 +244,8 @@ int draw_qr_centered(epaper_driver_display *epd, int top_y,
                     int x0 = ox + mx * scale;
                     int y0 = top_y + my * scale;
                     if (y0 + scale > H) continue;
-                    for (int dy = 0; dy < scale; dy++) {
-                        for (int dx = 0; dx < scale; dx++) {
-                            epd->EPD_DrawColorPixel(x0 + dx, y0 + dy,
-                                                    DRIVER_COLOR_BLACK);
-                        }
-                    }
+                    fb1bpp::fill_rect(epd->EPD_Buffer(), W, H,
+                                      x0, y0, scale, scale, true);
                 }
             }
             rendered = px;
@@ -427,6 +364,30 @@ void render_key_portal(epaper_driver_display *epd,
     draw_text_centered(epd, below_y,      1, "or open on phone:");
     draw_text_centered(epd, below_y + 16, 1, ip_str);
     draw_text_centered(epd, 184,          1, "Tap to dismiss");
+}
+
+void toast(epaper_driver_display *epd,
+           const char *line1, const char *line2) {
+    /* Compact bordered card stamped OVER whatever the driver buffer
+     * currently holds (menu or pet frame stays visible around it) —
+     * replaces the full-screen clear()+text takeovers that blanked
+     * the panel for a two-line acknowledgement (design/36). The
+     * caller owns the linger + repaint that follows. */
+    uint8_t *fb = epd->EPD_Buffer();
+    const int card_w = 168;
+    const int card_h = 52;
+    const int cx = (W - card_w) / 2;
+    const int cy = (H - card_h) / 2;
+    fb1bpp::fill_rect(fb, W, H, cx, cy, card_w, card_h, false);
+    fb1bpp::border(fb, W, H, cx, cy, card_w, card_h, 2);
+    const bool two = line2 && line2[0];
+    const int ty = cy + (two ? 12 : (card_h - 8) / 2);
+    fb1bpp::text_centered(fb, W, H, ty, 1, line1, true, false);
+    if (two) {
+        fb1bpp::text_centered(fb, W, H, ty + 16, 1, line2, true, false);
+    }
+    epd->EPD_Init_Partial();
+    epd->EPD_DisplayPart();
 }
 
 }  /* namespace epd_ui */
