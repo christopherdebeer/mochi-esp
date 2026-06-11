@@ -13,7 +13,7 @@
  */
 
 #include "thought.h"
-#include "font8x8.h"
+#include "fb1bpp.h"
 #include "mood.h"
 
 #include <string.h>
@@ -312,31 +312,15 @@ static void blit_icon_8x8(uint8_t *dst, size_t dst_w, size_t dst_h,
     }
 }
 
-/* Centered scale-1 glyph blit. Mirrors the inline pattern in
- * main.cpp's render_chrome — bit 0 of each row is the leftmost
- * column, set bits draw black, unset bits leave the framebuffer
+/* Centered scale-1 glyph blit — transparent black via the shared
+ * fb1bpp core (design/36); unset glyph bits leave the framebuffer
  * pixel alone. */
 static void blit_text_centered(uint8_t *dst, size_t dst_w, size_t dst_h,
                                const char *text, int x_center, int y_top) {
     if (!text || !*text) return;
-    const size_t stride = (dst_w + 7) >> 3;
-    const int len = (int)strlen(text);
-    int x = x_center - (len * 8) / 2;
-    for (int i = 0; i < len; i++) {
-        const uint8_t *g = font8x8_glyph(text[i]);
-        const int ox = x + i * 8;
-        for (int row = 0; row < 8; row++) {
-            const uint8_t bits = g[row];
-            for (int col = 0; col < 8; col++) {
-                if (!((bits >> col) & 1)) continue;
-                const int px = ox + col;
-                const int py = y_top + row;
-                if (px < 0 || py < 0 ||
-                    px >= (int)dst_w || py >= (int)dst_h) continue;
-                pixel_black(dst, stride, px, py);
-            }
-        }
-    }
+    const int x = x_center - fb1bpp::text_width(text, 1) / 2;
+    fb1bpp::text(dst, (int)dst_w, (int)dst_h, x, y_top, 1, text,
+                 /*black=*/true, /*opaque=*/false);
 }
 
 /* Word-wrap + vertically-centre a paged slice of a single string

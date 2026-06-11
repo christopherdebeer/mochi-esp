@@ -13,7 +13,7 @@
 
 #include "board_pins.h"
 #include "epd_ui.h"
-#include "font8x8.h"
+#include "fb1bpp.h"
 #include "nvs_creds.h"
 #include "model_prefs.h"
 #include "ota_channel.h"
@@ -289,62 +289,38 @@ static const char *phase_label(int phase) {
 
 /* ─── Low-level draw helpers ────────────────────────────────────────
  *
- * These write straight into the e-paper driver's internal buffer via
- * EPD_DrawColorPixel (the slow per-pixel path — fine for a static menu
- * frame, not for animation). epd_ui::draw_text is opaque (paints a
- * white background under glyphs), so for white-on-black tile labels we
- * roll our own transparent glyph blit that only sets the ink pixels. */
+ * Thin wrappers over the shared fb1bpp core (design/36) writing into
+ * the driver's framebuffer. Kept as local names so the per-screen
+ * renderers below read unchanged; the `ink` colour parameter maps to
+ * fb1bpp's black flag. Glyphs draw transparent (ink bits only) so
+ * tile fills show through the gaps. */
 
 static void fill_rect(epaper_driver_display *epd, int x, int y, int w, int h,
                       uint8_t color) {
-    for (int dy = 0; dy < h; dy++)
-        for (int dx = 0; dx < w; dx++)
-            epd->EPD_DrawColorPixel(x + dx, y + dy, color);
+    fb1bpp::fill_rect(epd->EPD_Buffer(), MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
+                      x, y, w, h, color == DRIVER_COLOR_BLACK);
 }
 
 static void draw_rect_border(epaper_driver_display *epd, int x, int y,
                              int w, int h) {
-    for (int dx = 0; dx < w; dx++) {
-        epd->EPD_DrawColorPixel(x + dx, y, DRIVER_COLOR_BLACK);
-        epd->EPD_DrawColorPixel(x + dx, y + h - 1, DRIVER_COLOR_BLACK);
-    }
-    for (int dy = 0; dy < h; dy++) {
-        epd->EPD_DrawColorPixel(x, y + dy, DRIVER_COLOR_BLACK);
-        epd->EPD_DrawColorPixel(x + w - 1, y + dy, DRIVER_COLOR_BLACK);
-    }
+    fb1bpp::border(epd->EPD_Buffer(), MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
+                   x, y, w, h, 1);
 }
 
-/* Transparent glyph blit: only the set (ink) bits are drawn, in
- * `ink`; cleared bits are left as-is (so the tile fill shows through).
- * Clips at the right panel edge. */
 static void draw_glyphs(epaper_driver_display *epd, int x, int y, int scale,
                         const char *text, uint8_t ink) {
-    int cur = x;
-    for (const char *p = text; *p; p++) {
-        if (cur + 8 * scale > MOCHI_EPD_WIDTH) break;
-        const uint8_t *g = font8x8_glyph(*p);
-        for (int row = 0; row < 8; row++) {
-            const uint8_t bits = g[row];
-            for (int col = 0; col < 8; col++) {
-                if (!((bits >> col) & 1)) continue;
-                for (int dy = 0; dy < scale; dy++)
-                    for (int dx = 0; dx < scale; dx++)
-                        epd->EPD_DrawColorPixel(cur + col * scale + dx,
-                                                y + row * scale + dy, ink);
-            }
-        }
-        cur += 8 * scale;
-    }
+    fb1bpp::text(epd->EPD_Buffer(), MOCHI_EPD_WIDTH, MOCHI_EPD_HEIGHT,
+                 x, y, scale, text, ink == DRIVER_COLOR_BLACK,
+                 /*opaque=*/false);
 }
 
 /* Centre `text` horizontally within [x, x+w) at vertical pixel y. */
 static void draw_glyphs_centered_in(epaper_driver_display *epd, int x, int w,
                                     int y, int scale, const char *text,
                                     uint8_t ink) {
-    const int tw = (int)strlen(text) * 8 * scale;
-    int tx = x + (w - tw) / 2;
-    if (tx < x + 1) tx = x + 1;
-    draw_glyphs(epd, tx, y, scale, text, ink);
+    fb1bpp::text_centered_in(epd->EPD_Buffer(), MOCHI_EPD_WIDTH,
+                             MOCHI_EPD_HEIGHT, x, w, y, scale, text,
+                             ink == DRIVER_COLOR_BLACK, /*opaque=*/false);
 }
 
 /* ─── Tiles ─────────────────────────────────────────────────────────*/

@@ -47,6 +47,7 @@
 #include "wifi_sta.h"
 #include "sprite_fetch.h"
 #include "pack_cache.h"
+#include "fb1bpp.h"
 #include "fetch_worker.h"
 #include "touch.h"
 #include "rtc.h"
@@ -57,7 +58,6 @@
 #include "factory_reset.h"
 #include "compositor.h"
 #include "ui_dialog.h"
-#include "font8x8.h"
 #include "battery.h"
 #include "sleep_gesture.h"
 #include "power.h"
@@ -1195,26 +1195,12 @@ extern "C" void app_main(void) {
                 (unsigned)batt_pct);
         }
 
-        /* One pass blits a glyph string at a chosen x. Reused for
-         * each of the three segments. */
+        /* One pass blits a glyph string at a chosen x (shared fb1bpp
+         * core, transparent black). Reused for each segment. */
         auto blit_status_text = [&](const char *s, int x_origin) {
-            for (size_t i = 0; s[i]; i++) {
-                const uint8_t *g = font8x8_glyph(s[i]);
-                const int ox = x_origin + (int)i * 8;
-                for (int row = 0; row < 8; row++) {
-                    const uint8_t bits = g[row];
-                    for (int col = 0; col < 8; col++) {
-                        if (!((bits >> col) & 1)) continue;
-                        const int px = ox + col;
-                        const int py = STATUS_TEXT_Y + row;
-                        if (px < 0 || py < 0 ||
-                            px >= (int)MOCHI_EPD_WIDTH ||
-                            py >= (int)MOCHI_EPD_HEIGHT) continue;
-                        const size_t off = (size_t)py * 25 + ((size_t)px >> 3);
-                        composite[off] &= (uint8_t)~(1u << (7 - ((size_t)px & 7)));
-                    }
-                }
-            }
+            fb1bpp::text(composite, (int)MOCHI_EPD_WIDTH,
+                         (int)MOCHI_EPD_HEIGHT, x_origin, STATUS_TEXT_Y,
+                         1, s, /*black=*/true, /*opaque=*/false);
         };
 
         /* Left: time. Right: wifi-glyph + battery. Centre: pet name
@@ -1628,26 +1614,9 @@ extern "C" void app_main(void) {
          * PWR to wake" for the PWR-tap sleep path, "Needs charge -
          * plug in" for the low-battery soft-power-down). */
         const char *line = status_text ? status_text : "Asleep";
-        const int text_w = (int)strlen(line) * 8;
-        int text_x = ((int)MOCHI_EPD_WIDTH - text_w) / 2;
-        if (text_x < 0) text_x = 0;
-        for (size_t i = 0; line[i]; i++) {
-            const uint8_t *g = font8x8_glyph(line[i]);
-            const int ox = text_x + (int)i * 8;
-            for (int row = 0; row < 8; row++) {
-                const uint8_t bits = g[row];
-                for (int col = 0; col < 8; col++) {
-                    if (!((bits >> col) & 1)) continue;
-                    const int px = ox + col;
-                    const int py = STATUS_TEXT_Y + row;
-                    if (px < 0 || py < 0 ||
-                        px >= (int)MOCHI_EPD_WIDTH ||
-                        py >= (int)MOCHI_EPD_HEIGHT) continue;
-                    const size_t off = (size_t)py * 25 + ((size_t)px >> 3);
-                    composite[off] &= (uint8_t)~(1u << (7 - ((size_t)px & 7)));
-                }
-            }
-        }
+        fb1bpp::text_centered(composite, (int)MOCHI_EPD_WIDTH,
+                              (int)MOCHI_EPD_HEIGHT, STATUS_TEXT_Y, 1,
+                              line, /*black=*/true, /*opaque=*/false);
         /* 1-pixel divider, same as the awake bar. */
         const size_t row_off = (size_t)(STATUS_BAR_H - 1) * 25;
         memset(composite + row_off, 0x00, 25);
@@ -2351,13 +2320,7 @@ extern "C" void app_main(void) {
                         case dev_menu::TouchResult::UpdateNow:
                             ESP_LOGI(TAG, "dev_menu → OTA check now");
                             ota_update::check_now();
-                            epd_ui::clear(epd);
-                            epd_ui::draw_text_centered(epd, 84, 1,
-                                "Checking for");
-                            epd_ui::draw_text_centered(epd, 104, 1,
-                                "updates...");
-                            epd->EPD_Init_Partial();
-                            epd->EPD_DisplayPart();
+                            epd_ui::toast(epd, "Checking for", "updates...");
                             break;
                         case dev_menu::TouchResult::ConsolidateNow: {
                             /* design/27: force a consolidation pass now —
@@ -2368,13 +2331,9 @@ extern "C" void app_main(void) {
                             const bool kicked = consolidate_start_forced();
                             ESP_LOGI(TAG, "dev_menu → consolidate now (kicked=%d)",
                                 kicked);
-                            epd_ui::clear(epd);
-                            epd_ui::draw_text_centered(epd, 84, 1,
-                                kicked ? "Consolidating" : "Busy - try");
-                            epd_ui::draw_text_centered(epd, 104, 1,
+                            epd_ui::toast(epd,
+                                kicked ? "Consolidating" : "Busy - try",
                                 kicked ? "in background..." : "again shortly");
-                            epd->EPD_Init_Partial();
-                            epd->EPD_DisplayPart();
                             break;
                         }
                         case dev_menu::TouchResult::ChangeWifi:
@@ -2425,14 +2384,10 @@ extern "C" void app_main(void) {
                             ESP_LOGI(TAG, "dev_menu → %s (not yet wired)",
                                 act == dev_menu::TouchResult::Memories
                                     ? "memories" : "places");
-                            epd_ui::clear(epd);
-                            epd_ui::draw_text_centered(epd, 84, 1,
+                            epd_ui::toast(epd,
                                 act == dev_menu::TouchResult::Memories
-                                    ? "Memories" : "Places");
-                            epd_ui::draw_text_centered(epd, 104, 1,
+                                    ? "Memories" : "Places",
                                 "coming soon...");
-                            epd->EPD_Init_Partial();
-                            epd->EPD_DisplayPart();
                             vTaskDelay(pdMS_TO_TICKS(1200));
                             /* Drain any touch events the user generated
                              * while the toast was on screen (a finger
@@ -2466,11 +2421,7 @@ extern "C" void app_main(void) {
                                 }
                             }
                             if (!found) { ESP_LOGW(TAG, "ssid not stored"); break; }
-                            epd_ui::clear(epd);
-                            epd_ui::draw_text_centered(epd, 84, 1, "Switching to");
-                            epd_ui::draw_text_centered(epd, 104, 1, ssid);
-                            epd->EPD_Init_Partial();
-                            epd->EPD_DisplayPart();
+                            epd_ui::toast(epd, "Switching to", ssid);
                             char ip[16] = {};
                             if (wifi_sta::switch_to(&c, ip, sizeof(ip))) {
                                 nvs_creds_append(&c);   /* promote to MRU */

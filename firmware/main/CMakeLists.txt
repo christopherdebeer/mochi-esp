@@ -27,6 +27,7 @@ idf_component_register(
     SRCS
         "main.cpp"
         "font8x8.cpp"
+        "fb1bpp.cpp"
         "epd_ui.cpp"
         "nvs_creds.cpp"
         "wifi_prov.cpp"

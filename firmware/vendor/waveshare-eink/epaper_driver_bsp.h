@@ -77,5 +77,16 @@ public:
      * tail untouched. See vendor/waveshare-eink/README.md.
      */
     void EPD_LoadBuffer(const uint8_t *src, size_t len);
+
+    /*
+     * NOT VENDOR CODE — added 2026-06-11 for the shared 1-bit drawing
+     * core (fb1bpp, design/36). Exposes the driver's internal
+     * framebuffer so UI modules can draw text/shapes with the shared
+     * helpers instead of per-pixel EPD_DrawColorPixel calls. Same
+     * layout as EPD_LoadBuffer documents above. The buffer is
+     * allocated (and asserted) in the constructor, so this is always
+     * valid on a constructed display.
+     */
+    uint8_t *EPD_Buffer() { return buffer; }
 };
 #endif
